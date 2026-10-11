@@ -162,6 +162,13 @@ async def check_pack_update(ctx: AppContext, label: str, server_id: str, older: 
     row = await wait_job(ctx, ctx.pack_updates.submit_update(ctx.servers.get(server_id)), timeout=3600)
     show_job(row)
     server = ctx.servers.get(server_id)
+    latest = (ctx.repo.list_updates(server_id) or [{}])[0]
+    if latest.get("status") == "rolled_back":  # the new version does not start as a server (some packs cannot): the safety net must work
+        print(f"        the new version did not start, so the manager rolled back by itself: {(latest.get('message') or '')[:300]}")
+        check((server.spec.get("pack") or {}).get("version_id") == older["id"] and ctx.pm.runtime(server_id).state == "running",
+              "the update that could not start was rolled back automatically and the old version runs again")
+        check(set((ctx.servers.jvm.lock_of(server) or {}).get("files", {})) == files_before, "its files are exactly the ones from before the update")
+        return
     files_after = set((ctx.servers.jvm.lock_of(server) or {}).get("files", {}))
     check(row["status"] == "success", "the update was applied", row["message"] or "")
     check((server.spec.get("pack") or {}).get("version_id") == newest["id"] and ctx.pm.runtime(server_id).state == "running",

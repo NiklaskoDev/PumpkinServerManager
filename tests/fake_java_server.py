@@ -224,6 +224,18 @@ async def main() -> int:
         once.write_text("1")
         log("Installed 3 missing mods; the game has to be restarted", thread="missing-mods-download-watcher")
         return 0
+    if BEHAVIOR.get("fatal_start"):  # Forge: a client-only mod fails to load. The server says so and then ends ("exit") or hangs ("hang")
+        log("Failed to start the minecraft server", "ERROR", "main")
+        out = sys.stdout.buffer
+        for text in ("net.minecraftforge.fml.LoadingFailedException: Loading errors encountered: [",
+                     "\tCIT Resewn (citresewn) has failed to load correctly",
+                     "§7java.lang.NoClassDefFoundError: net/minecraft/client/renderer/texture/atlas/SpriteSource,",
+                     "\tat net.minecraftforge.fml.ModLoader.gatherAndInitializeMods(ModLoader.java:149)", "]"):
+            out.write(text.encode("utf-8") + b"\n")
+        out.flush()
+        if BEHAVIOR["fatal_start"] == "hang":
+            await asyncio.sleep(3600)
+        return 1
     if BEHAVIOR.get("crash_if_present") and Path(BEHAVIOR["crash_if_present"]).exists():  # a mod that does not get along with the rest
         print("Exception in thread \"main\" java.lang.NoSuchMethodError: simulated mod conflict", flush=True)
         return 1

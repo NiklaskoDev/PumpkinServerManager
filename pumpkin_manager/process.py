@@ -26,6 +26,8 @@ log = logging.getLogger(__name__)
 
 READY_RE = re.compile(r"server is now running", re.IGNORECASE)
 PUMPKIN_START_HINT = "if Pumpkin rejected pumpkin.toml it silently falls back to default settings."
+FAILURE_EXIT_GRACE = 20.0  # seconds a server gets to end by itself after it said it could not start
+_FORMAT_CODES = re.compile("§.")  # Minecraft's formatting codes, which mod loaders put into their error messages
 MAX_LINE = 8000
 MAX_LOG_FILE_BYTES = 20 * 1024 * 1024
 BACKLOG_LINES = 3000
@@ -53,10 +55,12 @@ class Runtime:
     timeout_hint: str = PUMPKIN_START_HINT  # what to suggest when it never comes up
     clean_exit_hint: str = ""  # what to say when it ends by itself (exit code 0) while starting
     strict_ping: bool = False  # a server-list reply only counts as "up" when it names a version (Forge answers early with none)
+    fail_re: re.Pattern[str] | None = None  # the console line that says the server could not start (and will not come up)
     log: deque = field(default_factory=lambda: deque(maxlen=BACKLOG_LINES))
     seq: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     exited: asyncio.Event = field(default_factory=asyncio.Event)
+    failed: asyncio.Event = field(default_factory=asyncio.Event)
     # live information refreshed by the monitor
     players_online: int = 0
     players_max: int = 0
@@ -128,6 +132,7 @@ class ProcessManager:
         timeout_hint: str | None = None,
         strict_ping: bool = False,
         clean_exit_hint: str = "",
+        fail_re: re.Pattern[str] | None = None,
     ) -> None:
         rt = self.runtime(server_id)
         if rt.is_active:
@@ -138,6 +143,7 @@ class ProcessManager:
         rt.timeout_hint = PUMPKIN_START_HINT if timeout_hint is None else timeout_hint
         rt.strict_ping = strict_ping
         rt.clean_exit_hint = clean_exit_hint
+        rt.fail_re = fail_re
         self._open_logfile(rt)
         self._sys(rt, f"Starting: {' '.join(argv)}")
         creation: dict[str, Any] = {}
@@ -246,6 +252,7 @@ class ProcessManager:
         rt.stopping_requested = False
         rt.ready = asyncio.Event()
         rt.exited = asyncio.Event()
+        rt.failed = asyncio.Event()
         rt.players_online = rt.players_max = 0
         rt.player_names = []
         rt.mc_version = rt.motd = None
@@ -293,8 +300,11 @@ class ProcessManager:
                 break
             text = raw.decode("utf-8", "replace").rstrip("\r\n")
             self._append(rt, "out", text)
-            if not rt.ready.is_set() and rt.ready_re.search(strip_ansi(text)):
+            plain = strip_ansi(text)
+            if not rt.ready.is_set() and rt.ready_re.search(plain):
                 rt.ready.set()
+            elif rt.fail_re is not None and rt.state == "starting" and not rt.failed.is_set() and rt.fail_re.search(plain):
+                rt.failed.set()
 
     async def _watch(self, rt: Runtime, proc: asyncio.subprocess.Process, pump: asyncio.Task) -> None:
         code = await proc.wait()
@@ -326,8 +336,8 @@ class ProcessManager:
 
     @staticmethod
     async def _pause(rt: Runtime, seconds: float) -> None:
-        """Sleep, but wake up as soon as the console says the server is up or the process ends."""
-        waiting = [asyncio.ensure_future(rt.ready.wait()), asyncio.ensure_future(rt.exited.wait())]
+        """Sleep, but wake up as soon as the console says the server is up or has failed, or the process ends."""
+        waiting = [asyncio.ensure_future(event.wait()) for event in (rt.ready, rt.exited, rt.failed)]
         try:
             await asyncio.wait(waiting, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -347,6 +357,11 @@ class ProcessManager:
                 raise error
             if rt.ready.is_set():
                 return
+            if rt.failed.is_set():
+                # The server said it cannot start. It normally ends right after; a modded JVM can stay alive on threads of its own.
+                if not await self._wait_exit(rt, FAILURE_EXIT_GRACE):
+                    await self._terminate_hard(rt, grace=5)
+                raise ProcessError(self._describe_early_exit(rt))
             if port:
                 try:
                     info = await server_list_ping("127.0.0.1", port, timeout=1.5)
@@ -362,10 +377,29 @@ class ProcessManager:
             await self._pause(rt, pause)
 
     def _describe_early_exit(self, rt: Runtime) -> str:
+        if rt.failed.is_set():
+            return f"The server reported that it could not start.{self._failure_excerpt(rt)}"
         tail = [strip_ansi(line["m"]) for line in list(rt.log)[-6:] if line["s"] == "out"]
         detail = f" Last output: {' | '.join(tail)}" if tail else ""
         hint = f" {rt.clean_exit_hint}" if rt.exit_code == 0 and rt.clean_exit_hint else ""
         return f"The server process exited during startup (exit code {rt.exit_code}).{hint}{detail}"
+
+    @staticmethod
+    def _failure_excerpt(rt: Runtime) -> str:
+        """What the server said after its 'could not start' line, without the stack frames: for a modpack that is usually the
+        name of the mod that failed to load and why."""
+        lines = [strip_ansi(entry["m"]).rstrip() for entry in rt.log if entry["s"] == "out"]
+        start = next((i for i in range(len(lines) - 1, -1, -1) if rt.fail_re is not None and rt.fail_re.search(lines[i])), None)
+        if start is None:
+            return ""
+        picked = []
+        for line in lines[start + 1:start + 80]:
+            plain = _FORMAT_CODES.sub("", line).strip()  # Minecraft colour codes (a section sign and a character)
+            if plain and not plain.startswith(("at ", "...")):
+                picked.append(plain)
+            if len(picked) >= 12:
+                break
+        return f" Last output: {' | '.join(picked)}"[:1500] if picked else ""
 
     async def _wait_exit(self, rt: Runtime, timeout: float) -> bool:
         try:

@@ -44,6 +44,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 READY_RE = re.compile(r"\bDone \([0-9.,]+s\)!")  # "Done (12.345s)! For help, type "help"": printed by vanilla and every loader
+# What vanilla, Forge and NeoForge log when a server cannot start (a mod that fails to load, for instance). Forge and NeoForge can
+# stay alive afterwards on threads of their own, so the manager acts on this line instead of waiting for the startup timeout.
+FAIL_RE = re.compile(r"Failed to start the minecraft server")
 EULA_URL = "https://aka.ms/MinecraftEULA"
 _SECRET_ALPHABET = string.ascii_letters + string.digits
 MIN_MEMORY_MB, MAX_MEMORY_MB = 512, 1024 * 1024
@@ -75,6 +78,7 @@ class JavaLaunch:
     argv: list[str]
     env: dict[str, str]
     ready_re: re.Pattern[str]
+    fail_re: re.Pattern[str]
     label: str
 
 
@@ -492,7 +496,7 @@ class JavaServerService:
         modpack, _ = self.describe(rec)
         label = f"{modpack['title'] or 'the modpack'} ({modpack['loader']['label']}, Java {major})"
         argv = self.build_argv(rec, java.java, directory)
-        return JavaLaunch(argv=self.argv_wrapper(argv) if self.argv_wrapper else argv, env=env, ready_re=READY_RE, label=label)
+        return JavaLaunch(argv=self.argv_wrapper(argv) if self.argv_wrapper else argv, env=env, ready_re=READY_RE, fail_re=FAIL_RE, label=label)
 
     # ------------------------------------------------------------ player lists
     def lists_dir(self, rec: ServerRecord) -> Path:

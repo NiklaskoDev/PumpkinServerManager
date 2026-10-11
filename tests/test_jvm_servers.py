@@ -285,6 +285,22 @@ async def test_a_server_that_opens_its_port_early_is_not_called_up_before_it_say
     assert sum("still starting" in line for line in lines) <= 2, "the console is not filled with readiness probes while the server loads"
 
 
+@pytest.mark.parametrize("how", ["exit", "hang"])
+async def test_a_server_that_says_it_cannot_start_is_stopped_at_once_and_the_reason_is_shown(jvm, monkeypatch, how):
+    """Forge keeps the JVM alive after 'Failed to start the minecraft server'; waiting for the startup timeout helps nobody."""
+    from pumpkin_manager import process
+
+    monkeypatch.setattr(process, "FAILURE_EXIT_GRACE", 1.0)
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "Fatal", start=False)
+    world.behavior["fatal_start"] = how
+    row = await finish(ctx, ctx.servers.submit_start(rec), timeout=60)
+    assert row["status"] == "failed" and "could not start" in row["message"]
+    assert "CIT Resewn (citresewn) has failed to load correctly" in row["message"] and "NoClassDefFoundError" in row["message"]
+    assert "§" not in row["message"] and "gatherAndInitializeMods" not in row["message"], "no colour codes, no stack frames"
+    assert ctx.pm.runtime(rec.id).proc is None and ctx.pm.runtime(rec.id).state == "crashed"
+
+
 async def test_a_pack_that_ends_its_first_start_on_purpose_is_started_once_more_by_itself(jvm):
     """Some packs (Better MC) download their mods at the first start and then close the server on purpose."""
     world, ctx = jvm

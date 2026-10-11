@@ -350,14 +350,14 @@ class ServerService:
             ctx.step("The server is already running")
             return
         directory = self.server_dir(rec.id)
-        ready_re = timeout_hint = None
+        ready_re = timeout_hint = fail_re = None
         if rec.is_java:
             if self.jvm is None:
                 raise ServerError("Java servers are not available in this installation.")
             if not directory.is_dir():
                 raise ServerError("The server folder is missing.")
             launch = await self.jvm.prepare_start(rec, ctx)
-            argv, env, label, ready_re, timeout_hint = launch.argv, launch.env, launch.label, launch.ready_re, JAVA_START_HINT
+            argv, env, label, ready_re, timeout_hint, fail_re = launch.argv, launch.env, launch.label, launch.ready_re, JAVA_START_HINT, launch.fail_re
         else:
             build = self.repo.get_build(rec.build_id)
             if build is None:
@@ -381,7 +381,7 @@ class ServerService:
             try:
                 await self.pm.start(
                     rec.id, argv, directory, env, ready_port=rec.java_port, ready_timeout=rec.policy.start_timeout,
-                    ready_re=ready_re, timeout_hint=timeout_hint, strict_ping=rec.is_java,
+                    ready_re=ready_re, timeout_hint=timeout_hint, strict_ping=rec.is_java, fail_re=fail_re,
                     clean_exit_hint=JAVA_CLEAN_EXIT_HINT if rec.is_java else "",
                 )
                 break
