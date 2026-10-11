@@ -1,0 +1,20 @@
+[project]
+name = "pumpkin-server-manager"
+version = "1.0.0"
+description = "Create, run, back up and auto-update Pumpkin Minecraft servers from a web dashboard"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B008", "UP037", "B904"]

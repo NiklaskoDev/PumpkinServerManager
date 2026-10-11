@@ -1,0 +1,41 @@
+# Pumpkin Server Manager - docker compose example.
+#
+#   docker compose up -d
+#   docker compose logs pumpkin-manager     # shows the generated admin password on the first start
+#
+# Then open http://<host>:8420
+
+services:
+  pumpkin-manager:
+    # Use the published image ...
+    image: ghcr.io/your-github-user/pumpkin-manager:latest
+    # ... or build it from this folder (docker compose up -d --build)
+    build: .
+    container_name: pumpkin-manager
+    restart: unless-stopped
+
+    # Servers are stopped gracefully (the world is saved) when the container stops. Give them time.
+    stop_grace_period: 2m
+
+    ports:
+      - "8420:8420"                          # web dashboard
+      # Game ports. Every server you create gets the next free port from this range, so the host and
+      # container side must be identical. Keep it in sync with PORT_RANGE below.
+      - "25565-25575:25565-25575/tcp"        # Java Edition
+      - "25565-25575:25565-25575/udp"        # optional: GameSpy4 query
+      - "19132-19142:19132-19142/udp"        # Bedrock (experimental in Pumpkin)
+
+    environment:
+      PUID: "1000"                           # Unraid uses 99, plain Linux usually 1000
+      PGID: "1000"                           # Unraid uses 100
+      TZ: "Europe/Berlin"                    # the daily backup time is interpreted in this zone
+      ADMIN_PASSWORD: "change-me-please"     # initial password (min. 8 characters); leave empty to generate one
+      BACKUP_DIR: "/backups"                 # matches the second volume below
+      # PORT_RANGE: "25565-25575"
+      # BEDROCK_PORT_RANGE: "19132-19142"
+      # GITHUB_TOKEN: ""                     # only if you hit GitHub API rate limits
+      # PUBLIC_ADDRESS: "play.example.com"   # shown to players instead of the address you browse with
+
+    volumes:
+      - ./data:/data                         # servers, downloaded Pumpkin binaries, settings database
+      - ./backups:/backups                   # keep this on a different disk from /data if you can

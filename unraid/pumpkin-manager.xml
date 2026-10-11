@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<!--
+  Unraid template for Pumpkin Server Manager.
+
+  Before using it, replace YOUR_GITHUB_USER (below) with the account that publishes the image, or change
+  <Repository> to an image you built locally (see README). Install by copying this file to
+  /boot/config/plugins/dockerMan/templates-user/ on the Unraid flash drive, then Docker -> Add Container ->
+  choose "PumpkinManager" from the Template drop-down.
+-->
+<Container version="2">
+  <Name>PumpkinManager</Name>
+  <Repository>ghcr.io/YOUR_GITHUB_USER/pumpkin-manager:latest</Repository>
+  <Registry>https://github.com/YOUR_GITHUB_USER/pumpkin-manager/pkgs/container/pumpkin-manager</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/YOUR_GITHUB_USER/pumpkin-manager/issues</Support>
+  <Project>https://github.com/YOUR_GITHUB_USER/pumpkin-manager</Project>
+  <Overview>Web dashboard that creates, runs, backs up and automatically updates Pumpkin Minecraft servers (Pumpkin is a fast Minecraft server written in Rust: https://pumpkinmc.org). One container manages as many servers as you like: create one in the dashboard and it is downloaded, configured and started for you. Pumpkin updates are checked automatically; before any update is applied the server is stopped and a verified backup is made, and the manager rolls back on its own if the new version does not start. The first time it starts, the administrator password is printed in the container log unless you set one below.</Overview>
+  <Category>GameServers: Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8420]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/YOUR_GITHUB_USER/pumpkin-manager/main/unraid/pumpkin-manager.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/YOUR_GITHUB_USER/pumpkin-manager/main/pumpkin_manager/static/favicon.svg</Icon>
+  <ExtraParams>--stop-timeout 120</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+
+  <Config Name="WebUI port" Target="8420" Default="8420" Mode="tcp" Description="Port of the web dashboard." Type="Port" Display="always" Required="true" Mask="false">8420</Config>
+  <Config Name="Game ports (Java, TCP)" Target="25565-25575" Default="25565-25575" Mode="tcp" Description="Every server you create gets the next free port of this range. Keep the host port range identical to the container range, and identical to the 'Port range' variable below. Add more ports here if you want more servers." Type="Port" Display="always" Required="true" Mask="false">25565-25575</Config>
+  <Config Name="Game ports (query, UDP)" Target="25565-25575" Default="25565-25575" Mode="udp" Description="Optional: only needed if you enable the GameSpy4 query protocol on a server. Remove this entry if you do not use it." Type="Port" Display="advanced" Required="false" Mask="false">25565-25575</Config>
+  <Config Name="Bedrock ports (UDP)" Target="19132-19142" Default="19132-19142" Mode="udp" Description="Only needed for servers with Bedrock support enabled (experimental in Pumpkin). Keep host and container identical." Type="Port" Display="always" Required="false" Mask="false">19132-19142</Config>
+
+  <Config Name="AppData" Target="/data" Default="/mnt/user/appdata/pumpkin-manager" Mode="rw" Description="Servers, downloaded Pumpkin binaries and the settings database. Use a path on your cache pool for the best performance." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/pumpkin-manager</Config>
+  <Config Name="Backups" Target="/backups" Default="/mnt/user/backups/pumpkin-manager" Mode="rw" Description="Where backups are stored. Using a share on the array (a different disk than AppData) means a failed cache drive does not take your backups with it." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/backups/pumpkin-manager</Config>
+
+  <Config Name="Backup folder (variable)" Target="BACKUP_DIR" Default="/backups" Mode="" Description="Must match the container path of the Backups entry above. Leave unchanged unless you changed that path." Type="Variable" Display="advanced" Required="true" Mask="false">/backups</Config>
+  <Config Name="Admin password" Target="ADMIN_PASSWORD" Default="" Mode="" Description="Initial password for the user 'admin' (at least 8 characters). Only used on the very first start; change it later in the dashboard. Leave empty to have one generated and printed in the container log." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Time zone" Target="TZ" Default="Europe/Berlin" Mode="" Description="Used for the daily backup time and log timestamps, e.g. America/New_York." Type="Variable" Display="always" Required="false" Mask="false">Europe/Berlin</Config>
+  <Config Name="Port range (Java)" Target="PORT_RANGE" Default="25565-25575" Mode="" Description="Ports the manager may assign to servers. Must equal the Java game ports mapping above." Type="Variable" Display="advanced" Required="true" Mask="false">25565-25575</Config>
+  <Config Name="Port range (Bedrock)" Target="BEDROCK_PORT_RANGE" Default="19132-19142" Mode="" Description="UDP ports the manager may assign to Bedrock-enabled servers. Must equal the Bedrock mapping above." Type="Variable" Display="advanced" Required="true" Mask="false">19132-19142</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User id the manager and the servers run as (99 = nobody on Unraid)." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group id (100 = users on Unraid)." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="UMASK" Target="UMASK" Default="022" Mode="" Description="File creation mask. Use 002 if other users on your network shares need to edit server files." Type="Variable" Display="advanced" Required="false" Mask="false">022</Config>
+  <Config Name="GitHub token" Target="GITHUB_TOKEN" Default="" Mode="" Description="Optional. Raises GitHub's API rate limit if update checks ever fail with a rate-limit error. No permissions needed." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Public address" Target="PUBLIC_ADDRESS" Default="" Mode="" Description="Optional. Host name or IP that is shown to players as the server address (for example a DynDNS name). Defaults to the address you open the dashboard with." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Reverse proxy IPs" Target="FORWARDED_ALLOW_IPS" Default="127.0.0.1" Mode="" Description="Only if you put the dashboard behind a reverse proxy: the proxy's IP address (or * to trust any proxy on your network) so that client addresses and https are detected correctly." Type="Variable" Display="advanced" Required="false" Mask="false">127.0.0.1</Config>
+</Container>

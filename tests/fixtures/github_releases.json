@@ -1,0 +1,154 @@
+[
+ {
+  "tag_name": "canary",
+  "name": "Canary Build",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-10-10T19:59:25Z",
+  "published_at": "2026-10-02T01:53:16Z",
+  "updated_at": "2026-10-10T21:04:06Z",
+  "html_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/tag/canary",
+  "body": "From commit: e0cb7c0\nGenerated on: 2026-10-10 21:03 UTC\n\nCanary build of master for testing, built without LTO. The fully optimized daily build is the Nightly Build release.\n",
+  "assets": [
+   {
+    "name": "pumpkin-ARM64-Linux-musl",
+    "id": 628988290,
+    "size": 211267536,
+    "digest": "sha256:3bfc4595c74ec83bf949eaffb66713d56064576ce300cb07d86ff1a4474226e1",
+    "state": "uploaded",
+    "updated_at": "2026-10-10T21:04:04Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/canary/pumpkin-ARM64-Linux-musl",
+    "content_type": "application/octet-stream"
+   },
+   {
+    "name": "pumpkin-X64-Linux-musl",
+    "id": 628988287,
+    "size": 227318656,
+    "digest": "sha256:92aec3481dc6ddae598c743b665629ce0393c56b0240baafb4d078370236b82e",
+    "state": "uploaded",
+    "updated_at": "2026-10-10T21:04:05Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/canary/pumpkin-X64-Linux-musl",
+    "content_type": "application/octet-stream"
+   }
+  ]
+ },
+ {
+  "tag_name": "nightly",
+  "name": "Nightly Build",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-10-06T18:14:29Z",
+  "published_at": "2026-03-25T15:30:45Z",
+  "updated_at": "2026-10-07T08:08:12Z",
+  "html_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/tag/nightly",
+  "body": "From commit: f1c0871\nGenerated on: 2026-10-07 08:08 UTC\n",
+  "assets": [
+   {
+    "name": "pumpkin-ARM64-Linux-musl",
+    "id": 618027225,
+    "size": 119261432,
+    "digest": "sha256:5707a9fb358956f6a7a6c637a9bc19ce215f09a9b2ee1cdfcd14e7056a746168",
+    "state": "uploaded",
+    "updated_at": "2026-10-07T08:08:10Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/nightly/pumpkin-ARM64-Linux-musl",
+    "content_type": "application/octet-stream"
+   },
+   {
+    "name": "pumpkin-X64-Linux-musl",
+    "id": 618027222,
+    "size": 138535160,
+    "digest": "sha256:3b9d9709c9353971cfed66a3c347a635ed20743baf4205e1ae4b000ef5133549",
+    "state": "uploaded",
+    "updated_at": "2026-10-07T08:08:11Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/nightly/pumpkin-X64-Linux-musl",
+    "content_type": "application/octet-stream"
+   }
+  ]
+ },
+ {
+  "tag_name": "0.2.0+26.3-26.51",
+  "name": "Release 0.2.0+26.3-26.51",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-09-20T12:14:15Z",
+  "published_at": "2026-09-20T12:22:14Z",
+  "updated_at": "2026-09-20T14:53:01Z",
+  "html_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/tag/0.2.0%2B26.3-26.51",
+  "body": "# 0.2.0 Release Notes\r\n\r\n## \ud83d\udea8 Highlights & Breaking Changes\r\n\r\n* **Removed Core Multi-Version Support (Breaking):** Built-in support for multiple Java client versions has been removed from the server core. Backwards compatibility is now maintained separately via the [`pumpkin-java-multiversion`](htt",
+  "assets": [
+   {
+    "name": "checksums.sha256",
+    "id": 576994396,
+    "size": 708,
+    "digest": "sha256:4d8f7268a3bb401b565c5c48d36b10a88d5bb22c51c9a32209236e790395b9ee",
+    "state": "uploaded",
+    "updated_at": "2026-09-20T14:52:54Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/0.2.0%2B26.3-26.51/checksums.sha256",
+    "content_type": "application/octet-stream"
+   },
+   {
+    "name": "pumpkin-ARM64-Linux-musl",
+    "id": 576994404,
+    "size": 110910240,
+    "digest": "sha256:8a6ff413ba709075d6c82be10179c7091d443fbf1418daebfbb3ad7a150a02af",
+    "state": "uploaded",
+    "updated_at": "2026-09-20T14:53:00Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/0.2.0%2B26.3-26.51/pumpkin-ARM64-Linux-musl",
+    "content_type": "application/octet-stream"
+   },
+   {
+    "name": "pumpkin-X64-Linux-musl",
+    "id": 576994402,
+    "size": 126400904,
+    "digest": "sha256:798fc1aee4ebe005f029b7cb7144064f77d927c52c417554f74bd325de400b65",
+    "state": "uploaded",
+    "updated_at": "2026-09-20T14:53:00Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/0.2.0%2B26.3-26.51/pumpkin-X64-Linux-musl",
+    "content_type": "application/octet-stream"
+   }
+  ]
+ },
+ {
+  "tag_name": "0.1.0-dev+26.2-26.45",
+  "name": "Release 0.1.0-dev+26.2-26.45",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-09-04T18:08:43Z",
+  "published_at": "2026-09-04T18:22:01Z",
+  "updated_at": "2026-09-05T15:04:46Z",
+  "html_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/tag/0.1.0-dev%2B26.2-26.45",
+  "body": "First release :D\r\n\r\n\n\n## What's Changed\n* Add configuration by @zp3x in https://github.com/Pumpkin-MC/Pumpkin/pull/1\n* Added Development Tools by @ferdinandkeller in https://github.com/Pumpkin-MC/Pumpkin/pull/5\n* Dev tools java by @ferdinandkeller in https://github.com/Pumpkin-MC/Pumpkin/pull/6\n* Ad",
+  "assets": [
+   {
+    "name": "checksums.sha256",
+    "id": 545949955,
+    "size": 708,
+    "digest": "sha256:69c25b9b289eb0bc9a1c180cffc7cefaa9978c17ede1065caf32af3732fe9ac7",
+    "state": "uploaded",
+    "updated_at": "2026-09-05T15:04:39Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/0.1.0-dev%2B26.2-26.45/checksums.sha256",
+    "content_type": "application/octet-stream"
+   },
+   {
+    "name": "pumpkin-ARM64-Linux-musl",
+    "id": 545949951,
+    "size": 112671976,
+    "digest": "sha256:746057059ffc6884c611d04389eb28cfbb2aac2983d8000bd95d878f5dc7b31c",
+    "state": "uploaded",
+    "updated_at": "2026-09-05T15:04:45Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/0.1.0-dev%2B26.2-26.45/pumpkin-ARM64-Linux-musl",
+    "content_type": "application/octet-stream"
+   },
+   {
+    "name": "pumpkin-X64-Linux-musl",
+    "id": 545949953,
+    "size": 127923248,
+    "digest": "sha256:070f33ba16335087a8c949690aa5496d13c9b549ef9d7f09100c90ed709fe97d",
+    "state": "uploaded",
+    "updated_at": "2026-09-05T15:04:46Z",
+    "browser_download_url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/0.1.0-dev%2B26.2-26.45/pumpkin-X64-Linux-musl",
+    "content_type": "application/octet-stream"
+   }
+  ]
+ }
+]

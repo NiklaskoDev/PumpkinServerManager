@@ -1,0 +1,92 @@
+// Players: who is online, plus whitelist / operators / bans. Changes go through the server console.
+
+import { get, post } from "../api.js";
+import { clear, h, icon } from "../dom.js";
+import { confirmDialog, emptyState, notifyError, promptDialog, segmented, toast } from "../ui.js";
+
+const LISTS = [
+  { id: "whitelist", label: "Whitelist", remove: "whitelist_remove", key: "name" },
+  { id: "ops", label: "Operators", remove: "deop", key: "name" },
+  { id: "banned_players", label: "Banned players", remove: "pardon", key: "name" },
+  { id: "banned_ips", label: "Banned IPs", remove: "pardon_ip", key: "ip" },
+];
+
+export function render({ id, getServer }) {
+  let data = { online: { count: 0, max: 0, names: [] }, lists: {}, running: false };
+  let active = "whitelist";
+  const onlineHost = h("div", {});
+  const listHost = h("div", {});
+  const nameInput = h("input", { class: "input", placeholder: "Player name", maxlength: "32", autocomplete: "off", "aria-label": "Player name" });
+  const notice = h("div", {});
+
+  async function act(action, target, reason) {
+    try {
+      await post(`/api/servers/${id}/players`, { action, target, reason: reason || null });
+      toast("Done", "success", null, 1500);
+      setTimeout(load, 900); // the server writes its list files a moment later
+    } catch (err) {
+      notifyError(err);
+    }
+  }
+
+  function renderOnline() {
+    clear(onlineHost);
+    const { names, count } = data.online;
+    if (!data.running) return onlineHost.appendChild(h("p", { class: "muted" }, "The server is not running."));
+    if (!names.length) return onlineHost.appendChild(h("p", { class: "muted" }, count ? `${count} online (names unavailable).` : "Nobody is online."));
+    names.forEach((name) => onlineHost.appendChild(h("div", { class: "player" }, h("div", { class: "head" }), h("strong", { class: "grow" }, name),
+      h("button", { class: "btn sm", onclick: async () => {
+        const reason = await promptDialog({ title: `Kick ${name}`, label: "Reason (optional)", confirmLabel: "Kick" });
+        if (reason !== null) act("kick", name, reason);
+      } }, "Kick"),
+      h("button", { class: "btn sm danger", onclick: async () => {
+        if (await confirmDialog({ title: `Ban ${name}?`, message: "They will be removed and cannot rejoin until pardoned.", confirmLabel: "Ban", danger: true })) act("ban", name);
+      } }, "Ban"))));
+  }
+
+  function renderList() {
+    clear(listHost);
+    const def = LISTS.find((l) => l.id === active);
+    const entries = data.lists[active] || [];
+    if (!entries.length) {
+      return listHost.appendChild(emptyState("users", `${def.label} is empty`, active === "whitelist" ? "Enable the whitelist in Settings to restrict who can join." : null));
+    }
+    listHost.appendChild(h("div", { class: "table-wrap" }, h("table", { class: "table" },
+      h("thead", {}, h("tr", {}, h("th", {}, def.key === "ip" ? "IP address" : "Player"), h("th", {}, "Details"), h("th", {}, ""))),
+      h("tbody", {}, entries.map((e) => {
+        const name = e[def.key] || e.name || e.ip || "?";
+        const details = [e.uuid, e.reason, e.source, e.expires && e.expires !== "forever" ? `until ${e.expires}` : null, e.level ? `level ${e.level}` : null].filter(Boolean).join(" · ");
+        return h("tr", {}, h("td", {}, h("strong", {}, name)), h("td", { class: "muted small mono" }, details || "–"),
+          h("td", { class: "actions-cell" }, h("button", { class: "btn sm danger", disabled: !data.running, title: data.running ? "Remove" : "Start the server to change this list", onclick: () => act(def.remove, name) }, icon("trash", "sm"), "Remove")));
+      })))));
+  }
+
+  const tabs = segmented(LISTS.map((l) => ({ value: l.id, label: l.label })), active, (v) => { active = v; renderList(); });
+
+  async function load() {
+    try {
+      data = await get(`/api/servers/${id}/players`);
+    } catch { return; }
+    renderOnline();
+    renderList();
+    clear(notice);
+    if (!data.running) notice.appendChild(h("div", { class: "notice" }, icon("info", "sm"), "Player changes are applied through the running server's console, so start the server to edit these lists."));
+  }
+
+  const add = (action) => () => { const name = nameInput.value.trim(); if (name) { act(action, name); nameInput.value = ""; } else nameInput.focus(); };
+  const el = h("div", { class: "stack" }, notice,
+    h("div", { class: "grid cols-2" },
+      h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Online now"), h("button", { class: "btn ghost sm", onclick: load }, icon("restart", "sm"), "Refresh")), onlineHost),
+      h("div", { class: "card stack" }, h("h2", {}, "Add a player"),
+        nameInput,
+        h("div", { class: "row" },
+          h("button", { class: "btn", onclick: add("whitelist_add") }, "Add to whitelist"),
+          h("button", { class: "btn", onclick: add("op") }, "Make operator"),
+          h("button", { class: "btn danger", onclick: add("ban") }, "Ban")),
+        h("p", { class: "hint" }, "Names are looked up by the server, so Mojang account names resolve to the right UUID."))),
+    h("div", { class: "card tight" }, h("div", { class: "card-section" }, tabs), listHost));
+
+  load();
+  const timer = setInterval(load, 10000);
+  return { el, dispose: () => clearInterval(timer), onServer: () => load() };
+}

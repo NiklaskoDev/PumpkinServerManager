@@ -1,0 +1,270 @@
+# Pumpkin Server Manager
+
+A web dashboard in a single Docker container that **creates, runs, backs up and automatically updates
+[Pumpkin](https://pumpkinmc.org) Minecraft servers** - built to be added to Unraid.
+
+Pumpkin is a Minecraft server written in Rust. This manager downloads it from the official GitHub releases, sets up
+as many servers as you like (each with its own port, world and settings), keeps them running, checks for new
+Pumpkin versions on a schedule and **never applies an update without first making a verified backup**.
+
+![The dashboard with three servers](docs/dashboard.jpg)
+
+## Features
+
+| | |
+|---|---|
+| **One-click servers** | Pick a name, a Pumpkin channel and a few settings; the manager downloads the binary, writes `pumpkin.toml`, assigns ports and starts it. |
+| **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators, bans). |
+| **Automatic updates** | Checks GitHub for new Pumpkin builds (stable releases, plus the rolling *nightly* and *canary* builds), per server: install automatically, notify only, or off. Waits until nobody is online. |
+| **Safe by construction** | Download and checksum first, stop gracefully, **verified backup**, switch version, start, watch for crashes. If anything fails the version *and the world* roll back automatically. |
+| **Backups** | Daily/interval schedule, retention, hot backups without downtime (or stop-copy-start), download/upload, protect, one-click restore with an automatic safety backup. |
+| **Notifications** | Optional Discord/Slack/generic webhook for updates, failed backups and crashes. |
+| **Unraid-ready** | PUID/PGID, template XML, graceful shutdown on array stop, separate backup path. No Docker socket needed, nothing runs privileged. |
+
+## Contents
+
+- [Install on Unraid](#install-on-unraid) · [Docker Compose](#docker-compose) · [First steps](#first-steps)
+- [Ports and networking](#ports-and-networking) · [Configuration](#configuration)
+- [How updates work](#how-updates-work) · [How backups work](#how-backups-work)
+- [Security](#security) · [Where things are stored](#where-things-are-stored) · [Troubleshooting](#troubleshooting)
+- [Pumpkin notes](#notes-about-pumpkin) · [Development](#development)
+
+---
+
+## Install on Unraid
+
+The container image has to come from somewhere Unraid can pull it. Pick **A** (recommended) or **B**.
+
+### A. Publish the image from GitHub (automatic builds)
+
+1. Create a GitHub repository and push this folder to its `main` branch.
+   The workflow in `.github/workflows/ci.yml` runs the tests, smoke-tests the image and publishes a multi-arch
+   image (amd64 + arm64) to `ghcr.io/<your-user>/pumpkin-manager:latest`.
+2. GitHub → your profile → **Packages** → `pumpkin-manager` → *Package settings* → make it **public**
+   (or run `docker login ghcr.io` on the Unraid terminal with a personal access token that has `read:packages`).
+3. Edit `unraid/pumpkin-manager.xml` and replace every `YOUR_GITHUB_USER` with your GitHub user name.
+4. Copy the file to your Unraid flash drive:
+   `/boot/config/plugins/dockerMan/templates-user/my-pumpkin-manager.xml`
+   (the flash share is `\\tower\flash\config\plugins\dockerMan\templates-user\`).
+5. Unraid → **Docker** → **Add Container** → *Template*: choose **PumpkinManager**.
+
+### B. Build the image on the Unraid server (no registry)
+
+```bash
+# copy this project folder to the server first (SMB share, scp, or git clone), then on the Unraid terminal:
+cd /mnt/user/appdata/pumpkin-manager-src
+docker build -t pumpkin-manager:local .
+```
+
+Use the same template as above but set **Repository** to `pumpkin-manager:local`. Unraid will not show update
+notices for a locally built image: rebuild it when you change the manager itself (Pumpkin updates are handled
+inside the dashboard and do not need a new image).
+
+### Settings to review in the template
+
+| Setting | What to do |
+|---|---|
+| **AppData** `/data` | Servers, downloaded Pumpkin binaries and the settings database. A path on your cache pool is best. |
+| **Backups** `/backups` | Put this on a **different disk** than AppData (for example an array share) so one failed drive cannot take both. |
+| **Game ports** | Every server gets the next free port from this range. Keep host and container side identical, and equal to the *Port range* variables. Add more ports if you want more servers. |
+| **Admin password** | Initial password for the user `admin` (min. 8 characters). Leave empty to have one generated; it is printed once in the container log. |
+| **Time zone** | Used for "daily at 04:00" backups. |
+
+Apply, then click the container's **WebUI** entry (port 8420). Port forwarding for friends: forward the **TCP**
+port of each server from your router to the Unraid IP.
+
+> Prefer the command line? This is equivalent:
+> ```bash
+> docker run -d --name pumpkin-manager --restart unless-stopped --stop-timeout 120 \
+>   -p 8420:8420 -p 25565-25575:25565-25575/tcp -p 19132-19142:19132-19142/udp \
+>   -e PUID=99 -e PGID=100 -e TZ=Europe/Berlin -e BACKUP_DIR=/backups -e ADMIN_PASSWORD='choose-a-password' \
+>   -v /mnt/user/appdata/pumpkin-manager:/data -v /mnt/user/backups/pumpkin-manager:/backups \
+>   ghcr.io/<your-user>/pumpkin-manager:latest
+> ```
+
+## Docker Compose
+
+```bash
+docker compose up -d --build        # builds from this folder
+docker compose logs pumpkin-manager # first start: shows the generated admin password if you did not set one
+```
+
+See [`docker-compose.yml`](docker-compose.yml) for the full example.
+
+## First steps
+
+1. Open `http://<server-ip>:8420` and sign in as `admin`.
+2. **New server** → give it a name → *Create server*. The first creation downloads Pumpkin (about 120 MB); after
+   that servers are created in seconds.
+3. The card shows the address players use (`host:port`) with a copy button. In Minecraft: *Multiplayer → Add server*.
+4. Open the server for the console, settings, files, players, backups and version tabs.
+
+---
+
+## Ports and networking
+
+* **Dashboard**: TCP 8420 (`WEB_PORT`).
+* **Java game ports**: the manager hands out one TCP port per server from `PORT_RANGE` (default `25565-25575`,
+  so up to 11 servers). The same range is mapped 1:1 by the container, because Docker publishes exactly the ports
+  you list.
+* **Bedrock** (optional, experimental in Pumpkin): each Bedrock-enabled server needs **two** UDP ports from
+  `BEDROCK_PORT_RANGE` (`19132-19142` = up to five servers). Pumpkin also tries a fixed UDP port 7551 for LAN
+  discovery; only the first Bedrock server gets it and the others log a harmless warning.
+* **Query** (optional): UDP on the server's Java port.
+* **Management API ports** (`MGMT_PORT_RANGE`, default `29000-29999`) are used only on `127.0.0.1` inside the
+  container and are never published.
+* **Host networking** also works (`--network host`): no port mapping needed, but ports must be free on the host.
+  The manager checks that a port is free before assigning it.
+* The dashboard warns on a server whose port lies outside the published range.
+
+## Configuration
+
+Everything has a sensible default; the template sets the ones you usually want.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PUID` / `PGID` | `99` / `100` | User and group the manager and all servers run as (Unraid's *nobody:users*). Files stay accessible through your shares. |
+| `UMASK` | `022` | File creation mask (`002` lets your group edit server files). |
+| `TZ` | `UTC` | Time zone for schedules and timestamps. |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / generated | Account created on the very first start. Change the password in *Settings* afterwards. |
+| `DATA_DIR` | `/data` | Servers, binaries, logs and the database. |
+| `BACKUP_DIR` | `$DATA_DIR/backups` | Backup folder (map it to a separate disk). |
+| `PORT_RANGE` | `25565-25575` | Java ports available to servers. |
+| `BEDROCK_PORT_RANGE` | `19132-19142` | UDP ports for Bedrock-enabled servers (two per server). |
+| `MGMT_PORT_RANGE` | `29000-29999` | Loopback-only ports for the management API. Must not overlap `PORT_RANGE`. |
+| `WEB_PORT` / `WEB_HOST` | `8420` / `0.0.0.0` | Where the dashboard listens. |
+| `GITHUB_TOKEN` | - | Optional. Only needed if GitHub's anonymous rate limit (60 requests/hour) is hit. No scopes required. |
+| `PUBLIC_ADDRESS` | - | Host name shown to players (for example a DynDNS name). Defaults to the address in your browser. |
+| `UPDATE_CHECK_MINUTES` | `360` | Initial check interval; changeable in the dashboard. |
+| `SESSION_HOURS` | `168` | Sign-in lifetime. |
+| `MAX_UPLOAD_MB` | `4096` | Largest file the file manager accepts. |
+| `SHUTDOWN_TIMEOUT` | `90` | Seconds to wait for servers when the container stops. |
+| `COOKIE_SECURE` | `auto` | `auto`, `always` or `never` for the session cookie's *Secure* flag. |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy addresses (see [Security](#security)). |
+| `PUMPKIN_REPO` | `Pumpkin-MC/Pumpkin` | GitHub repository releases are taken from. |
+| `LOG_LEVEL` | `INFO` | Manager log verbosity. |
+
+---
+
+## How updates work
+
+**Channels.** Each server follows one channel:
+
+* **Stable**: tagged releases such as `0.2.0+26.3-26.51` (Pumpkin version + Minecraft version). Recommended.
+* **Nightly** and **Canary**: *rolling* prereleases. Their tag never changes - the binary behind it is replaced.
+  The manager therefore identifies builds by the **SHA-256 digest GitHub reports**, not by the tag, and keeps the
+  previous binary on disk (GitHub no longer serves it once it was replaced) so a rollback is always possible.
+
+**Checks.** Every `UPDATE_CHECK_MINUTES` (and on demand with *Check for updates*) the manager asks GitHub which
+build each channel offers. Requests are conditional (ETag), so most checks cost nothing against the rate limit.
+
+**Per-server policy** (Version tab): *install automatically*, *notify only*, or *off*. A server can also be
+**pinned** to one release. Automatic installs wait until nobody is online (up to a configurable number of hours;
+after that players get an in-game warning first). Switching a server to another *channel* is never automatic.
+
+**The update procedure** - the order is the safety guarantee:
+
+1. Download the new binary and verify its SHA-256 - **while the server keeps running** (no downtime for slow downloads).
+2. Warn online players, then stop the server gracefully (the world is saved).
+3. Create a **verified backup** (full archive read-back plus checksum). **If this fails the update is aborted**,
+   nothing is changed and the server is started again on the old version.
+4. Switch to the new binary and start the server.
+5. Wait for it to accept connections and watch it for 15 seconds.
+6. If it fails to start or crashes: stop it, **restore the world from the backup taken in step 3**, switch back to the
+   old binary and start that. The failed build is remembered and not retried; a newer build is.
+
+Every step is visible in the job log, in *Activity* and (optionally) as a webhook message. Afterwards the **Version
+tab** keeps a history and a **Roll back** button (version only, or version *and* the pre-update world).
+
+What this does *not* protect against: a bug in a new version that only shows up hours later, or world damage that
+you notice after playing for a while. That is what the pre-update backup and the Roll back button are for.
+
+## How backups work
+
+* **Schedule**: daily at a time you choose, or every N hours, per server. **Retention**: keep the newest N;
+  backups you **protect**, and the one belonging to your latest update, are never deleted automatically.
+* **Hot backups** (default) don't stop the server: the manager flushes the world (`save-all flush`), pauses
+  autosaving (`save-off`), copies the files, then resumes (`save-on`, always, even on errors). If the management API
+  is available it is used for the flush. This is "crash-consistent at worst". Choose **cold** in the Backups tab to
+  stop the server, copy and restart for a perfect copy. Backups before updates/restores/deletion are always cold.
+* **Format**: `.tar.gz` with a small manifest. Each backup is read back and checksum-verified before it counts.
+* **Restore**: stops the server, makes a *safety backup* of the current state, extracts the archive into a temporary
+  folder and only then swaps it in, so a failed restore never damages what you have. Network settings (ports,
+  management secret) stay the manager's.
+* **Download / upload**: move backups to another machine or restore an archive from elsewhere.
+* A backup needs free space about the size of the world; the manager checks first and says so if there is not enough.
+
+## Security
+
+* Sign-in with a password (scrypt-hashed), server-side sessions in `HttpOnly`, `SameSite=Strict` cookies,
+  a CSRF token on every state-changing request, rate-limited login attempts and a strict Content-Security-Policy.
+  The WebSocket verifies the browser's `Origin`.
+* Browsers share cookies between ports of the same host name, so other web apps on your Unraid host *could*
+  see (not forge) this one's cookie; the cookie is therefore named uniquely and requests need the CSRF header.
+* The manager needs **no Docker socket** and no privileges; servers run as `PUID:PGID` with a minimal environment
+  (your `ADMIN_PASSWORD` and `GITHUB_TOKEN` are not passed on to Minecraft processes).
+* The management API of each server listens on loopback only and uses a per-server random secret.
+* **Do not expose the dashboard directly to the internet.** The dashboard can run console commands and edit files.
+  If you need remote access, put it behind a reverse proxy with HTTPS (and set `FORWARDED_ALLOW_IPS` to the proxy's
+  address) or use a VPN such as WireGuard.
+* Forgot the password? In the container console (Unraid: container icon → *Console*):
+  `python -m pumpkin_manager reset-password`. It signs every session out.
+
+## Where things are stored
+
+```
+/data
+├── manager.db                    settings, users, server records, history (SQLite)
+├── servers/<id>/                 one folder per server: pumpkin.toml, world/, whitelist.json, ...
+├── binaries/<build>/pumpkin      downloaded Pumpkin binaries, shared by all servers
+└── logs/<id>/console.log         console output of the last run (+ console.prev.log)
+/backups/<id>/<date>_<kind>.tar.gz
+```
+
+Editing `pumpkin.toml`: the settings form, the *Advanced* editor and the file manager all validate the file before
+saving. This matters because **Pumpkin silently falls back to default settings when it cannot read its config**.
+A few keys (ports, the management secret, console mode) belong to the manager and are re-applied before each start.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| *"Port 25565 is already in use by another program"* | Another container (or the host) uses it. Choose another port in the server's settings, or remove the other service. |
+| Friends cannot connect | Forward the server's **TCP** port on your router to the Unraid IP. The card on the dashboard shows the exact port and warns when it is not published by the container. |
+| *"No free port left in 25565-25575"* | Widen `PORT_RANGE` **and** the template's port mapping (they must match). |
+| Update check says *rate limit* | Add a `GITHUB_TOKEN` (Settings or environment variable). |
+| Server stops right after starting | Open the console tab for the output. After editing `pumpkin.toml` by hand, use the Advanced editor, which validates it. |
+| The *Management API* shows "not available" | Normal for stable Pumpkin 0.2.0, which does not have it yet. The manager then uses console commands and server pings. |
+| Backups fill the disk | Lower *Keep the newest*, or put `/backups` on a bigger share. |
+| Dashboard unreachable after Unraid reboots | Check that the container is set to autostart; servers come back in the state they were in. |
+
+## Notes about Pumpkin
+
+Pumpkin is in **early development**; its own site warns that worlds can break between versions and that config keys
+change. This manager reduces the blast radius (verified backups, rollback, a "stay on this version" pin) but cannot
+make an unfinished server stable. Switching between channels, or to an older release, is the riskiest thing you
+can do - the dashboard asks for confirmation and backs up first.
+
+Pumpkin's own telemetry heartbeat (to `market.pumpkinmc.org`) is **off for servers created by this manager** unless you
+enable it in *Settings → Defaults* or per server.
+
+## Development
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Windows: .venv\Scripts\...
+.venv/bin/pytest                                  # archives, updates, rollback, API, security, ...
+.venv/bin/python scripts/dev_server.py            # dashboard on :8420 with a fake GitHub + fake Pumpkin (admin / devpassword)
+.venv/bin/python scripts/real_binary_check.py /path/to/pumpkin   # end-to-end check against a REAL Pumpkin binary
+```
+
+* `scripts/real_binary_check.py` drives the manager's own code against a real Pumpkin executable: create, start,
+  ping, console, hot backup, settings change, a real update, a deliberately broken update that must roll back,
+  three servers side by side (one with Bedrock) and graceful shutdown. It is part of the image, so you can validate
+  the exact Linux build on your own server in about 30 seconds:
+  `docker exec -it pumpkin-manager python /app/scripts/real_binary_check.py --download`
+  (it downloads the official release to a temporary folder, tests it on loopback ports and cleans up; it does not
+  touch your servers).
+* Layout: `pumpkin_manager/` (backend: `process.py` supervision, `updater.py` the update procedure,
+  `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `api/` routers, `static/` the dashboard -
+  plain ES modules, no build step), `tests/` (including `fake_pumpkin.py`, a stand-in server), `docker/`, `unraid/`.
+* The frontend has no dependencies and never uses inline scripts or styles, so the strict CSP stays strict.
