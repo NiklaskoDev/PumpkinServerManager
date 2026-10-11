@@ -10,9 +10,12 @@ export class ApiError extends Error {
 
 let csrfToken = null;
 let onUnauthorized = () => {};
+let onPasswordChangeRequired = () => {};
 
 export function setCsrf(token) { csrfToken = token; }
 export function setUnauthorizedHandler(fn) { onUnauthorized = fn; }
+// An account that signed in with a temporary password may do nothing but choose its own; the server says so with this code.
+export function setPasswordChangeHandler(fn) { onPasswordChangeRequired = fn; }
 
 function describe(data, fallback) {
   const detail = data && data.detail;
@@ -47,6 +50,10 @@ export async function api(method, path, body, options = {}) {
   if (response.status === 401 && !options.allowUnauthorized) {
     onUnauthorized();
     throw new ApiError(401, describe(data, "Please log in."), data);
+  }
+  if (response.status === 403 && data && data.code === "password_change_required") {
+    onPasswordChangeRequired();
+    throw new ApiError(403, describe(data, "Choose a new password first."), data);
   }
   if (!response.ok) throw new ApiError(response.status, describe(data, response.statusText || `HTTP ${response.status}`), data);
   return data;

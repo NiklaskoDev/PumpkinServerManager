@@ -4,6 +4,7 @@ import { post, put } from "../api.js";
 import { clear, fmtBytes, fmtDuration, h, icon } from "../dom.js";
 import { loadSettings, loadSystem, state } from "../store.js";
 import { busy, field, notifyError, selectControl, switchControl, toast } from "../ui.js";
+import { passwordCard } from "./account.js";
 
 const WEBHOOK_EVENTS = [
   ["update_applied", "A server was updated"],
@@ -58,17 +59,7 @@ export async function render() {
     field("Public address shown to players", h("input", { class: "input", value: s.public_address || "", placeholder: "defaults to the address you are using now", oninput: (e) => { draft.public_address = e.target.value; } }), "A host name or IP, for example play.example.com."),
     h("div", {}, h("button", { class: "btn primary sm", onclick: () => save({ telemetry_default: draft.telemetry_default, public_address: draft.public_address ?? s.public_address }) }, icon("save", "sm"), "Save")));
 
-  const current = h("input", { class: "input", type: "password", autocomplete: "current-password" });
-  const next = h("input", { class: "input", type: "password", autocomplete: "new-password" });
-  const account = h("div", { class: "card stack" }, h("h2", {}, "Account"),
-    h("div", { class: "form-grid" }, field("Current password", current), field("New password", next, "At least 8 characters. Other signed-in devices are signed out.")),
-    h("div", {}, h("button", { class: "btn primary sm", onclick: async (e) => {
-      await busy(e.currentTarget, async () => {
-        await post("/api/auth/password", { current: current.value, new: next.value });
-        current.value = next.value = "";
-        toast("Password changed", "success");
-      });
-    } }, icon("key", "sm"), "Change password")));
+  const account = passwordCard();
 
   const diskRow = (label, free, total) => [h("dt", {}, label), h("dd", {}, h("div", { class: "meter" }, h("span", { style: { width: `${Math.round(((total - free) / total) * 100)}%` } })), h("span", { class: "muted small" }, `${fmtBytes(free)} free of ${fmtBytes(total)}`))];
   const system = h("div", { class: "card stack" }, h("h2", {}, "System"),

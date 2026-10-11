@@ -2,6 +2,7 @@
 
 import { get, post } from "../api.js";
 import { clear, h, icon } from "../dom.js";
+import { PERM, can } from "../access.js";
 import { OP_LEVELS, opLevelHelp } from "../oplevels.js";
 import { confirmDialog, emptyState, jobDialog, notifyError, promptDialog, segmented, selectControl, toast } from "../ui.js";
 
@@ -27,6 +28,8 @@ const OUTCOME = {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function render({ id, getServer }) {
+  // Moderators may kick, ban and whitelist; making operators (and setting their levels) is for admins.
+  const canOperate = can(getServer(), PERM.OPERATORS);
   let data = { online: { count: 0, max: 0, names: [] }, lists: {}, running: false };
   let active = "whitelist";
   let disposed = false;
@@ -112,12 +115,17 @@ export function render({ id, getServer }) {
         const details = [e.uuid, e.reason, e.source, e.expires && e.expires !== "forever" ? `until ${e.expires}` : null].filter(Boolean).join(" · ");
         let level = null;
         if (ops) {
-          const select = levelSelect(e.level, (value) => setLevel(name, value, select, e.level));
-          select.title = opLevelHelp(e.level);
-          level = h("td", {}, select);
+          if (canOperate) {
+            const select = levelSelect(e.level, (value) => setLevel(name, value, select, e.level));
+            select.title = opLevelHelp(e.level);
+            level = h("td", {}, select);
+          } else {
+            level = h("td", {}, h("span", { title: opLevelHelp(e.level) }, `Level ${e.level}`));
+          }
         }
+        const removable = !ops || canOperate;
         return h("tr", {}, h("td", {}, h("strong", {}, name)), level, h("td", { class: "muted small mono" }, details || "–"),
-          h("td", { class: "actions-cell" }, h("button", { class: "btn sm danger", disabled: !data.running, title: data.running ? "Remove" : "Start the server to change this list", onclick: () => act(def.remove, name) }, icon("trash", "sm"), "Remove")));
+          h("td", { class: "actions-cell" }, removable ? h("button", { class: "btn sm danger", disabled: !data.running, title: data.running ? "Remove" : "Start the server to change this list", onclick: () => act(def.remove, name) }, icon("trash", "sm"), "Remove") : null));
       })))));
   }
 
@@ -167,9 +175,9 @@ export function render({ id, getServer }) {
         nameInput,
         h("div", { class: "row" },
           h("button", { class: "btn", onclick: add("whitelist_add") }, "Add to whitelist"),
-          h("button", { class: "btn", onclick: makeOperator }, "Make operator"),
+          canOperate ? h("button", { class: "btn", onclick: makeOperator }, "Make operator") : null,
           h("button", { class: "btn danger", onclick: add("ban") }, "Ban")),
-        h("label", { class: "field" }, h("span", {}, "Operator level"), levelPick, levelHint),
+        canOperate ? h("label", { class: "field" }, h("span", {}, "Operator level"), levelPick, levelHint) : null,
         h("p", { class: "hint" }, "Names are looked up by the server, so Mojang account names resolve to the right UUID."))),
     h("div", { class: "card tight" }, h("div", { class: "card-section" }, tabs), listHost));
 

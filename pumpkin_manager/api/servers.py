@@ -4,17 +4,30 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .. import pumpkin_config as pc
-from ..models import CHANNELS
-from .deps import get_ctx, load_server, require_session
+from ..access import (
+    CONSOLE_COMMAND,
+    CONSOLE_VIEW,
+    CONTROL,
+    DELETE,
+    MODERATE,
+    OPERATORS,
+    SETTINGS,
+    START,
+    VIEW,
+    Principal,
+)
+from ..models import CHANNELS, ServerRecord
+from .deps import NOT_ALLOWED, get_ctx, require_owner, require_principal, require_session, server_perm
 
 router = APIRouter(tags=["servers"], dependencies=[Depends(require_session)])
 
 Channel = Literal["stable", "nightly", "canary"]
+OPERATOR_ACTIONS = {"op", "deop"}  # the rest of the player actions are for moderators
 
 
 def accepted(job: dict[str, Any]) -> JSONResponse:
@@ -66,13 +79,21 @@ class OperatorLevelBody(BaseModel):
     level: int = Field(ge=1, le=4)
 
 
+def _view(request: Request, principal: Principal, rec: ServerRecord, detail: bool = False) -> dict[str, Any]:
+    ctx = get_ctx(request)
+    return ctx.access.shape_server_view(principal, ctx.servers.view(rec, detail=detail))  # type: ignore[return-value]
+
+
 @router.get("/servers")
-async def list_servers(request: Request) -> list:
-    return get_ctx(request).servers.list_views()
+async def list_servers(request: Request, principal: Principal = Depends(require_principal)) -> list:
+    """The servers this account may see, each shaped for its role."""
+    ctx = get_ctx(request)
+    shaped = (ctx.access.shape_server_view(principal, view) for view in ctx.servers.list_views())
+    return [view for view in shaped if view is not None]
 
 
 @router.post("/servers", status_code=202)
-async def create_server(body: CreateBody, request: Request) -> JSONResponse:
+async def create_server(body: CreateBody, request: Request, owner: Principal = Depends(require_owner)) -> JSONResponse:
     ctx = get_ctx(request)
     if body.channel is not None and body.channel not in CHANNELS:
         raise pc.ConfigError({"channel": "unknown channel"})
@@ -80,97 +101,93 @@ async def create_server(body: CreateBody, request: Request) -> JSONResponse:
 
 
 @router.get("/servers/{server_id}")
-async def get_server(request: Request, server_id: str) -> dict:
-    ctx = get_ctx(request)
-    rec = load_server(request, server_id)
-    await ctx.servers.disk_usage(rec.id)
-    return ctx.servers.view(rec, detail=True)
+async def get_server(
+    request: Request, rec: ServerRecord = Depends(server_perm(VIEW)), principal: Principal = Depends(require_principal)
+) -> dict:
+    await get_ctx(request).servers.disk_usage(rec.id)
+    return _view(request, principal, rec, detail=True)
 
 
 @router.patch("/servers/{server_id}")
-async def patch_server(request: Request, server_id: str, body: PatchBody) -> dict:
+async def patch_server(
+    request: Request, body: PatchBody, rec: ServerRecord = Depends(server_perm(SETTINGS)),
+    principal: Principal = Depends(require_principal),
+) -> dict:
     ctx = get_ctx(request)
-    rec = load_server(request, server_id)
     rec, restart_required = ctx.servers.patch(rec, body.model_dump(exclude_unset=True))
-    view = ctx.servers.view(rec, detail=True)
+    view = _view(request, principal, rec, detail=True)
     view["restart_required"] = restart_required
     return view
 
 
 @router.delete("/servers/{server_id}", status_code=202)
 async def delete_server(
-    request: Request, server_id: str, final_backup: bool = True, delete_backups: bool = False
+    request: Request, final_backup: bool = True, delete_backups: bool = False,
+    rec: ServerRecord = Depends(server_perm(DELETE)),
 ) -> JSONResponse:
-    ctx = get_ctx(request)
-    return accepted(ctx.servers.submit_delete(load_server(request, server_id), final_backup, delete_backups))
+    return accepted(get_ctx(request).servers.submit_delete(rec, final_backup, delete_backups))
 
 
 @router.post("/servers/{server_id}/start", status_code=202)
-async def start(request: Request, server_id: str) -> JSONResponse:
-    ctx = get_ctx(request)
-    return accepted(ctx.servers.submit_start(load_server(request, server_id)))
+async def start(request: Request, rec: ServerRecord = Depends(server_perm(START))) -> JSONResponse:
+    return accepted(get_ctx(request).servers.submit_start(rec))
 
 
 @router.post("/servers/{server_id}/stop", status_code=202)
-async def stop(request: Request, server_id: str) -> JSONResponse:
-    ctx = get_ctx(request)
-    return accepted(ctx.servers.submit_stop(load_server(request, server_id)))
+async def stop(request: Request, rec: ServerRecord = Depends(server_perm(CONTROL))) -> JSONResponse:
+    return accepted(get_ctx(request).servers.submit_stop(rec))
 
 
 @router.post("/servers/{server_id}/restart", status_code=202)
-async def restart(request: Request, server_id: str) -> JSONResponse:
-    ctx = get_ctx(request)
-    return accepted(ctx.servers.submit_restart(load_server(request, server_id)))
+async def restart(request: Request, rec: ServerRecord = Depends(server_perm(CONTROL))) -> JSONResponse:
+    return accepted(get_ctx(request).servers.submit_restart(rec))
 
 
 @router.post("/servers/{server_id}/kill")
-async def kill(request: Request, server_id: str) -> dict:
-    ctx = get_ctx(request)
-    await ctx.servers.kill(load_server(request, server_id))
+async def kill(request: Request, rec: ServerRecord = Depends(server_perm(CONTROL))) -> dict:
+    await get_ctx(request).servers.kill(rec)
     return {"ok": True}
 
 
 # --------------------------------------------------------------------- console
 @router.post("/servers/{server_id}/command")
-async def command(request: Request, server_id: str, body: CommandBody) -> dict:
-    ctx = get_ctx(request)
-    await ctx.servers.command(load_server(request, server_id), body.command)
+async def command(request: Request, body: CommandBody, rec: ServerRecord = Depends(server_perm(CONSOLE_COMMAND))) -> dict:
+    await get_ctx(request).servers.command(rec, body.command)
     return {"ok": True}
 
 
 @router.get("/servers/{server_id}/console")
-async def console(request: Request, server_id: str, lines: int = Query(500, ge=1, le=3000)) -> dict:
-    ctx = get_ctx(request)
-    load_server(request, server_id)
-    return {"lines": ctx.pm.backlog(server_id, lines)}
+async def console(
+    request: Request, lines: int = Query(500, ge=1, le=3000), rec: ServerRecord = Depends(server_perm(CONSOLE_VIEW))
+) -> dict:
+    return {"lines": get_ctx(request).pm.backlog(rec.id, lines)}
 
 
 # ---------------------------------------------------------------------- config
 @router.get("/servers/{server_id}/config")
-async def read_config(request: Request, server_id: str) -> dict:
-    return get_ctx(request).servers.read_config(load_server(request, server_id))
+async def read_config(request: Request, rec: ServerRecord = Depends(server_perm(SETTINGS))) -> dict:
+    return get_ctx(request).servers.read_config(rec)
 
 
 @router.put("/servers/{server_id}/config")
-async def write_config(request: Request, server_id: str, body: ConfigBody) -> dict:
-    return await get_ctx(request).servers.save_settings(load_server(request, server_id), body.values)
+async def write_config(request: Request, body: ConfigBody, rec: ServerRecord = Depends(server_perm(SETTINGS))) -> dict:
+    return await get_ctx(request).servers.save_settings(rec, body.values)
 
 
 @router.get("/servers/{server_id}/config/raw")
-async def read_raw_config(request: Request, server_id: str) -> dict:
-    return get_ctx(request).servers.read_raw_config(load_server(request, server_id))
+async def read_raw_config(request: Request, rec: ServerRecord = Depends(server_perm(SETTINGS))) -> dict:
+    return get_ctx(request).servers.read_raw_config(rec)
 
 
 @router.put("/servers/{server_id}/config/raw")
-async def write_raw_config(request: Request, server_id: str, body: RawConfigBody) -> dict:
-    return get_ctx(request).servers.write_raw_config(load_server(request, server_id), body.content)
+async def write_raw_config(request: Request, body: RawConfigBody, rec: ServerRecord = Depends(server_perm(SETTINGS))) -> dict:
+    return get_ctx(request).servers.write_raw_config(rec, body.content)
 
 
 # --------------------------------------------------------------------- players
 @router.get("/servers/{server_id}/players")
-async def players(request: Request, server_id: str) -> dict:
+async def players(request: Request, rec: ServerRecord = Depends(server_perm(MODERATE))) -> dict:
     ctx = get_ctx(request)
-    rec = load_server(request, server_id)
     rt = ctx.pm.runtime(rec.id)
     return {
         "online": {"count": rt.players_online, "max": rt.players_max, "names": rt.player_names},
@@ -181,14 +198,20 @@ async def players(request: Request, server_id: str) -> dict:
 
 
 @router.post("/servers/{server_id}/players")
-async def player_action(request: Request, server_id: str, body: PlayerBody) -> dict:
-    ctx = get_ctx(request)
-    await ctx.servers.player_action(load_server(request, server_id), body.action, body.target, body.reason)
+async def player_action(
+    request: Request, body: PlayerBody, rec: ServerRecord = Depends(server_perm(MODERATE)),
+    principal: Principal = Depends(require_principal),
+) -> dict:
+    # Moderators may kick, ban and whitelist; making someone an operator takes more than that.
+    if body.action in OPERATOR_ACTIONS and not principal.can(rec.id, OPERATORS):
+        raise HTTPException(status_code=403, detail=NOT_ALLOWED)
+    await get_ctx(request).servers.player_action(rec, body.action, body.target, body.reason)
     return {"ok": True}
 
 
 @router.post("/servers/{server_id}/operators/level", status_code=202)
-async def set_operator_level(request: Request, server_id: str, body: OperatorLevelBody) -> JSONResponse:
+async def set_operator_level(
+    request: Request, body: OperatorLevelBody, rec: ServerRecord = Depends(server_perm(OPERATORS))
+) -> JSONResponse:
     """Give one operator a specific level. Restarts the server when it is running (see ``ServerService``)."""
-    ctx = get_ctx(request)
-    return accepted(ctx.servers.submit_operator_level(load_server(request, server_id), body.name.strip(), body.level))
+    return accepted(get_ctx(request).servers.submit_operator_level(rec, body.name.strip(), body.level))

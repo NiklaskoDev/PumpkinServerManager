@@ -14,13 +14,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from pydantic import BaseModel, ValidationError
 
 from .. import __version__
+from ..access import ACTIVITY, CONSOLE_VIEW, Principal
 from ..models import AppSettings
 from ..security import SESSION_COOKIE
-from .deps import get_ctx, require_session
+from .deps import NOT_ALLOWED, get_ctx, require_owner, require_principal, visible_job
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["system"])
-protected = [Depends(require_session)]
+owner_only = [Depends(require_owner)]
 
 
 @router.get("/health")
@@ -29,7 +30,7 @@ async def health(request: Request) -> dict:
     return {"status": "ok", "version": __version__}
 
 
-@router.get("/system", dependencies=protected)
+@router.get("/system", dependencies=owner_only)
 async def system(request: Request) -> dict:
     ctx = get_ctx(request)
     info = ctx.system_info()
@@ -62,12 +63,12 @@ def _settings_view(s: AppSettings) -> dict[str, Any]:
     return data
 
 
-@router.get("/settings", dependencies=protected)
+@router.get("/settings", dependencies=owner_only)
 async def get_settings(request: Request) -> dict:
     return _settings_view(get_ctx(request).app_settings())
 
 
-@router.put("/settings", dependencies=protected)
+@router.put("/settings", dependencies=owner_only)
 async def put_settings(body: SettingsPatch, request: Request) -> dict:
     ctx = get_ctx(request)
     changes = body.model_dump(exclude_unset=True)
@@ -89,7 +90,7 @@ class WebhookTest(BaseModel):
     url: str | None = None
 
 
-@router.post("/settings/webhook-test", dependencies=protected)
+@router.post("/settings/webhook-test", dependencies=owner_only)
 async def webhook_test(body: WebhookTest, request: Request) -> dict:
     ctx = get_ctx(request)
     url = body.url or ctx.app_settings().webhook_url
@@ -104,21 +105,39 @@ async def webhook_test(body: WebhookTest, request: Request) -> dict:
 
 
 # ------------------------------------------------------------- activity / jobs
-@router.get("/activity", dependencies=protected)
-async def activity(request: Request, limit: int = Query(100, ge=1, le=500), server_id: str | None = None) -> list:
-    return get_ctx(request).repo.list_activity(limit, server_id)
+def _allowed_servers(principal: Principal, server_id: str | None) -> set[str] | None:
+    """Which servers' entries an account may list (None: all of them). A server it may not follow answers like a missing one."""
+    allowed = principal.server_ids_with(ACTIVITY)
+    if allowed is None:
+        return None
+    if server_id is not None:
+        if server_id not in allowed:
+            if not principal.can_see(server_id):
+                raise HTTPException(status_code=404, detail="That server does not exist.")
+            raise HTTPException(status_code=403, detail=NOT_ALLOWED)
+        return {server_id}
+    return allowed
 
 
-@router.get("/jobs", dependencies=protected)
-async def jobs(request: Request, limit: int = Query(30, ge=1, le=200), server_id: str | None = None) -> list:
-    return get_ctx(request).repo.list_jobs(limit, server_id)
+@router.get("/activity")
+async def activity(
+    request: Request, limit: int = Query(100, ge=1, le=500), server_id: str | None = None,
+    principal: Principal = Depends(require_principal),
+) -> list:
+    """The activity feed. Accounts other than the administrator only get entries about servers they moderate or administer."""
+    return get_ctx(request).repo.list_activity(limit, server_id, _allowed_servers(principal, server_id))
 
 
-@router.get("/jobs/{job_id}", dependencies=protected)
-async def job(request: Request, job_id: str) -> dict:
-    row = get_ctx(request).repo.get_job(job_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Unknown job.")
+@router.get("/jobs")
+async def jobs(
+    request: Request, limit: int = Query(30, ge=1, le=200), server_id: str | None = None,
+    principal: Principal = Depends(require_principal),
+) -> list:
+    return get_ctx(request).repo.list_jobs(limit, server_id, _allowed_servers(principal, server_id))
+
+
+@router.get("/jobs/{job_id}")
+async def job(row: dict = Depends(visible_job)) -> dict:
     return row
 
 
@@ -132,21 +151,40 @@ async def events_socket(websocket: WebSocket) -> None:
         await websocket.close(code=4403)
         return
     token = websocket.cookies.get(SESSION_COOKIE)
-    if ctx.auth.resolve(token) is None:
+    session = ctx.auth.resolve(token)
+    principal = ctx.access.principal(session.user_id) if session else None
+    if session is None or principal is None:
         await websocket.close(code=4401)
         return
+    if session.must_change:  # a temporary password has to be replaced before anything else works
+        await websocket.close(code=4403)
+        return
     await websocket.accept()
-    sub = ctx.events.subscribe({"servers", "jobs", "activity"})
+    topics = {"servers", "jobs", "activity"}
+    # Everything a friend receives goes through the filter: only their servers, and only what their role may see. The
+    # administrator's events pass it too (they only gain the ``access`` entry on server views) and are never held back.
+    user_id = principal.user_id
+    sub = ctx.events.subscribe(
+        topics, user_id=user_id, view=lambda message: ctx.access.filter_event(user_id, message), unrestricted=principal.is_owner
+    )
+
+    def session_ended() -> bool:
+        current_session = ctx.auth.resolve(token)
+        return current_session is None or current_session.must_change
 
     async def sender() -> None:
         while True:
             message = await sub.queue.get()
+            # "Your access changed" is also what an account gets when it is reset or deleted: make sure the session still stands.
+            if message["type"] == "access" and session_ended():
+                await websocket.close(code=4401)
+                return
             await websocket.send_text(json.dumps(message, separators=(",", ":")))
 
     async def session_watch() -> None:
         while True:
-            await asyncio.sleep(60)
-            if ctx.auth.resolve(token) is None:
+            await asyncio.sleep(10)
+            if session_ended():
                 await websocket.close(code=4401)
                 return
 
@@ -163,7 +201,11 @@ async def events_socket(websocket: WebSocket) -> None:
                 await websocket.send_text('{"type":"pong"}')
             elif op == "subscribe" and topic.startswith("console:"):
                 server_id = topic.split(":", 1)[1]
-                if ctx.repo.get_server(server_id) is None:
+                if session_ended():
+                    await websocket.close(code=4401)
+                    break
+                current = ctx.access.principal(session.user_id)  # roles may have changed since the socket was opened
+                if ctx.repo.get_server(server_id) is None or current is None or not current.can(server_id, CONSOLE_VIEW):
                     continue
                 sub.topics.add(topic)  # subscribe first, then snapshot: the client de-duplicates by line number
                 await websocket.send_text(json.dumps({

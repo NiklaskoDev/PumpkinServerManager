@@ -1,5 +1,6 @@
 // Server detail page: header + tabs. Each tab is a module exporting render(ctx) -> { el, dispose?, onServer? }.
 
+import { PERM, can } from "../access.js";
 import { get, post } from "../api.js";
 import { clear, h, icon } from "../dom.js";
 import { bus, state } from "../store.js";
@@ -13,21 +14,21 @@ import * as playersTab from "../tabs/players.js";
 import * as settingsTab from "../tabs/settings.js";
 import * as versionTab from "../tabs/version.js";
 
+// `perm` is what the signed-in account needs on this server to see the tab at all (the server enforces it as well).
 const TABS = [
-  { id: "overview", label: "Overview", icon: "activity", mod: overviewTab },
-  { id: "console", label: "Console", icon: "terminal", mod: consoleTab },
-  { id: "players", label: "Players", icon: "users", mod: playersTab },
-  { id: "files", label: "Files", icon: "folder", mod: filesTab },
-  { id: "backups", label: "Backups", icon: "archive", mod: backupsTab },
-  { id: "version", label: "Version", icon: "layers", mod: versionTab },
-  { id: "settings", label: "Settings", icon: "sliders", mod: settingsTab },
+  { id: "overview", label: "Overview", icon: "activity", mod: overviewTab, perm: PERM.VIEW },
+  { id: "console", label: "Console", icon: "terminal", mod: consoleTab, perm: PERM.CONSOLE_VIEW },
+  { id: "players", label: "Players", icon: "users", mod: playersTab, perm: PERM.MODERATE },
+  { id: "files", label: "Files", icon: "folder", mod: filesTab, perm: PERM.FILES },
+  { id: "backups", label: "Backups", icon: "archive", mod: backupsTab, perm: PERM.BACKUPS },
+  { id: "version", label: "Version", icon: "layers", mod: versionTab, perm: PERM.VERSIONS },
+  { id: "settings", label: "Settings", icon: "sliders", mod: settingsTab, perm: PERM.SETTINGS },
 ];
 
 export async function render([id, tabId]) {
   if (!state.servers.has(id)) {
-    return { el: h("div", { class: "card" }, emptyState("server", "Server not found", "It may have been deleted.", h("a", { class: "btn primary", href: "#/" }, "Back to the dashboard"))) };
+    return { el: h("div", { class: "card" }, emptyState("server", "Server not found", "It may have been deleted, or you do not have access to it.", h("a", { class: "btn primary", href: "#/" }, "Back to the dashboard"))) };
   }
-  const tab = TABS.find((t) => t.id === tabId) || TABS[0];
   try {
     const detail = await get(`/api/servers/${id}`);
     state.servers.set(id, { ...state.servers.get(id), ...detail });
@@ -35,6 +36,8 @@ export async function render([id, tabId]) {
     notifyError(err);
   }
   const getServer = () => state.servers.get(id);
+  const tabs = TABS.filter((t) => can(getServer(), t.perm));
+  const tab = tabs.find((t) => t.id === tabId) || tabs[0];
 
   const title = h("h1", { class: "truncate" });
   const badge = h("span", {});
@@ -52,7 +55,7 @@ export async function render([id, tabId]) {
       channelChip(server.channel),
       h("span", { class: "chip mono" }, icon("globe", "sm"), connectAddress(server)));
     clear(actions).append(...serverActions(server));
-    if (server.state === "starting" || server.state === "stopping" || (server.busy && server.state !== "stopped")) {
+    if (can(server, PERM.CONTROL) && (server.state === "starting" || server.state === "stopping" || (server.busy && server.state !== "stopped"))) {
       actions.appendChild(h("button", { class: "btn danger sm", title: "Terminate the server process immediately (the world may not be saved)", onclick: async () => {
         if (!(await confirmDialog({ title: "Force-stop the process?", message: "The server is killed without saving. Use this only if it is stuck.", confirmLabel: "Kill process", danger: true }))) return;
         try { await post(`/api/servers/${id}/kill`); } catch (err) { notifyError(err); }
@@ -60,7 +63,7 @@ export async function render([id, tabId]) {
     }
   }
 
-  const tabsNav = h("div", { class: "tabs", role: "tablist" }, TABS.map((t) =>
+  const tabsNav = h("div", { class: "tabs", role: "tablist" }, tabs.map((t) =>
     h("a", { href: `#/server/${id}/${t.id}`, role: "tab", class: t.id === tab.id ? "active" : "", "aria-selected": String(t.id === tab.id) }, icon(t.icon, "sm"), t.label)));
 
   const view = tab.mod.render({ id, getServer });

@@ -125,6 +125,8 @@ class Session:
     username: str
     csrf: str
     expires_at: str
+    kind: str = "admin"  # "admin" (the administrator) or "friend"
+    must_change: bool = False  # signed in with a temporary password that has to be replaced first
 
 
 class AuthService:
@@ -149,12 +151,13 @@ class AuthService:
         self.repo.create_user(username, hashed)
         return generated
 
-    async def reset_password(self, username: str, password: str) -> bool:
+    async def reset_password(self, username: str, password: str, *, temporary: bool = False) -> bool:
+        """Set a new password and sign the account out everywhere. ``temporary`` makes the user choose their own at the next login."""
         user = self.repo.get_user_by_name(username)
         if not user:
             return False
         hashed = await asyncio.to_thread(hash_password, password)
-        self.repo.set_password(user["id"], hashed)
+        self.repo.set_password(user["id"], hashed, must_change=temporary)
         self.repo.delete_user_sessions(user["id"])
         return True
 
@@ -181,7 +184,9 @@ class AuthService:
         csrf = secrets.token_urlsafe(24)
         expires = iso(utcnow() + self.session_ttl)
         self.repo.create_session(_token_hash(token), user["id"], csrf, expires, ip, user_agent)
-        return token, Session(_token_hash(token), user["id"], user["username"], csrf, expires)
+        return token, Session(
+            _token_hash(token), user["id"], user["username"], csrf, expires, user["kind"], bool(user["must_change_password"])
+        )
 
     def resolve(self, token: str | None) -> Session | None:
         """Validate a session cookie and slide its expiry (at most once a minute)."""
@@ -198,7 +203,9 @@ class AuthService:
         if (now - parse_iso(row["last_seen_at"])).total_seconds() > 60:
             expires_at = iso(now + self.session_ttl)
             self.repo.touch_session(row["token_hash"], expires_at)
-        return Session(row["token_hash"], row["user_id"], row["username"], row["csrf"], expires_at)
+        return Session(
+            row["token_hash"], row["user_id"], row["username"], row["csrf"], expires_at, row["kind"], bool(row["must_change_password"])
+        )
 
     def logout(self, token: str | None) -> None:
         if token:
@@ -210,7 +217,11 @@ class AuthService:
         user = self.repo.get_user(session.user_id)
         if not user or not await asyncio.to_thread(verify_password, current, user["password_hash"]):
             raise AuthError("The current password is not correct.")
-        self.repo.set_password(user["id"], await asyncio.to_thread(hash_password, new))
+        if new == current:
+            raise AuthError("The new password must be different from the current one.")
+        if new.strip().lower() == user["username"].lower():
+            raise AuthError("The password must not be the same as the username.")
+        self.repo.set_password(user["id"], await asyncio.to_thread(hash_password, new))  # also ends a "must change" state
         # Other devices must log in again with the new password.
         self.repo.delete_user_sessions(user["id"], except_hash=session.token_hash)
 

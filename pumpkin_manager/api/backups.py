@@ -1,4 +1,4 @@
-"""Backup listing, creation, restore, download and upload."""
+"""Backup listing, creation, restore, download and upload (server admins and the administrator)."""
 
 from __future__ import annotations
 
@@ -7,14 +7,16 @@ import contextlib
 import os
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from ..access import BACKUPS, Principal
 from ..backups import BackupError, verify_archive
+from ..models import ServerRecord
 from ..servers import ServerError
 from ..util import free_bytes, human_bytes
-from .deps import get_ctx, load_server, require_session
+from .deps import NOT_ALLOWED, backup_perm, get_ctx, require_principal, require_session, server_perm
 
 router = APIRouter(tags=["backups"], dependencies=[Depends(require_session)])
 
@@ -41,17 +43,16 @@ def _public(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _row(request: Request, backup_id: str) -> dict[str, Any]:
-    row = get_ctx(request).repo.get_backup(backup_id)
-    if not row:
-        raise BackupError("That backup does not exist.", 404)
-    return row
-
-
 @router.get("/backups")
-async def list_backups(request: Request, server_id: str | None = None) -> dict:
+async def list_backups(request: Request, server_id: str | None = None, principal: Principal = Depends(require_principal)) -> dict:
+    """Backups of the servers this account may manage backups for (everything, for the administrator)."""
     ctx = get_ctx(request)
-    rows = ctx.repo.list_backups(server_id)
+    allowed = principal.server_ids_with(BACKUPS)  # None: every server
+    if server_id is not None and allowed is not None and server_id not in allowed:
+        if not principal.can_see(server_id):
+            raise HTTPException(status_code=404, detail="That server does not exist.")
+        raise HTTPException(status_code=403, detail=NOT_ALLOWED)
+    rows = [r for r in ctx.repo.list_backups(server_id) if allowed is None or r["server_id"] in allowed]
     existing = {r.id for r in ctx.repo.list_servers()}
     return {
         "backups": [{**_public(r), "server_exists": r["server_id"] in existing} for r in rows],
@@ -61,59 +62,54 @@ async def list_backups(request: Request, server_id: str | None = None) -> dict:
 
 
 @router.post("/servers/{server_id}/backups", status_code=202)
-async def create_backup(request: Request, server_id: str, body: CreateBackupBody) -> JSONResponse:
-    ctx = get_ctx(request)
-    rec = load_server(request, server_id)
-    return JSONResponse({"job": ctx.backups.submit_backup(rec, "manual", body.note)}, status_code=202)
+async def create_backup(request: Request, body: CreateBackupBody, rec: ServerRecord = Depends(server_perm(BACKUPS))) -> JSONResponse:
+    return JSONResponse({"job": get_ctx(request).backups.submit_backup(rec, "manual", body.note)}, status_code=202)
 
 
 @router.post("/backups/{backup_id}/restore", status_code=202)
-async def restore_backup(request: Request, backup_id: str, body: RestoreBody) -> JSONResponse:
+async def restore_backup(
+    request: Request, body: RestoreBody, row: dict[str, Any] = Depends(backup_perm(BACKUPS))
+) -> JSONResponse:
     ctx = get_ctx(request)
-    row = _row(request, backup_id)
     rec = ctx.repo.get_server(row["server_id"])
     if rec is None:
         raise ServerError("The server this backup belongs to no longer exists.", 404)
-    job = ctx.backups.submit_restore(rec, backup_id, body.safety_backup, lambda r: ctx.servers.ensure_config(r))
+    job = ctx.backups.submit_restore(rec, row["id"], body.safety_backup, lambda r: ctx.servers.ensure_config(r))
     return JSONResponse({"job": job}, status_code=202)
 
 
 @router.patch("/backups/{backup_id}")
-async def patch_backup(request: Request, backup_id: str, body: PatchBackupBody) -> dict:
+async def patch_backup(request: Request, body: PatchBackupBody, row: dict[str, Any] = Depends(backup_perm(BACKUPS))) -> dict:
     ctx = get_ctx(request)
-    _row(request, backup_id)
     changes = body.model_dump(exclude_unset=True)
     if "protected" in changes:
         changes["protected"] = int(bool(changes["protected"]))
-    ctx.repo.update_backup(backup_id, **changes)
-    return _public(_row(request, backup_id))
+    ctx.repo.update_backup(row["id"], **changes)
+    return _public(ctx.repo.get_backup(row["id"]))  # type: ignore[arg-type]
 
 
 @router.delete("/backups/{backup_id}")
-async def delete_backup(request: Request, backup_id: str) -> dict:
-    ctx = get_ctx(request)
-    row = _row(request, backup_id)
+async def delete_backup(request: Request, row: dict[str, Any] = Depends(backup_perm(BACKUPS))) -> dict:
     if row["protected"]:
         raise BackupError("This backup is protected. Remove the protection first.")
-    await asyncio.to_thread(ctx.backups.delete, backup_id)
+    await asyncio.to_thread(get_ctx(request).backups.delete, row["id"])
     return {"ok": True}
 
 
 @router.get("/backups/{backup_id}/download")
-async def download_backup(request: Request, backup_id: str) -> FileResponse:
-    ctx = get_ctx(request)
-    row = _row(request, backup_id)
-    path = ctx.backups.archive_path(row)
+async def download_backup(request: Request, row: dict[str, Any] = Depends(backup_perm(BACKUPS))) -> FileResponse:
+    path = get_ctx(request).backups.archive_path(row)
     if not path.is_file():
         raise BackupError("The backup file is missing from disk.")
     return FileResponse(path, filename=f"{row['server_id']}-{path.name}", media_type="application/gzip")
 
 
 @router.put("/servers/{server_id}/backups/upload")
-async def upload_backup(request: Request, server_id: str, name: str = Query("upload.tar.gz", max_length=200)) -> dict:
+async def upload_backup(
+    request: Request, name: str = Query("upload.tar.gz", max_length=200), rec: ServerRecord = Depends(server_perm(BACKUPS))
+) -> dict:
     """Accept a ``.tar.gz`` (for example from another machine) so it can be restored."""
     ctx = get_ctx(request)
-    rec = load_server(request, server_id)
     limit = ctx.settings.max_upload_bytes
     declared = int(request.headers.get("content-length") or 0)
     if declared > limit:

@@ -1,5 +1,6 @@
 // Live console: streamed output with colours, command input with history, filter and follow mode.
 
+import { PERM, can } from "../access.js";
 import { get, post } from "../api.js";
 import { ansiToNodes, stripAnsi } from "../ansi.js";
 import { clear, debounce, h, icon } from "../dom.js";
@@ -87,10 +88,13 @@ export function render({ id, getServer }) {
     else if (e.key === "ArrowDown") { e.preventDefault(); cursor = Math.min(history.length, cursor + 1); input.value = history[cursor] || ""; }
   });
 
-  const quick = ["list", "tps", "save-all"].map((c) => h("button", { class: "btn", type: "button", onclick: () => send(c) }, c));
+  // Moderators can read the console but not type into it: neither the box nor the shortcut buttons are offered to them.
+  const canType = can(getServer(), PERM.CONSOLE_COMMAND);
+  const quick = canType ? ["list", "tps", "save-all"].map((c) => h("button", { class: "btn", type: "button", onclick: () => send(c) }, c)) : [];
   const box = h("div", { class: "console-box" },
     h("div", { class: "console-bar" }, status, filterInput, wrapBtn, clearBtn, ...quick),
-    out, jump, form);
+    out, jump,
+    canType ? form : h("div", { class: "console-form" }, h("span", { class: "muted small" }, "You can read the console, but only admins can send commands.")));
 
   // --- live feed --------------------------------------------------------------------------------
   const off = bus.on(`console:${id}`, (msg) => {
@@ -101,7 +105,7 @@ export function render({ id, getServer }) {
   get(`/api/servers/${id}/console?lines=500`).then((data) => addLines(data.lines)).catch(() => {});
 
   function refreshStatus(s) {
-    status.textContent = s.state === "running" ? "Connected to the server console" : s.state === "stopped" ? "Server is stopped: commands are unavailable" : `Server is ${s.state}`;
+    status.textContent = s.state === "running" ? "Connected to the server console" : s.state === "stopped" ? (canType ? "Server is stopped: commands are unavailable" : "Server is stopped") : `Server is ${s.state}`;
     input.disabled = !(s.state === "running" || s.state === "starting");
     input.placeholder = input.disabled ? "Start the server to send commands" : "Type a command, e.g. list or say hello";
   }

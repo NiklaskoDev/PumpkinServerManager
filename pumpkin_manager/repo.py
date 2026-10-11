@@ -61,18 +61,52 @@ class Repo:
     def get_user(self, user_id: int) -> dict[str, Any] | None:
         return self.db.one("SELECT * FROM users WHERE id=?", (user_id,))
 
-    def create_user(self, username: str, password_hash: str) -> int:
+    def create_user(self, username: str, password_hash: str, kind: str = "admin", must_change: bool = False) -> int:
         cur = self.db.execute(
-            "INSERT INTO users(username, password_hash, created_at) VALUES(?,?,?)",
-            (username, password_hash, iso()),
+            "INSERT INTO users(username, password_hash, created_at, kind, must_change_password) VALUES(?,?,?,?,?)",
+            (username, password_hash, iso(), kind, int(must_change)),
         )
         return int(cur.lastrowid)
 
-    def set_password(self, user_id: int, password_hash: str) -> None:
-        self.db.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, user_id))
+    def set_password(self, user_id: int, password_hash: str, must_change: bool = False) -> None:
+        """Store a new password hash. ``must_change`` marks it as a temporary one the user has to replace at the next login."""
+        self.db.execute(
+            "UPDATE users SET password_hash=?, must_change_password=? WHERE id=?", (password_hash, int(must_change), user_id)
+        )
 
     def touch_login(self, user_id: int) -> None:
         self.db.execute("UPDATE users SET last_login_at=? WHERE id=?", (iso(), user_id))
+
+    def list_users(self) -> list[dict[str, Any]]:
+        return self.db.all(
+            "SELECT id, username, kind, created_at, last_login_at, must_change_password FROM users ORDER BY kind, username COLLATE NOCASE"
+        )
+
+    def delete_user(self, user_id: int) -> None:
+        self.db.execute("DELETE FROM users WHERE id=?", (user_id,))  # sessions and server assignments cascade
+
+    # ------------------------------------------------------------ server access
+    def user_assignments(self, user_id: int) -> dict[str, str]:
+        rows = self.db.all("SELECT server_id, role FROM user_servers WHERE user_id=?", (user_id,))
+        return {r["server_id"]: r["role"] for r in rows}
+
+    def all_assignments(self) -> dict[int, dict[str, str]]:
+        result: dict[int, dict[str, str]] = {}
+        for r in self.db.all("SELECT user_id, server_id, role FROM user_servers"):
+            result.setdefault(r["user_id"], {})[r["server_id"]] = r["role"]
+        return result
+
+    def set_user_servers(self, user_id: int, assignments: dict[str, str]) -> None:
+        """Replace everything a user may access with ``{server id: role}``."""
+        with self.db.tx():
+            self.db.execute("DELETE FROM user_servers WHERE user_id=?", (user_id,))
+            for server_id, role in assignments.items():
+                self.db.execute(
+                    "INSERT INTO user_servers(user_id, server_id, role) VALUES(?,?,?)", (user_id, server_id, role)
+                )
+
+    def users_with_server(self, server_id: str) -> set[int]:
+        return {r["user_id"] for r in self.db.all("SELECT user_id FROM user_servers WHERE server_id=?", (server_id,))}
 
     # ------------------------------------------------------------------ sessions
     def create_session(
@@ -87,7 +121,8 @@ class Repo:
 
     def get_session(self, token_hash: str) -> dict[str, Any] | None:
         return self.db.one(
-            "SELECT s.*, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash=?",
+            "SELECT s.*, u.username, u.kind, u.must_change_password FROM sessions s JOIN users u ON u.id = s.user_id "
+            "WHERE s.token_hash=?",
             (token_hash,),
         )
 
@@ -250,8 +285,17 @@ class Repo:
                 f"UPDATE jobs SET {','.join(f'{k}=?' for k in fields)} WHERE id=?", [*fields.values(), job_id]
             )
 
-    def list_jobs(self, limit: int = 50, server_id: str | None = None) -> list[dict[str, Any]]:
-        if server_id:
+    def list_jobs(
+        self, limit: int = 50, server_id: str | None = None, server_ids: set[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Newest first. ``server_ids`` restricts the result to jobs of those servers (an empty set matches nothing)."""
+        if server_ids is not None:
+            marks = ",".join("?" for _ in server_ids)
+            rows = self.db.all(
+                f"SELECT * FROM jobs WHERE server_id IN ({marks}) ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (*sorted(server_ids), limit),
+            ) if server_ids else []
+        elif server_id:
             rows = self.db.all(
                 "SELECT * FROM jobs WHERE server_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?", (server_id, limit)
             )
@@ -325,7 +369,17 @@ class Repo:
             "message": message[:1000],
         }
 
-    def list_activity(self, limit: int = 100, server_id: str | None = None) -> list[dict[str, Any]]:
+    def list_activity(
+        self, limit: int = 100, server_id: str | None = None, server_ids: set[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Newest first. ``server_ids`` restricts the result to entries about those servers (an empty set matches nothing)."""
+        if server_ids is not None:
+            if not server_ids:
+                return []
+            marks = ",".join("?" for _ in server_ids)
+            return self.db.all(
+                f"SELECT * FROM activity WHERE server_id IN ({marks}) ORDER BY id DESC LIMIT ?", (*sorted(server_ids), limit)
+            )
         if server_id:
             return self.db.all(
                 "SELECT * FROM activity WHERE server_id=? ORDER BY id DESC LIMIT ?", (server_id, limit)

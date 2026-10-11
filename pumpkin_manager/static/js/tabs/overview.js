@@ -1,3 +1,4 @@
+import { PERM, can } from "../access.js";
 import { copyText, fmtBytes, fmtDuration, fmtRelative, h, icon, clear } from "../dom.js";
 import { get, post } from "../api.js";
 import { bus, state } from "../store.js";
@@ -47,7 +48,7 @@ export function render({ id, getServer }) {
       ...copyRow("Java Edition", `${s.public_address || location.hostname}:${s.ports.java}`),
       ...(s.ports.bedrock ? copyRow("Bedrock (UDP)", `${s.public_address || location.hostname}:${s.ports.bedrock}`) : []),
       h("dt", {}, "Minecraft"), v.mc, h("dt", {}, "MOTD"), v.motd,
-      h("dt", {}, "Management API"), h("dd", {}, s.state !== "running" ? "–" : s.msmp_ok ? h("span", { class: "badge success" }, "connected") : h("span", { class: "badge", title: "This Pumpkin build has no management API, or it is not reachable. The manager uses console commands and server pings instead." }, "not available")));
+      ...(can(s, PERM.SETTINGS) ? [h("dt", {}, "Management API"), h("dd", {}, s.state !== "running" ? "–" : s.msmp_ok ? h("span", { class: "badge success" }, "connected") : h("span", { class: "badge", title: "This Pumpkin build has no management API, or it is not reachable. The manager uses console commands and server pings instead." }, "not available"))] : []));
     if (!s.ports.java_published) {
       connHost.appendChild(h("dt", {}, ""));
       connHost.appendChild(h("dd", {}, h("div", { class: "notice warning" }, icon("alert", "sm"), "This port is outside the range the container publishes, so players outside Docker cannot reach it.")));
@@ -60,19 +61,24 @@ export function render({ id, getServer }) {
     else names.forEach((n) => playersHost.appendChild(h("div", { class: "player" }, h("div", { class: "head" }), h("strong", {}, n))));
 
     clear(versionHost);
+    const manage = can(s, PERM.VERSIONS);
     versionHost.appendChild(h("dl", { class: "kv" },
       h("dt", {}, "Installed"), h("dd", {}, h("strong", {}, versionText(s.build))),
-      h("dt", {}, "Channel"), h("dd", {}, s.pinned_tag ? `${s.channel} (pinned)` : s.channel),
-      h("dt", {}, "Updates"), h("dd", {}, { auto: "automatic, backup first", notify: "notify only", off: "off" }[s.update.mode]),
-      h("dt", {}, "Last backup"), h("dd", {}, fmtRelative(s.last_backup_at))));
-    if (s.update.available) {
+      ...(manage ? [
+        h("dt", {}, "Channel"), h("dd", {}, s.pinned_tag ? `${s.channel} (pinned)` : s.channel),
+        h("dt", {}, "Updates"), h("dd", {}, { auto: "automatic, backup first", notify: "notify only", off: "off" }[s.update.mode]),
+        h("dt", {}, "Last backup"), h("dd", {}, fmtRelative(s.last_backup_at)),
+      ] : [])));
+    if (manage && s.update.available) {
       versionHost.appendChild(h("div", { class: "update-banner", style: { marginTop: "12px" } }, icon("arrowUp"),
         h("div", { class: "grow" }, "Update available: ", h("strong", {}, versionText(s.update.pending_build))),
         h("button", { class: "btn primary sm", disabled: !!s.busy, onclick: () => jobDialog(post(`/api/servers/${id}/update`, {}), { title: `Updating ${s.name}`, successToast: "Update installed" }) }, "Update now")));
     }
   }
 
+  const followsActivity = can(server, PERM.ACTIVITY);
   function refreshActivity() {
+    if (!followsActivity) return;
     clear(activityHost);
     const items = state.activity.filter((a) => a.server_id === id).slice(0, 10);
     if (!items.length) activityHost.appendChild(h("p", { class: "muted" }, "No activity recorded yet."));
@@ -80,11 +86,13 @@ export function render({ id, getServer }) {
   }
 
   const offActivity = bus.on("activity", refreshActivity);
-  get(`/api/activity?server_id=${id}&limit=30`).then((rows) => {
-    const others = state.activity.filter((a) => a.server_id !== id);
-    state.activity = [...rows, ...others].sort((a, b) => b.id - a.id).slice(0, 200);
-    refreshActivity();
-  }).catch(() => {});
+  if (followsActivity) {
+    get(`/api/activity?server_id=${id}&limit=30`).then((rows) => {
+      const others = state.activity.filter((a) => a.server_id !== id);
+      state.activity = [...rows, ...others].sort((a, b) => b.id - a.id).slice(0, 200);
+      refreshActivity();
+    }).catch(() => {});
+  }
 
   refresh(server);
   refreshActivity();
@@ -98,10 +106,11 @@ export function render({ id, getServer }) {
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h3", {}, "Memory")), v.mem, memSpark)),
     h("div", { class: "grid cols-2" },
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Connect")), connHost),
-      h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Version"), h("a", { class: "small", href: `#/server/${id}/version` }, "Manage")), versionHost)),
-    h("div", { class: "grid cols-2" },
+      h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Version"),
+        can(server, PERM.VERSIONS) ? h("a", { class: "small", href: `#/server/${id}/version` }, "Manage") : null), versionHost)),
+    h("div", { class: followsActivity ? "grid cols-2" : "grid" },
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Online players")), playersHost),
-      h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Recent activity")), activityHost)));
+      followsActivity ? h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Recent activity")), activityHost) : null));
 
   return {
     el,

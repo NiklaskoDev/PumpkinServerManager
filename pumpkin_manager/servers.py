@@ -92,6 +92,7 @@ class ServerService:
         self._app_settings = app_settings
         self.command_builder: CommandBuilder = command_builder or (lambda rec, build: [str(builds.binary_path(build.id))])
         self.backups: Any = None  # attached by the application factory (BackupService)
+        self.access: Any = None  # attached by the application factory (AccessService)
         self._create_lock = asyncio.Lock()
         self._disk_cache: dict[str, tuple[float, int]] = {}
         self._last_poll: dict[str, float] = {}
@@ -405,6 +406,7 @@ class ServerService:
 
     # ------------------------------------------------------------------- delete
     async def _do_delete(self, rec: ServerRecord, ctx: JobContext, final_backup: bool, delete_backups: bool) -> None:
+        holders = self.repo.users_with_server(rec.id)  # who gets told it is gone: the accounts that had access to it
         if self.pm.runtime(rec.id).is_active:
             await self._do_stop(rec, ctx, user_initiated=True)
         directory = self.server_dir(rec.id)
@@ -413,14 +415,16 @@ class ServerService:
             await self.backups.create(rec, "pre-delete", ctx, mode="cold", note="Final backup before the server was deleted")
         ctx.step("Deleting the server files")
         await asyncio.to_thread(shutil.rmtree, directory, True)
-        self.repo.delete_server(rec.id)
+        self.repo.delete_server(rec.id)  # the accounts' access to it goes with it
+        if self.access is not None:
+            self.access.invalidate()
         self.pm.forget(rec.id)
         await asyncio.to_thread(shutil.rmtree, self.settings.logs_dir / rec.id, True)
         if delete_backups:
             for row in self.repo.list_backups(rec.id):
                 self.backups.delete(row["id"], quiet=True)
         self.reporter.record("warning", "server", f"Server '{rec.name}' deleted", None)
-        self.events.publish("servers", "deleted", {"id": rec.id})
+        self.events.publish("servers", "deleted", {"id": rec.id}, audience=holders)
 
     def submit_delete(self, rec: ServerRecord, final_backup: bool, delete_backups: bool) -> dict[str, Any]:
         return self.jobs.submit(

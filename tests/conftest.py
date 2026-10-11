@@ -9,11 +9,13 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import pytest_asyncio
+import uvicorn
 from fakes import FAKE, FakeReleaseSource
 
-from pumpkin_manager.app import AppContext
+from pumpkin_manager.app import AppContext, create_app
 from pumpkin_manager.config import Settings
 from pumpkin_manager.servers import port_is_free
 
@@ -56,6 +58,59 @@ async def ctx(tmp_path: Path, source: FakeReleaseSource):
         yield app_ctx
     finally:
         await app_ctx.shutdown()
+
+
+class Api:
+    def __init__(self, base: str):
+        self.base = base
+        self.http = httpx.AsyncClient(base_url=base, timeout=30)
+        self.csrf: str | None = None
+
+    async def login(self, password: str = "correct horse battery", username: str = "admin") -> httpx.Response:
+        resp = await self.http.post("/api/auth/login", json={"username": username, "password": password})
+        if resp.status_code == 200:
+            self.csrf = resp.json()["csrf"]
+        return resp
+
+    async def call(self, method: str, path: str, *, csrf: bool = True, **kw: Any) -> httpx.Response:
+        headers = dict(kw.pop("headers", {}))
+        if csrf and self.csrf:
+            headers["X-CSRF-Token"] = self.csrf
+        return await self.http.request(method, path, headers=headers, **kw)
+
+    async def job(self, resp: httpx.Response, timeout: float = 90) -> dict[str, Any]:
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job"]["id"]
+
+        async def finished() -> dict[str, Any] | None:
+            row = (await self.call("GET", f"/api/jobs/{job_id}")).json()
+            return row if row["status"] != "running" else None
+
+        return await wait_until(finished, timeout, what="job to finish")
+
+    async def create_server(self, name: str = "Alpha", **body: Any) -> dict[str, Any]:
+        row = await self.job(await self.call("POST", "/api/servers", json={"name": name, **body}))
+        assert row["status"] == "success", row["message"]
+        servers = (await self.call("GET", "/api/servers")).json()
+        return next(s for s in servers if s["name"] == name)
+
+
+@pytest_asyncio.fixture
+async def live(tmp_path, source):
+    settings = make_settings(tmp_path)
+    app = create_app(settings, release_source=source, verify_elf=False, background=False, stability_seconds=0.6)
+    ctx = app.state.ctx
+    ctx.servers.command_builder = lambda rec, build: [sys.executable, "-u", str(FAKE), str(ctx.builds.binary_path(build.id))]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=settings.web_port, log_level="warning", access_log=False))
+    task = asyncio.create_task(server.serve())
+    await wait_until(lambda: server.started, 20, what="web server")
+    api = Api(f"http://127.0.0.1:{settings.web_port}")
+    try:
+        yield api, ctx
+    finally:
+        await api.http.aclose()
+        server.should_exit = True
+        await asyncio.wait_for(task, 60)
 
 
 async def wait_until(predicate: Callable[[], Any | Awaitable[Any]], timeout: float = 30.0, interval: float = 0.05, what: str = "condition") -> Any:

@@ -72,12 +72,16 @@ def reset_password(user: str | None, password: str | None) -> int:
     if len(password) < MIN_PASSWORD_LENGTH:
         print(f"The password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
         return 1
-    ok = asyncio.run(AuthService(repo, settings.session_hours).reset_password(username, password))
+    target = repo.get_user_by_name(username)
+    temporary = bool(target and target["kind"] == "friend")  # a friend's account gets a temporary password to replace at login
+    ok = asyncio.run(AuthService(repo, settings.session_hours).reset_password(username, password, temporary=temporary))
     db.close()
     if not ok:
         print(f"There is no user named '{username}'.", file=sys.stderr)
         return 1
     print(f"Password for '{username}' has been reset. All sessions were signed out.")
+    if temporary:
+        print("It is a temporary password: the account has to choose its own at the next sign-in.")
     if generated:
         print(f"New password: {password}")
     return 0

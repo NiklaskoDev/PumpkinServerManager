@@ -1,5 +1,6 @@
 // Server settings: game settings (from the server-side schema), automation, network, raw pumpkin.toml, delete.
 
+import { PERM, can } from "../access.js";
 import { del, get, patch, post, put } from "../api.js";
 import { clear, h, icon } from "../dom.js";
 import { confirmDialog, field, jobDialog, notifyError, quickJob, selectControl, switchControl, toast } from "../ui.js";
@@ -172,7 +173,8 @@ export function render({ id, getServer }) {
   }
 
   buildGameSettings().then((card) => {
-    host.append(restartHost, card, buildAutomation(), buildRaw(), buildDanger());
+    // Only the administrator may delete a server; server admins manage everything else about it.
+    host.append(restartHost, card, buildAutomation(), buildRaw(), ...(can(getServer(), PERM.DELETE) ? [buildDanger()] : []));
   }).catch(notifyError);
   return { el: host };
 }

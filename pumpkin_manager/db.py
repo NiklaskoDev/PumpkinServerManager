@@ -133,7 +133,21 @@ CREATE TABLE activity (
 CREATE INDEX idx_activity_ts ON activity(ts DESC);
 """
 
-MIGRATIONS: list[str] = [SCHEMA_V1]
+# Accounts for friends: every existing user is the administrator (kind 'admin'); friends get a role per server.
+SCHEMA_V2 = """
+ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'admin';
+ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE user_servers (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('player', 'moderator', 'admin')),
+  PRIMARY KEY (user_id, server_id)
+);
+CREATE INDEX idx_user_servers_server ON user_servers(server_id);
+"""
+
+MIGRATIONS: list[str] = [SCHEMA_V1, SCHEMA_V2]
 
 
 class Database:

@@ -1,9 +1,14 @@
 import { api } from "../api.js";
 import { h, logoSvg } from "../dom.js";
 
+const LAST_USER_KEY = "pumpkin-manager-last-user";
+function lastUser() { try { return localStorage.getItem(LAST_USER_KEY) || "admin"; } catch { return "admin"; } }
+function rememberUser(name) { try { localStorage.setItem(LAST_USER_KEY, name); } catch { /* private mode */ } }
+
+// onSuccess(session, password): the password is handed on so a temporary one need not be typed twice.
 export function renderLogin(onSuccess) {
   const error = h("div", { class: "notice danger hidden", role: "alert" });
-  const user = h("input", { class: "input", name: "username", autocomplete: "username", value: "admin", required: true, "aria-label": "Username" });
+  const user = h("input", { class: "input", name: "username", autocomplete: "username", value: lastUser(), required: true, "aria-label": "Username" });
   const pass = h("input", { class: "input", name: "password", type: "password", autocomplete: "current-password", required: true, "aria-label": "Password" });
   const button = h("button", { class: "btn primary", type: "submit", style: { width: "100%", minHeight: "42px" } }, "Sign in");
 
@@ -14,7 +19,8 @@ export function renderLogin(onSuccess) {
     button.textContent = "Signing in...";
     try {
       const session = await api("POST", "/api/auth/login", { username: user.value, password: pass.value }, { allowUnauthorized: true });
-      await onSuccess(session);
+      rememberUser(user.value.trim());
+      await onSuccess(session, pass.value);
     } catch (err) {
       error.textContent = err.message;
       error.classList.remove("hidden");

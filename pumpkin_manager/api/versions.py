@@ -9,11 +9,12 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ..access import VERSIONS, Principal
 from ..jobs import JobContext
-from ..models import BuildRecord
+from ..models import BuildRecord, ServerRecord
 from ..releases import ROLLING_TAGS, ReleaseError
 from ..servers import ServerError
-from .deps import get_ctx, load_server, require_session
+from .deps import any_server_perm, get_ctx, require_owner, require_principal, require_session, server_perm
 
 router = APIRouter(tags=["versions"], dependencies=[Depends(require_session)])
 
@@ -53,19 +54,23 @@ async def _resolve_target(request: Request, body: TargetBody, rec_channel: str) 
 
 
 @router.get("/versions")
-async def overview(request: Request) -> dict:
-    return get_ctx(request).updater.overview()
+async def overview(request: Request, principal: Principal = Depends(any_server_perm(VERSIONS))) -> dict:
+    data = get_ctx(request).updater.overview()
+    if not principal.is_owner:
+        # What a server admin needs to pick a version; the list of builds says which servers use them, so it stays private.
+        data = {"channels": data["channels"], "last_check": data["last_check"], "errors": data["errors"], "builds": [], "disk_bytes": 0}
+    return data
 
 
 @router.post("/versions/check")
-async def check_now(request: Request) -> dict:
+async def check_now(request: Request, owner: Principal = Depends(require_owner)) -> dict:
     ctx = get_ctx(request)
     result = await asyncio.wait_for(ctx.updater.check(), timeout=60)
     return {**result, **ctx.updater.overview()}
 
 
 @router.get("/versions/releases")
-async def stable_releases(request: Request, limit: int = 15) -> dict:
+async def stable_releases(request: Request, limit: int = 15, principal: Principal = Depends(any_server_perm(VERSIONS))) -> dict:
     ctx = get_ctx(request)
     try:
         builds = await ctx.release_source.list_stable(max(1, min(limit, 30)))
@@ -84,7 +89,7 @@ async def stable_releases(request: Request, limit: int = 15) -> dict:
 
 
 @router.post("/versions/download", status_code=202)
-async def download(request: Request, body: DownloadBody) -> JSONResponse:
+async def download(request: Request, body: DownloadBody, owner: Principal = Depends(require_owner)) -> JSONResponse:
     ctx = get_ctx(request)
 
     async def run(job: JobContext) -> None:
@@ -102,7 +107,7 @@ async def download(request: Request, body: DownloadBody) -> JSONResponse:
 
 
 @router.delete("/versions/{build_id}")
-async def delete_build(request: Request, build_id: str) -> dict:
+async def delete_build(request: Request, build_id: str, owner: Principal = Depends(require_owner)) -> dict:
     ctx = get_ctx(request)
     build = ctx.repo.get_build(build_id)
     if build is None:
@@ -115,23 +120,20 @@ async def delete_build(request: Request, build_id: str) -> dict:
 
 
 @router.post("/versions/prune")
-async def prune(request: Request) -> dict:
+async def prune(request: Request, owner: Principal = Depends(require_owner)) -> dict:
     removed = await asyncio.to_thread(get_ctx(request).updater.prune_builds)
     return {"removed": removed}
 
 
 # ----------------------------------------------------------- per-server updates
 @router.get("/servers/{server_id}/updates")
-async def update_history(request: Request, server_id: str) -> dict:
-    ctx = get_ctx(request)
-    rec = load_server(request, server_id)
-    return {"updates": ctx.repo.list_updates(rec.id, 25)}
+async def update_history(request: Request, rec: ServerRecord = Depends(server_perm(VERSIONS))) -> dict:
+    return {"updates": get_ctx(request).repo.list_updates(rec.id, 25)}
 
 
 @router.post("/servers/{server_id}/update", status_code=202)
-async def update_server(request: Request, server_id: str, body: TargetBody) -> JSONResponse:
+async def update_server(request: Request, body: TargetBody, rec: ServerRecord = Depends(server_perm(VERSIONS))) -> JSONResponse:
     ctx = get_ctx(request)
-    rec = load_server(request, server_id)
     if body.build_id is None and body.tag is None and body.channel is None and rec.pending_build_id:
         target = ctx.repo.get_build(rec.pending_build_id)
         if target is None:
@@ -143,16 +145,15 @@ async def update_server(request: Request, server_id: str, body: TargetBody) -> J
 
 
 @router.post("/servers/{server_id}/update/check")
-async def check_server(request: Request, server_id: str) -> dict[str, Any]:
+async def check_server(
+    request: Request, rec: ServerRecord = Depends(server_perm(VERSIONS)), principal: Principal = Depends(require_principal)
+) -> dict[str, Any]:
     ctx = get_ctx(request)
-    load_server(request, server_id)
     result = await asyncio.wait_for(ctx.updater.check(), timeout=60)
-    rec = ctx.servers.get(server_id)
-    return {**result, "server": ctx.servers.view(rec, detail=True)}
+    rec = ctx.servers.get(rec.id)
+    return {**result, "server": ctx.access.shape_server_view(principal, ctx.servers.view(rec, detail=True))}
 
 
 @router.post("/servers/{server_id}/rollback", status_code=202)
-async def rollback(request: Request, server_id: str, body: RollbackBody) -> JSONResponse:
-    ctx = get_ctx(request)
-    rec = load_server(request, server_id)
-    return JSONResponse({"job": ctx.updater.submit_rollback(rec, body.restore_data)}, status_code=202)
+async def rollback(request: Request, body: RollbackBody, rec: ServerRecord = Depends(server_perm(VERSIONS))) -> JSONResponse:
+    return JSONResponse({"job": get_ctx(request).updater.submit_rollback(rec, body.restore_data)}, status_code=202)

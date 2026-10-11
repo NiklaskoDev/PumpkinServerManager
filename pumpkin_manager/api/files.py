@@ -1,10 +1,11 @@
-"""File browser API for a server's folder."""
+"""File browser API for a server's folder (server admins and the administrator)."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import os
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -12,8 +13,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .. import files as fm
+from ..access import FILES
+from ..models import ServerRecord
 from ..util import free_bytes
-from .deps import get_ctx, load_server, require_session
+from .deps import get_ctx, require_session, server_perm
 
 router = APIRouter(tags=["files"], dependencies=[Depends(require_session)])
 
@@ -32,40 +35,35 @@ class RenameBody(BaseModel):
     destination: str = Field(max_length=1000)
 
 
-def _root(request: Request, server_id: str):
-    ctx = get_ctx(request)
-    load_server(request, server_id)
-    return ctx, ctx.servers.server_dir(server_id)
+def _root(request: Request, rec: ServerRecord) -> Path:
+    return get_ctx(request).servers.server_dir(rec.id)
 
 
 @router.get("/servers/{server_id}/files")
-async def list_files(request: Request, server_id: str, path: str = "") -> dict:
-    _, root = _root(request, server_id)
-    return await asyncio.to_thread(fm.list_dir, root, path)
+async def list_files(request: Request, path: str = "", rec: ServerRecord = Depends(server_perm(FILES))) -> dict:
+    return await asyncio.to_thread(fm.list_dir, _root(request, rec), path)
 
 
 @router.get("/servers/{server_id}/files/content")
-async def read_file(request: Request, server_id: str, path: str) -> dict:
-    _, root = _root(request, server_id)
-    return await asyncio.to_thread(fm.read_text, root, path)
+async def read_file(request: Request, path: str, rec: ServerRecord = Depends(server_perm(FILES))) -> dict:
+    return await asyncio.to_thread(fm.read_text, _root(request, rec), path)
 
 
 @router.put("/servers/{server_id}/files/content")
-async def write_file(request: Request, server_id: str, body: WriteBody) -> dict[str, Any]:
-    ctx, root = _root(request, server_id)
+async def write_file(request: Request, body: WriteBody, rec: ServerRecord = Depends(server_perm(FILES))) -> dict[str, Any]:
+    ctx = get_ctx(request)
     rel = body.path.replace("\\", "/").strip("/")
     if rel == "pumpkin.toml":
         # The main config goes through validation so a typo cannot make Pumpkin silently ignore it.
-        result = ctx.servers.write_raw_config(load_server(request, server_id), body.content)
+        result = ctx.servers.write_raw_config(rec, body.content)
         return {"saved": True, **result}
-    await asyncio.to_thread(fm.write_text, root, body.path, body.content)
+    await asyncio.to_thread(fm.write_text, _root(request, rec), body.path, body.content)
     return {"saved": True}
 
 
 @router.get("/servers/{server_id}/files/download")
-async def download(request: Request, server_id: str, path: str) -> FileResponse:
-    _, root = _root(request, server_id)
-    target = fm.resolve(root, path)
+async def download(request: Request, path: str, rec: ServerRecord = Depends(server_perm(FILES))) -> FileResponse:
+    target = fm.resolve(_root(request, rec), path)
     if not target.is_file():
         raise fm.FileError("Only files can be downloaded.")
     return FileResponse(target, filename=target.name, media_type="application/octet-stream")
@@ -73,9 +71,10 @@ async def download(request: Request, server_id: str, path: str) -> FileResponse:
 
 @router.put("/servers/{server_id}/files/upload")
 async def upload(
-    request: Request, server_id: str, name: str = Query(min_length=1, max_length=255), path: str = ""
+    request: Request, name: str = Query(min_length=1, max_length=255), path: str = "",
+    rec: ServerRecord = Depends(server_perm(FILES)),
 ) -> dict:
-    ctx, root = _root(request, server_id)
+    ctx, root = get_ctx(request), _root(request, rec)
     if "/" in name or "\\" in name or name in (".", "..") or "\x00" in name:
         raise fm.FileError("Invalid file name.")
     folder = fm.resolve(root, path)
@@ -108,21 +107,18 @@ async def upload(
 
 
 @router.post("/servers/{server_id}/files/mkdir")
-async def mkdir(request: Request, server_id: str, body: PathBody) -> dict:
-    _, root = _root(request, server_id)
-    await asyncio.to_thread(fm.make_dir, root, body.path)
+async def mkdir(request: Request, body: PathBody, rec: ServerRecord = Depends(server_perm(FILES))) -> dict:
+    await asyncio.to_thread(fm.make_dir, _root(request, rec), body.path)
     return {"ok": True}
 
 
 @router.post("/servers/{server_id}/files/rename")
-async def rename(request: Request, server_id: str, body: RenameBody) -> dict:
-    _, root = _root(request, server_id)
-    await asyncio.to_thread(fm.rename, root, body.source, body.destination)
+async def rename(request: Request, body: RenameBody, rec: ServerRecord = Depends(server_perm(FILES))) -> dict:
+    await asyncio.to_thread(fm.rename, _root(request, rec), body.source, body.destination)
     return {"ok": True}
 
 
 @router.delete("/servers/{server_id}/files")
-async def delete(request: Request, server_id: str, path: str) -> dict:
-    _, root = _root(request, server_id)
-    await asyncio.to_thread(fm.delete, root, path)
+async def delete(request: Request, path: str, rec: ServerRecord = Depends(server_perm(FILES))) -> dict:
+    await asyncio.to_thread(fm.delete, _root(request, rec), path)
     return {"ok": True}

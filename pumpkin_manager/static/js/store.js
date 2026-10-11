@@ -81,6 +81,9 @@ export function handleEvent(msg) {
       bus.emit("servers");
       bus.emit("deleted", msg.data);
       break;
+    case "access": // the administrator changed what an account may access
+      bus.emit("access", msg.data);
+      break;
     case "job": {
       const previous = state.jobs.get(msg.data.id);
       state.jobs.set(msg.data.id, msg.data);

@@ -18,6 +18,7 @@ Pumpkin versions on a schedule and **never applies an update without first makin
 | **Automatic updates** | Checks GitHub for new Pumpkin builds (stable releases, plus the rolling *nightly* and *canary* builds), per server: install automatically, notify only, or off. Waits until nobody is online. |
 | **Safe by construction** | Download and checksum first, stop gracefully, **verified backup**, switch version, start, watch for crashes. If anything fails the version *and the world* roll back automatically. |
 | **Backups** | Daily/interval schedule, retention, hot backups without downtime (or stop-copy-start), download/upload, protect, one-click restore with an automatic safety backup. |
+| **Accounts for friends** | Give friends their own sign-in with a role per server (player, moderator or admin). They only see the servers you assign, start with a temporary password and must choose their own. See [Accounts for friends](#accounts-for-friends). |
 | **Notifications** | Optional Discord/Slack/generic webhook for updates, failed backups and crashes. |
 | **Unraid-ready** | PUID/PGID, template XML, graceful shutdown on array stop, separate backup path. No Docker socket needed, nothing runs privileged. |
 
@@ -25,7 +26,7 @@ Pumpkin versions on a schedule and **never applies an update without first makin
 
 - [Install on Unraid](#install-on-unraid) · [Docker Compose](#docker-compose) · [First steps](#first-steps)
 - [Ports and networking](#ports-and-networking) · [Configuration](#configuration)
-- [How updates work](#how-updates-work) · [How backups work](#how-backups-work)
+- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Accounts for friends](#accounts-for-friends)
 - [Security](#security) · [Where things are stored](#where-things-are-stored) · [Troubleshooting](#troubleshooting)
 - [Pumpkin notes](#notes-about-pumpkin) · [Development](#development)
 
@@ -231,6 +232,42 @@ you notice after playing for a while. That is what the pre-update backup and the
 * **Download / upload**: move backups to another machine or restore an archive from elsewhere.
 * A backup needs free space about the size of the world; the manager checks first and says so if there is not enough.
 
+## Accounts for friends
+
+The account created on the first start is the **administrator**: it can do everything, including creating and deleting
+servers, changing the global settings and managing accounts. Under **Accounts** the administrator can give friends their
+own sign-in. A friend **only sees the servers assigned to them**, and what they may do there depends on the role they
+have *on that server* (a friend can be an Admin on one server and only a Player on another):
+
+| | Player | Moderator | Admin |
+|---|:---:|:---:|:---:|
+| See the server's status: running or not, who is online, CPU, memory, how to connect | yes | yes | yes |
+| Start the server | | yes | yes |
+| Read the console (live output) | | yes | yes |
+| Kick, ban and pardon players and IPs, manage the whitelist | | yes | yes |
+| Stop, restart or kill the server | | | yes |
+| Type console commands | | | yes |
+| Make or remove operators and set their level | | | yes |
+| Files, settings, backups, versions and updates | | | yes |
+| **Delete the server**, create servers, global settings, accounts | | | |
+
+The last row stays with the administrator only.
+
+**Temporary passwords.** Creating an account generates a temporary password and shows it **once** (the manager only keeps a
+hash, so it cannot show it again; if it gets lost, use *New password*). Hand it over, together with the address of the
+dashboard. When the friend signs in with it they see nothing but a *Choose a new password* screen; no other part of the
+dashboard or API works until they have chosen their own (at least 8 characters, different from the temporary one, not
+their username). *New password* in the accounts list gives an account a fresh temporary password and signs it out
+everywhere; deleting an account ends its sessions at once. A friend's password can also be reset from the container with
+`python -m pumpkin_manager reset-password --user <name>`, which makes it temporary as well.
+
+What an account may do is enforced by the server on every request, and the live updates pushed to the browser are
+filtered the same way, so a friend's browser never even receives events about other servers. A server the account has
+no role on answers exactly like one that does not exist. Role changes take effect on the next request.
+
+> **Give the Admin role only to people you trust.** Admins can edit the server's files, upload things and run console
+> commands, and all servers run inside this one container under the same user: Pumpkin plugins or other files an admin
+> adds run with the container's access to every server's data and to the manager. Moderators and players cannot do any of that.
 ## Security
 
 * Sign-in with a password (scrypt-hashed), server-side sessions in `HttpOnly`, `SameSite=Strict` cookies,
@@ -276,6 +313,8 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | Operators have too few (or too many) rights | New servers give operators **level 1** (moderator: can build inside the spawn protection, almost no commands); levels work as in vanilla (2 game master, 3 admin, 4 owner). Set the default for future operators under *Settings → Operator permission level*, and a single operator's level in the *Players* tab. Pumpkin reads levels only at startup, so changing one on a **running** server restarts it (the dashboard asks first); on a stopped server nothing restarts. Servers created before this default keep their old setting (4) until you change it, and so do operators who already exist. |
 | The difficulty is not the one I chose | Pumpkin ignores `default_difficulty` in `pumpkin.toml`, so the manager sets it with the `/difficulty` command when a server starts for the first time and whenever you change it in *Settings* (a running server switches at once). A difficulty an operator sets in-game stays until you change the setting here. |
 | The *Management API* shows "not available" | Normal for stable Pumpkin 0.2.0, which does not have it yet. The manager then uses console commands and server pings. |
+| A friend forgot their password, or cannot sign in | Open *Accounts* and use *New password* for them: they get a new temporary password and choose their own again. After a few wrong attempts a name is locked out for a few minutes. |
+| A friend sees "No servers yet" or is missing a server | Servers have to be assigned per account: *Accounts → Access*. The change shows up in their browser without a reload. |
 | Backups fill the disk | Lower *Keep the newest*, or put `/backups` on a bigger share. |
 | Dashboard unreachable after Unraid reboots | Check that the container is set to autostart; servers come back in the state they were in. |
 

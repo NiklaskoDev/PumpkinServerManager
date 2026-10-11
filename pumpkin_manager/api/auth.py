@@ -7,9 +7,19 @@ from pydantic import BaseModel, Field
 
 from .. import __version__
 from ..security import SESSION_COOKIE, AuthError, Session, Throttled
-from .deps import client_ip, get_ctx, require_session
+from .deps import client_ip, get_ctx, require_session_even_if_password_pending
 
 router = APIRouter(tags=["auth"])
+
+
+def _identity(request: Request, session: Session) -> dict:
+    """Who is signed in, for the dashboard: the account type, whether a new password must be chosen, and (friends) the roles."""
+    principal = get_ctx(request).access.principal(session.user_id)
+    return {
+        "id": session.user_id, "username": session.username, "csrf": session.csrf, "version": __version__,
+        "kind": session.kind, "must_change_password": session.must_change,
+        "servers": dict(principal.roles) if principal else {},
+    }
 
 
 class LoginBody(BaseModel):
@@ -45,26 +55,30 @@ async def login(body: LoginBody, request: Request, response: Response) -> dict:
         secure=_secure_cookie(request), path="/",
     )
     ctx.reporter.record("info", "login", f"{session.username} signed in from {client_ip(request)}")
-    return {"username": session.username, "csrf": session.csrf, "version": __version__}
+    return _identity(request, session)
 
 
+# The three routes below are the only ones an account with a temporary password may use before it has chosen its own.
 @router.get("/auth/me")
-async def me(session: Session = Depends(require_session)) -> dict:
-    return {"username": session.username, "csrf": session.csrf, "version": __version__}
+async def me(request: Request, session: Session = Depends(require_session_even_if_password_pending)) -> dict:
+    return _identity(request, session)
 
 
 @router.post("/auth/logout")
-async def logout(request: Request, response: Response, session: Session = Depends(require_session)) -> dict:
+async def logout(request: Request, response: Response, session: Session = Depends(require_session_even_if_password_pending)) -> dict:
     get_ctx(request).auth.logout(request.cookies.get(SESSION_COOKIE))
     response.delete_cookie(SESSION_COOKIE, path="/")
     return {"ok": True}
 
 
 @router.post("/auth/password")
-async def change_password(body: PasswordBody, request: Request, session: Session = Depends(require_session)) -> dict:
+async def change_password(
+    body: PasswordBody, request: Request, session: Session = Depends(require_session_even_if_password_pending)
+) -> dict:
     try:
         await get_ctx(request).auth.change_password(session, body.current, body.new)
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    get_ctx(request).reporter.record("warning", "login", f"{session.username} changed their password")
+    note = "chose a new password after signing in with a temporary one" if session.must_change else "changed their password"
+    get_ctx(request).reporter.record("warning" if not session.must_change else "info", "login", f"{session.username} {note}")
     return {"ok": True}

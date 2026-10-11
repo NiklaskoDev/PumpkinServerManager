@@ -17,6 +17,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .access import AccessService
+from .accounts import AccountService
 from .backups import BackupService
 from .binaries import BuildStore
 from .config import Settings
@@ -73,6 +75,8 @@ class AppContext:
         self.notifier = Notifier(self.app_settings)
         self.reporter = Reporter(self.repo, self.events, self.notifier)
         self.auth = AuthService(self.repo, settings.session_hours)
+        self.access = AccessService(self.repo)
+        self.accounts = AccountService(self.repo, self.access, self.reporter, self.events)
         self.release_source: ReleaseSource = release_source or GitHubReleaseSource(
             settings.github_repo, settings.github_api_url, token_getter=self._github_token
         )
@@ -88,6 +92,7 @@ class AppContext:
             stop_server=lambda rec, ctx: self.servers._do_stop(rec, ctx),
         )
         self.servers.backups = self.backups
+        self.servers.access = self.access
         extra = {} if stability_seconds is None else {"stability_seconds": stability_seconds}
         self.updater = UpdateService(
             self.repo, self.builds, self.pm, self.servers, self.backups, self.jobs, self.reporter,
@@ -257,11 +262,14 @@ def create_app(
 
     @app.exception_handler(UserError)
     async def user_error(_: Request, exc: UserError) -> JSONResponse:
-        return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+        body = {"detail": str(exc)}
+        if getattr(exc, "code", None):
+            body["code"] = exc.code  # type: ignore[attr-defined]
+        return JSONResponse(body, status_code=exc.status)
 
-    from .api import auth, backups, files, servers, system, versions
+    from .api import auth, backups, files, servers, system, users, versions
 
-    for module in (auth, system, servers, files, backups, versions):
+    for module in (auth, system, users, servers, files, backups, versions):
         app.include_router(module.router, prefix="/api")
 
     if STATIC_DIR.is_dir():

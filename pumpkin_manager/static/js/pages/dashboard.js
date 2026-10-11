@@ -1,3 +1,4 @@
+import { PERM, can, canAnywhere, isAdministrator } from "../access.js";
 import { post } from "../api.js";
 import { clear, copyText, fmtBytes, fmtDuration, h, icon, replaceChildren } from "../dom.js";
 import { bus, serverList, state } from "../store.js";
@@ -8,6 +9,7 @@ export function connectAddress(server) {
   return `${server.public_address || location.hostname}:${server.ports.java}`;
 }
 
+// What the signed-in account may do to a server: moderators can start it, admins can also stop and restart it.
 export function serverActions(server, { compact = false } = {}) {
   const idle = !server.busy;
   const running = server.state === "running" || server.state === "starting";
@@ -15,12 +17,12 @@ export function serverActions(server, { compact = false } = {}) {
     h("button", { class: `btn ${cls}`, disabled: disabled || !idle, onclick: handler }, icon(iconName, "sm"), compact ? null : label);
   const act = (path, success) => () => quickJob(post(`/api/servers/${server.id}/${path}`), { success, failure: `Could not ${path}` });
   if (running) {
-    return [
+    return can(server, PERM.CONTROL) ? [
       btn("sm", "stop", "Stop", act("stop", `${server.name} stopped`)),
       btn("sm", "restart", "Restart", act("restart", `${server.name} restarted`)),
-    ];
+    ] : [];
   }
-  return [btn("primary sm", "play", "Start", act("start", `${server.name} is running`))];
+  return can(server, PERM.START) ? [btn("primary sm", "play", "Start", act("start", `${server.name} is running`))] : [];
 }
 
 function serverCard(initial) {
@@ -35,6 +37,8 @@ function serverCard(initial) {
     mem: h("div", { class: "v" }),
     busy: h("div", {}),
     actions: h("div", { class: "row" }),
+    console: h("span", {}),
+    openLabel: h("span", {}, "Manage"),
   };
   const name = h("a", { class: "name truncate", href: `#/server/${server.id}` }, server.name);
   const address = h("span", { class: "addr" }, h("span", { class: "truncate" }, ""), h("button", { title: "Copy address", "aria-label": "Copy address", onclick: async () => {
@@ -48,8 +52,8 @@ function serverCard(initial) {
     h("div", { class: "facts" }, fact("Players", refs.players), fact("Uptime", refs.uptime), fact("CPU", refs.cpu), fact("Memory", refs.mem)),
     refs.busy,
     h("div", { class: "row" }, refs.actions, h("span", { class: "grow" }),
-      h("a", { class: "btn sm", href: `#/server/${server.id}/console` }, icon("terminal", "sm"), "Console"),
-      h("a", { class: "btn sm", href: `#/server/${server.id}` }, "Manage", icon("chevronRight", "sm"))));
+      refs.console,
+      h("a", { class: "btn sm", href: `#/server/${server.id}` }, refs.openLabel, icon("chevronRight", "sm"))));
 
   let lastShape = "";
   function update(next, statsOnly = false) {
@@ -62,10 +66,13 @@ function serverCard(initial) {
     if (statsOnly) return;
 
     // Structural parts are rebuilt only when what they show actually changed (keeps hover/focus stable).
-    const shape = JSON.stringify([server.state, server.busy, server.name, server.build?.id, server.channel, server.update.available, server.update.pending_build?.id, server.ports, server.public_address]);
+    const shape = JSON.stringify([server.state, server.busy, server.name, server.build?.id, server.channel, server.update.available, server.update.pending_build?.id, server.ports, server.public_address, server.access]);
     if (shape === lastShape) return;
     lastShape = shape;
     name.textContent = server.name;
+    clear(refs.console);
+    if (can(server, PERM.CONSOLE_VIEW)) refs.console.appendChild(h("a", { class: "btn sm", href: `#/server/${server.id}/console` }, icon("terminal", "sm"), "Console"));
+    refs.openLabel.textContent = can(server, PERM.SETTINGS) ? "Manage" : "Open";
     address.firstChild.textContent = connectAddress(server);
     clear(refs.badge).appendChild(statusBadge(server));
     replaceChildren(refs.meta,
@@ -104,6 +111,8 @@ export function render() {
   };
   const jobsHost = h("div", {});
   const activityHost = h("div", { class: "list" });
+  const activityCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Recent activity"),
+    isAdministrator() ? h("a", { href: "#/activity", class: "small" }, "View all") : null), activityHost);
   const emptyHost = h("div", {});
 
   function refreshTiles() {
@@ -135,10 +144,13 @@ export function render() {
     }
     clear(emptyHost);
     if (!servers.length) {
-      emptyHost.appendChild(h("div", { class: "card" }, emptyState("server", "Create your first server",
-        "Pumpkin is a fast Minecraft server written in Rust. The manager downloads it, sets it up and keeps it updated and backed up for you.",
-        h("button", { class: "btn primary", onclick: openCreateServer }, icon("plus", "sm"), "New server"))));
+      emptyHost.appendChild(h("div", { class: "card" }, isAdministrator()
+        ? emptyState("server", "Create your first server",
+          "Pumpkin is a fast Minecraft server written in Rust. The manager downloads it, sets it up and keeps it updated and backed up for you.",
+          h("button", { class: "btn primary", onclick: openCreateServer }, icon("plus", "sm"), "New server"))
+        : emptyState("server", "No servers yet", "The administrator has not given you access to a server. Once they do, it shows up here.")));
     }
+    activityCard.classList.toggle("hidden", !(isAdministrator() || canAnywhere(PERM.ACTIVITY)));
     refreshTiles();
   }
 
@@ -170,16 +182,16 @@ export function render() {
   ];
 
   refreshGrid(); refreshJobs(); refreshActivity();
+  const owner = isAdministrator();
   const el = h("div", { class: "stack" },
     h("div", { class: "page-head" },
-      h("div", { class: "titles" }, h("h1", {}, "Dashboard"), h("p", {}, "All your Pumpkin servers at a glance.")),
-      h("div", { class: "actions" }, h("button", { class: "btn primary", onclick: openCreateServer }, icon("plus", "sm"), "New server"))),
+      h("div", { class: "titles" }, h("h1", {}, "Dashboard"), h("p", {}, owner ? "All your Pumpkin servers at a glance." : "The servers you have access to.")),
+      owner ? h("div", { class: "actions" }, h("button", { class: "btn primary", onclick: openCreateServer }, icon("plus", "sm"), "New server")) : null),
     h("div", { class: "grid cols-4" },
       statTile("Servers", "server", tiles.servers, tiles.serversSub),
       statTile("Players", "users", tiles.players, tiles.playersSub),
-      statTile("Updates", "arrowUp", tiles.updates, tiles.updatesSub),
-      statTile("Storage", "disk", tiles.disk, tiles.diskSub)),
-    jobsHost, emptyHost, grid,
-    h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Recent activity"), h("a", { href: "#/activity", class: "small" }, "View all")), activityHost));
+      owner ? statTile("Updates", "arrowUp", tiles.updates, tiles.updatesSub) : null,
+      owner ? statTile("Storage", "disk", tiles.disk, tiles.diskSub) : null),
+    jobsHost, emptyHost, grid, activityCard);
   return { el, dispose: () => offs.forEach((off) => off()) };
 }
