@@ -266,15 +266,18 @@ async def check_server(
     section(f"{label}: talk to the running server")
     info = None
     failure: Exception | None = None
-    for _ in range(15):  # for a moment after "Done" some servers (Vanilla Perfected on 26.3) close the first status requests
-        try:
+    for _ in range(15):  # for a moment after "Done" some servers close the first status requests (Vanilla Perfected on 26.3) or
+        try:             # still answer with Forge's empty status (version "", 0/0 players, no motd; Create+ on Forge 1.19.2)
             info = await server_list_ping("127.0.0.1", server.java_port, timeout=10)
-            break
+            if info["version"]:
+                break
+            failure = RuntimeError("the status is still empty")
         except Exception as exc:  # noqa: BLE001
             failure = exc
-            await asyncio.sleep(2)
-    if info is None:
+        await asyncio.sleep(2)
+    if info is None or not info["version"]:
         check(False, "the server answers the server-list ping", repr(failure))
+        info = None
     if info:
         check(True, "the server answers the server-list ping", f"{info['version']!r}, {info['online']}/{info['max']} players, motd {info['motd']!r}")
         check(info["max"] == 5 and "real java check" in info["motd"], "max players and motd are the ones chosen")
