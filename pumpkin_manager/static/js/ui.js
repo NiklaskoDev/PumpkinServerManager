@@ -161,6 +161,7 @@ export async function busy(button, fn) {
 const BUSY_LABELS = {
   create: "Creating", delete: "Deleting", backup: "Backing up", restore: "Restoring", update: "Updating",
   rollback: "Rolling back", start: "Starting", stop: "Stopping", restart: "Restarting", download: "Downloading",
+  operator: "Setting level",
 };
 
 export function statusBadge(server) {

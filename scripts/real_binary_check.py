@@ -280,7 +280,7 @@ async def run(binary: Path, keep: bool) -> int:
             await ctx.servers.player_action(rec, action, target, reason)
             check(await eventually(partial(listed, key, target)), f"'{action} {target}' shows up in the {key.replace('_', ' ')} list")
         lists = ctx.servers.read_player_lists(rec)
-        check(any(e.get("level") == 4 for e in lists["ops"]), "the operator entry carries its permission level", str(lists["ops"]))
+        check(any(e.get("level") == 1 for e in lists["ops"]), "a new operator gets level 1, the manager's default for new servers", str(lists["ops"]))
         check(any(e.get("reason") == "checking the lists" for e in lists["banned_players"] + lists["banned_ips"]),
               "ban reasons are recorded", str(lists["banned_players"]))
         for action, target, key in (
@@ -289,6 +289,24 @@ async def run(binary: Path, keep: bool) -> int:
         ):
             await ctx.servers.player_action(rec, action, target)
             check(await eventually(partial(unlisted, key, target)), f"'{action} {target}' takes it off the list again")
+
+        # ------------------------------------------------------------------------------------------ operator levels
+        section("Operator levels (Pumpkin reads them only at startup, so changing one restarts the server)")
+        pid = ctx.pm.runtime(server.id).pid
+        row = await wait_job(ctx, ctx.servers.submit_operator_level(ctx.repo.get_server(server.id), "RealLevel", 3), 120)
+        show_job(row)
+        check(row["status"] == "success", "a new operator can be given level 3", row["message"] or "")
+        rt = ctx.pm.runtime(server.id)
+        check(rt.state == "running" and rt.pid != pid, "the server was restarted to apply it", f"pid {pid} -> {rt.pid}")
+        levels = {e["name"]: e["level"] for e in ctx.servers.read_player_lists(rec)["ops"]}
+        check(levels.get("RealLevel") == 3, "the real server kept level 3 across its shutdown and start", str(levels))
+        await ctx.servers.player_action(rec, "op", "RealPlain")
+        check(await eventually(lambda: any(e["name"] == "RealPlain" for e in ctx.servers.read_player_lists(rec)["ops"])), "/op still works afterwards")
+        levels = {e["name"]: e["level"] for e in ctx.servers.read_player_lists(rec)["ops"]}
+        check(levels.get("RealPlain") == 1 and levels.get("RealLevel") == 3, "a plain /op gives the default level 1 and leaves the other operator alone", str(levels))
+        for name in ("RealLevel", "RealPlain"):
+            await ctx.servers.player_action(rec, "deop", name)
+        check(await eventually(lambda: not ctx.servers.read_player_lists(rec)["ops"]), "both operators removed again")
 
         # ------------------------------------------------------------------------------------------- difficulty
         section("Difficulty (Pumpkin ignores default_difficulty in pumpkin.toml, so the manager sets it with a command)")

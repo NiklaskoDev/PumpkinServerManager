@@ -14,7 +14,7 @@ Pumpkin versions on a schedule and **never applies an update without first makin
 | | |
 |---|---|
 | **One-click servers** | Pick a name, a Pumpkin channel and a few settings; the manager downloads the binary, writes `pumpkin.toml`, assigns ports and starts it. |
-| **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators, bans). |
+| **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators with individual levels, bans). |
 | **Automatic updates** | Checks GitHub for new Pumpkin builds (stable releases, plus the rolling *nightly* and *canary* builds), per server: install automatically, notify only, or off. Waits until nobody is online. |
 | **Safe by construction** | Download and checksum first, stop gracefully, **verified backup**, switch version, start, watch for crashes. If anything fails the version *and the world* roll back automatically. |
 | **Backups** | Daily/interval schedule, retention, hot backups without downtime (or stop-copy-start), download/upload, protect, one-click restore with an automatic safety backup. |
@@ -273,6 +273,7 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | Update check says *rate limit* | Add a `GITHUB_TOKEN` (Settings or environment variable). |
 | Server stops right after starting | Open the console tab for the output. After editing `pumpkin.toml` by hand, use the Advanced editor, which validates it. |
 | Adding a player to the whitelist, operators or bans changes nothing | Those buttons type the command into the running server's console, and the Players tab shows what the server then wrote to its `data/` folder. The dashboard tells you when a list did not change; the console tab has the server's answer (for example *No player was found* when an account name does not exist and online mode is on). The server must be running. |
+| Operators have too few (or too many) rights | New servers give operators **level 1** (moderator: can build inside the spawn protection, almost no commands); levels work as in vanilla (2 game master, 3 admin, 4 owner). Set the default for future operators under *Settings → Operator permission level*, and a single operator's level in the *Players* tab. Pumpkin reads levels only at startup, so changing one on a **running** server restarts it (the dashboard asks first); on a stopped server nothing restarts. Servers created before this default keep their old setting (4) until you change it, and so do operators who already exist. |
 | The difficulty is not the one I chose | Pumpkin ignores `default_difficulty` in `pumpkin.toml`, so the manager sets it with the `/difficulty` command when a server starts for the first time and whenever you change it in *Settings* (a running server switches at once). A difficulty an operator sets in-game stays until you change the setting here. |
 | The *Management API* shows "not available" | Normal for stable Pumpkin 0.2.0, which does not have it yet. The manager then uses console commands and server pings. |
 | Backups fill the disk | Lower *Keep the newest*, or put `/backups` on a bigger share. |
@@ -288,9 +289,11 @@ can do - the dashboard asks for confirmation and backs up first.
 Pumpkin's own telemetry heartbeat (to `market.pumpkinmc.org`) is **off for servers created by this manager** unless you
 enable it in *Settings → Defaults* or per server.
 
-Two behaviours of the current Pumpkin builds that the manager works around (both found by running the real server):
-the whitelist, operator and ban lists are kept in a `data/` folder next to `pumpkin.toml` (not beside it, as in vanilla
-Minecraft), and the `default_difficulty` setting is not applied to new worlds, which always start on Normal.
+Three behaviours of the current Pumpkin builds that the manager works around (all found by running the real server):
+the whitelist, operator and ban lists are kept in a `data/` folder inside the server folder (not next to `pumpkin.toml`,
+as in vanilla Minecraft); the `default_difficulty` setting is not applied to new worlds, which always start on Normal;
+and `/op` always gives the level from the server's `op_permission_level` setting while `data/ops.json` is read only at
+startup, which is why a per-operator level needs a restart.
 
 ## Development
 

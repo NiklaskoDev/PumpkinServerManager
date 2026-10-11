@@ -217,8 +217,8 @@ def handle_player_command(cmd: str, args: list[str]) -> bool:
         else:
             reply("Could not add %1$s to the allowlist" if add else "Could not remove %1$s from the allowlist")
     elif cmd == "op" and name:
-        done = edit_list("ops.json", "name", name, True, {"uuid": offline_uuid(name), "name": name, "level": 4, "bypasses_player_limit": False})
-        reply(f"Opped: {name}" if done else "Could not op (already op or higher): %s")
+        entry = {"uuid": offline_uuid(name), "name": name, "level": int(CFG.get("op_permission_level", 4)), "bypasses_player_limit": False}
+        reply(f"Opped: {name}" if edit_list("ops.json", "name", name, True, entry) else "Could not op (already op or higher): %s")
     elif cmd == "deop" and name:
         reply(f"De-opped: {name}" if edit_list("ops.json", "name", name, False) else "Could not de-op (permission level too high): %s")
     elif cmd == "ban" and name:

@@ -2,7 +2,8 @@
 
 import { get, post } from "../api.js";
 import { clear, h, icon } from "../dom.js";
-import { confirmDialog, emptyState, notifyError, promptDialog, segmented, toast } from "../ui.js";
+import { OP_LEVELS, opLevelHelp } from "../oplevels.js";
+import { confirmDialog, emptyState, jobDialog, notifyError, promptDialog, segmented, selectControl, toast } from "../ui.js";
 
 const LISTS = [
   { id: "whitelist", label: "Whitelist", remove: "whitelist_remove", key: "name" },
@@ -73,6 +74,29 @@ export function render({ id, getServer }) {
       } }, "Ban"))));
   }
 
+  // Pumpkin reads operator levels only when it starts, so on a running server this restarts it (the manager edits data/ops.json
+  // between the stop and the start). `select` is the dropdown to put back if the change is cancelled or fails.
+  async function setLevel(name, level, select = null, previous = null) {
+    const revert = () => { if (select) select.value = String(previous); };
+    if (data.running) {
+      const ok = await confirmDialog({
+        title: `Make ${name} operator level ${level}?`, confirmLabel: "Restart and apply",
+        message: "Pumpkin only reads operator levels when it starts, so the server restarts to apply this. Players who are online are disconnected for a few seconds and can rejoin afterwards.",
+      });
+      if (!ok) return revert();
+    }
+    const job = await jobDialog(post(`/api/servers/${id}/operators/level`, { name, level }), { title: `${name}: operator level ${level}` });
+    if (!job || job.status !== "success") revert();
+    await load();
+  }
+
+  function levelSelect(value, onChange) {
+    const known = OP_LEVELS.some((l) => l.value === value);
+    const options = OP_LEVELS.map(({ value: v, label }) => ({ value: v, label }));
+    if (!known) options.unshift({ value, label: `${value}` }); // an unusual value written by hand into ops.json
+    return selectControl(options, value, (v) => onChange(Number(v)));
+  }
+
   function renderList() {
     clear(listHost);
     const def = LISTS.find((l) => l.id === active);
@@ -80,29 +104,62 @@ export function render({ id, getServer }) {
     if (!entries.length) {
       return listHost.appendChild(emptyState("users", `${def.label} is empty`, active === "whitelist" ? "Enable the whitelist in Settings to restrict who can join." : null));
     }
+    const ops = active === "ops";
     listHost.appendChild(h("div", { class: "table-wrap" }, h("table", { class: "table" },
-      h("thead", {}, h("tr", {}, h("th", {}, def.key === "ip" ? "IP address" : "Player"), h("th", {}, "Details"), h("th", {}, ""))),
+      h("thead", {}, h("tr", {}, h("th", {}, def.key === "ip" ? "IP address" : "Player"), ops ? h("th", {}, "Level") : null, h("th", {}, "Details"), h("th", {}, ""))),
       h("tbody", {}, entries.map((e) => {
         const name = e[def.key] || e.name || e.ip || "?";
-        const details = [e.uuid, e.reason, e.source, e.expires && e.expires !== "forever" ? `until ${e.expires}` : null, e.level ? `level ${e.level}` : null].filter(Boolean).join(" · ");
-        return h("tr", {}, h("td", {}, h("strong", {}, name)), h("td", { class: "muted small mono" }, details || "–"),
+        const details = [e.uuid, e.reason, e.source, e.expires && e.expires !== "forever" ? `until ${e.expires}` : null].filter(Boolean).join(" · ");
+        let level = null;
+        if (ops) {
+          const select = levelSelect(e.level, (value) => setLevel(name, value, select, e.level));
+          select.title = opLevelHelp(e.level);
+          level = h("td", {}, select);
+        }
+        return h("tr", {}, h("td", {}, h("strong", {}, name)), level, h("td", { class: "muted small mono" }, details || "–"),
           h("td", { class: "actions-cell" }, h("button", { class: "btn sm danger", disabled: !data.running, title: data.running ? "Remove" : "Start the server to change this list", onclick: () => act(def.remove, name) }, icon("trash", "sm"), "Remove")));
       })))));
   }
 
   const tabs = segmented(LISTS.map((l) => ({ value: l.id, label: l.label })), active, (v) => { active = v; renderList(); });
 
+  // The level a new operator gets: the server's own default unless the user picked another one in the form.
+  let levelTouched = false;
+  const levelPick = levelSelect(1, () => { levelTouched = true; describeLevel(); });
+  const levelHint = h("span", { class: "hint" });
+  function describeLevel() {
+    const level = Number(levelPick.value);
+    const differs = level !== data.op_level && data.running;
+    levelHint.textContent = `${opLevelHelp(level)}${differs ? ` The server's default is ${data.op_level}, so applying ${level} restarts the server.` : ""}`;
+  }
+
+  let shown = "";
   async function load() {
     try {
       data = await get(`/api/servers/${id}/players`);
     } catch { return; }
-    renderOnline();
-    renderList();
+    if (!levelTouched && data.op_level) levelPick.value = String(data.op_level);
+    describeLevel();
+    // Redraw only when something changed, so a dropdown the user has open is not closed by the periodic refresh.
+    const now = JSON.stringify(data);
+    if (now !== shown) {
+      shown = now;
+      renderOnline();
+      renderList();
+    }
     clear(notice);
     if (!data.running) notice.appendChild(h("div", { class: "notice" }, icon("info", "sm"), "Player changes are applied through the running server's console, so start the server to edit these lists."));
   }
 
   const add = (action) => () => { const name = nameInput.value.trim(); if (name) { act(action, name); nameInput.value = ""; } else nameInput.focus(); };
+  const makeOperator = () => {
+    const name = nameInput.value.trim();
+    if (!name) return nameInput.focus();
+    nameInput.value = "";
+    const level = Number(levelPick.value);
+    // The server's default level is what /op gives, so only another level needs the restart route.
+    return level === data.op_level ? act("op", name) : setLevel(name, level);
+  };
   const el = h("div", { class: "stack" }, notice,
     h("div", { class: "grid cols-2" },
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Online now"), h("button", { class: "btn ghost sm", onclick: load }, icon("restart", "sm"), "Refresh")), onlineHost),
@@ -110,8 +167,9 @@ export function render({ id, getServer }) {
         nameInput,
         h("div", { class: "row" },
           h("button", { class: "btn", onclick: add("whitelist_add") }, "Add to whitelist"),
-          h("button", { class: "btn", onclick: add("op") }, "Make operator"),
+          h("button", { class: "btn", onclick: makeOperator }, "Make operator"),
           h("button", { class: "btn danger", onclick: add("ban") }, "Ban")),
+        h("label", { class: "field" }, h("span", {}, "Operator level"), levelPick, levelHint),
         h("p", { class: "hint" }, "Names are looked up by the server, so Mojang account names resolve to the right UUID."))),
     h("div", { class: "card tight" }, h("div", { class: "card-section" }, tabs), listHost));
 

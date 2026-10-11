@@ -65,7 +65,7 @@ async def test_player_lists_show_what_pumpkin_wrote_to_its_data_folder(ctx):
     await wait_until(lambda: all(lists()[key] for key in ("whitelist", "ops", "banned_players", "banned_ips")), 10, what="all four lists")
     seen = lists()
     assert [e["name"] for e in seen["whitelist"]] == ["Steve_01"] and seen["whitelist"][0]["uuid"]
-    assert seen["ops"][0]["name"] == "Alex" and seen["ops"][0]["level"] == 4
+    assert seen["ops"][0]["name"] == "Alex" and seen["ops"][0]["level"] == 1, "new servers start their operators at level 1"
     assert seen["banned_players"][0]["name"] == "Griefer" and seen["banned_players"][0]["reason"] == "broke the spawn"
     assert seen["banned_players"][0]["expires"] == "forever" and seen["banned_players"][0]["source"] == "Server"
     assert seen["banned_ips"][0]["ip"] == "203.0.113.9" and seen["banned_ips"][0]["reason"] == "spam"

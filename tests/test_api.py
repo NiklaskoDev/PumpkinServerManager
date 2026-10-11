@@ -259,6 +259,25 @@ async def test_player_management_goes_through_the_console(live):
     assert stopped.status_code == 400 and "must be running" in stopped.json()["detail"]
 
 
+async def test_operator_levels_over_http(live):
+    api, ctx = live
+    await api.login()
+    server = await api.create_server("Levels")
+    sid = server["id"]
+    players = (await api.call("GET", f"/api/servers/{sid}/players")).json()
+    assert players["op_level"] == 1, "the form preselects the server's default level"
+
+    for body in ({"name": "Alex", "level": 0}, {"name": "Alex", "level": 5}, {"name": "", "level": 2}, {"level": 2}):
+        assert (await api.call("POST", f"/api/servers/{sid}/operators/level", json=body)).status_code == 422, body
+    assert (await api.call("POST", f"/api/servers/{sid}/operators/level", json={"name": "a b", "level": 2})).status_code == 400
+
+    row = await api.job(await api.call("POST", f"/api/servers/{sid}/operators/level", json={"name": "Alex", "level": 3}))
+    assert row["status"] == "success", row["message"]
+    ops = (await api.call("GET", f"/api/servers/{sid}/players")).json()["lists"]["ops"]
+    assert [(e["name"], e["level"]) for e in ops] == [("Alex", 3)]
+    assert (await api.call("GET", f"/api/servers/{sid}")).json()["state"] == "running"
+
+
 async def test_saving_a_new_difficulty_applies_it_to_the_running_server(live):
     api, ctx = live
     await api.login()

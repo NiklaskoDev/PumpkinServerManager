@@ -61,6 +61,11 @@ class PlayerBody(BaseModel):
     reason: str | None = Field(None, max_length=200)
 
 
+class OperatorLevelBody(BaseModel):
+    name: str = Field(min_length=1, max_length=32)
+    level: int = Field(ge=1, le=4)
+
+
 @router.get("/servers")
 async def list_servers(request: Request) -> list:
     return get_ctx(request).servers.list_views()
@@ -171,6 +176,7 @@ async def players(request: Request, server_id: str) -> dict:
         "online": {"count": rt.players_online, "max": rt.players_max, "names": rt.player_names},
         "lists": ctx.servers.read_player_lists(rec),
         "running": rt.state == "running",
+        "op_level": ctx.servers.op_default_level(rec),
     }
 
 
@@ -179,3 +185,10 @@ async def player_action(request: Request, server_id: str, body: PlayerBody) -> d
     ctx = get_ctx(request)
     await ctx.servers.player_action(load_server(request, server_id), body.action, body.target, body.reason)
     return {"ok": True}
+
+
+@router.post("/servers/{server_id}/operators/level", status_code=202)
+async def set_operator_level(request: Request, server_id: str, body: OperatorLevelBody) -> JSONResponse:
+    """Give one operator a specific level. Restarts the server when it is running (see ``ServerService``)."""
+    ctx = get_ctx(request)
+    return accepted(ctx.servers.submit_operator_level(load_server(request, server_id), body.name.strip(), body.level))

@@ -251,7 +251,9 @@ class ServerService:
         pinned = spec.get("pinned_tag") or None
         try:
             policy = ServerPolicy.model_validate(spec.get("policy") or {})
-            values = pc.validate_values({"telemetry": app.telemetry_default, **(spec.get("settings") or {})})
+            values = pc.validate_values({
+                "telemetry": app.telemetry_default, "op_permission_level": pc.DEFAULT_OP_LEVEL, **(spec.get("settings") or {}),
+            })
         except pc.ConfigError as exc:
             raise ServerError(f"Invalid settings: {exc}") from exc
         except ValueError as exc:
@@ -614,6 +616,79 @@ class ServerService:
             await self.pm.send_command(rec.id, command)
         except ProcessError as exc:
             raise ServerError(str(exc)) from exc
+
+    # ---------------------------------------------------------- operator levels
+    # Pumpkin's /op takes no level: it always uses ``op_permission_level`` from pumpkin.toml. A single operator's level lives
+    # in data/ops.json, which the server reads only when it starts (editing the file while it runs has no effect and is
+    # overwritten by the next /op or /deop). So changing a level on a running server means: stop, edit the file, start.
+    def op_default_level(self, rec: ServerRecord) -> int:
+        try:
+            return int(pc.read_values(self._config_text(rec))["op_permission_level"])
+        except (pc.ConfigError, TypeError, ValueError):
+            return pc.DEFAULT_OP_LEVEL
+
+    def _find_op(self, rec: ServerRecord, name: str) -> dict[str, Any] | None:
+        wanted = name.lower()  # in online mode the server may have corrected the capitalisation
+        return next((e for e in self.read_player_lists(rec)["ops"] if str(e.get("name", "")).lower() == wanted), None)
+
+    def _write_op_level(self, rec: ServerRecord, name: str, level: int) -> None:
+        path = self.server_dir(rec.id) / PLAYER_DATA_DIR / "ops.json"
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(entries, list):
+                raise ValueError("not a list")
+        except (OSError, ValueError):
+            raise ServerError("The operator list (data/ops.json) could not be read, so it was left untouched.") from None
+        found = False
+        for entry in entries:
+            if isinstance(entry, dict) and str(entry.get("name", "")).lower() == name.lower():
+                entry["level"] = level
+                found = True
+        if not found:
+            raise ServerError(f"{name} is not an operator.")
+        atomic_write_text(path, json.dumps(entries, indent=2))
+
+    async def _do_set_op_level(self, rec: ServerRecord, ctx: JobContext, name: str, level: int) -> None:
+        rec = self.get(rec.id)
+        state = self.pm.runtime(rec.id).state
+        if state in ("starting", "stopping"):
+            raise ServerError("The server is starting or stopping. Try again in a moment.")
+        running = state == "running"
+        entry = self._find_op(rec, name)
+        if entry is None:
+            if not running:
+                raise ServerError(
+                    f"{name} is not an operator yet. Start the server first: it has to look the player up before they can be made an operator."
+                )
+            ctx.step(f"Making {name} an operator")
+            await self.command(rec, f"op {name}")
+            deadline = time.monotonic() + 30  # an online-mode server asks Mojang for the account first
+            while entry is None and time.monotonic() < deadline:
+                await asyncio.sleep(0.5)
+                entry = self._find_op(rec, name)
+            if entry is None:
+                raise ServerError(f"The server did not add {name} to its operator list. Its answer is in the console (is the name spelled right?).")
+        name = str(entry.get("name") or name)
+        if entry.get("level") == level:
+            ctx.step(f"{name} is already operator level {level}")
+            return
+        if running:
+            ctx.step("Pumpkin reads operator levels only when it starts, so the server restarts now")
+            await self._do_stop(rec, ctx)
+            self._write_op_level(rec, name, level)
+            await self._do_start(rec, ctx)
+        else:
+            self._write_op_level(rec, name, level)
+        ctx.step(f"{name} is now operator level {level}")
+
+    def submit_operator_level(self, rec: ServerRecord, name: str, level: int) -> dict[str, Any]:
+        if not PLAYER_NAME_RE.match(name):
+            raise ServerError("Player names may only contain letters, digits, '_', '-' and '.'.")
+        if level not in pc.OP_LEVELS:
+            raise ServerError("The operator level must be 1, 2, 3 or 4.")
+        return self.jobs.submit(
+            "operator", f"Set {name} to operator level {level}", rec.id, lambda ctx: self._do_set_op_level(rec, ctx, name, level)
+        )
 
     # ---------------------------------------------------------------- crash policy
     async def _on_exit(self, server_id: str, code: int | None, unexpected: bool) -> None:

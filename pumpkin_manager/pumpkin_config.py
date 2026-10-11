@@ -58,6 +58,9 @@ class Field:
 
 GAMEMODES = ("Survival", "Creative", "Adventure", "Spectator")
 DIFFICULTIES = ("Peaceful", "Easy", "Normal", "Hard")
+# Pumpkin's own default is 4 (owner); servers made by the manager start their operators at 1 (moderator) unless told otherwise.
+DEFAULT_OP_LEVEL = 1
+OP_LEVELS = (1, 2, 3, 4)
 
 FIELDS: tuple[Field, ...] = (
     Field("motd", ("networking", "java", "motd"), "string", "Message of the day", "General",
@@ -78,8 +81,9 @@ FIELDS: tuple[Field, ...] = (
           "Only whitelisted players may join."),
     Field("enforce_whitelist", ("enforce_whitelist",), "bool", "Enforce whitelist", "Access", False,
           "Kick players who are not whitelisted when the whitelist is turned on."),
-    Field("op_permission_level", ("op_permission_level",), "int", "Operator permission level", "Access", 4,
-          "Level (1-4) given to operators.", min=1, max=4),
+    Field("op_permission_level", ("op_permission_level",), "int", "Operator permission level", "Access", DEFAULT_OP_LEVEL,
+          "Level (1-4) a player gets when you make them an operator: 1 moderator, 2 game master, 3 admin, 4 owner. "
+          "Operators who already exist keep theirs; change a single operator in the Players tab.", min=1, max=4),
     Field("accepts_transfers", ("accepts_transfers",), "bool", "Accept transfers", "Access", True,
           "Allow players to be transferred here from other servers.", advanced=True),
     Field("seed", ("seed",), "string", "World seed", "World", "",

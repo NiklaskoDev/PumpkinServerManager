@@ -2,6 +2,7 @@
 
 import { get, post } from "../api.js";
 import { clear, h, icon } from "../dom.js";
+import { OP_LEVELS } from "../oplevels.js";
 import { loadServers, state } from "../store.js";
 import { field, jobDialog, modal, notifyError, selectControl, switchControl } from "../ui.js";
 
@@ -27,7 +28,7 @@ export async function openCreateServer() {
 
   const f = {
     name: "", channel: state.settings?.default_channel || "stable", pinned_tag: "", motd: "", max_players: 20,
-    default_gamemode: "Survival", default_difficulty: "Normal", seed: "", online_mode: true, white_list: false,
+    default_gamemode: "Survival", default_difficulty: "Normal", seed: "", online_mode: true, white_list: false, op_permission_level: 1,
     manualPort: false, port: "", bedrock: false, autostart: "last", update_mode: "auto", schedule: "daily", keep: 7, start: true,
   };
 
@@ -86,6 +87,8 @@ export async function openCreateServer() {
       field("Difficulty", selectControl(DIFFICULTIES, f.default_difficulty, (v) => { f.default_difficulty = v; })),
       field("Max players", h("input", { class: "input", type: "number", min: "0", max: "100000", value: String(f.max_players), oninput: (e) => { f.max_players = e.target.value; } }), "0 means unlimited."),
       field("World seed", h("input", { class: "input", placeholder: "random", maxlength: "64", oninput: (e) => { f.seed = e.target.value; } })),
+      field("Operator level", selectControl(OP_LEVELS.map(({ value, label }) => ({ value, label })), f.op_permission_level, (v) => { f.op_permission_level = Number(v); }),
+        "The level players get when you make them an operator. You can change it per player later."),
       h("div", { class: "span-2" }, field("Message of the day", h("input", { class: "input", placeholder: "A blazingly fast Pumpkin server!", maxlength: "120", oninput: (e) => { f.motd = e.target.value; } }))),
       switchControl({ label: "Verify player accounts (online mode)", hint: "Turn off only for LAN or offline play.", checked: f.online_mode, onChange: (v) => { f.online_mode = v; } }),
       switchControl({ label: "Whitelist", hint: "Only listed players can join.", checked: f.white_list, onChange: (v) => { f.white_list = v; } })),
@@ -124,7 +127,7 @@ export async function openCreateServer() {
     }
     const settings = {
       max_players: Number(f.max_players), default_gamemode: f.default_gamemode, default_difficulty: f.default_difficulty,
-      online_mode: f.online_mode, white_list: f.white_list,
+      online_mode: f.online_mode, white_list: f.white_list, op_permission_level: f.op_permission_level,
     };
     if (f.motd.trim()) settings.motd = f.motd.trim();
     if (f.seed.trim()) settings.seed = f.seed.trim();
