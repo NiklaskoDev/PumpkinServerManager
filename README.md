@@ -71,11 +71,11 @@ are handled inside the dashboard and never need a new image.)
 2. Open the repository's **Actions** tab. The *CI* run builds the image, starts it, signs in over HTTP and then
    publishes a multi-arch image (amd64 + arm64) to `ghcr.io/<you>/pumpkin-manager:latest`. The first run takes
    about ten minutes. (The unit tests run alongside; a red test job is worth a look but does not block the image.)
-3. **Make the package public, once.** New packages start *private*, and Unraid then fails with
-   `Head "https://ghcr.io/v2/.../manifests/latest": denied`.
-   GitHub → your profile → **Packages** → `pumpkin-manager` → *Package settings* → *Danger Zone* →
-   **Change visibility** → Public. (Alternatively keep it private and run `docker login ghcr.io` on the Unraid
-   terminal with a personal access token that has `read:packages`.)
+3. **Check that the package is public.** A package published from a public repository normally is. If Unraid
+   still fails with `Head "https://ghcr.io/v2/.../manifests/latest": denied`, change it: GitHub → your profile →
+   **Packages** → `pumpkin-manager` → *Package settings* → *Danger Zone* → **Change visibility** → Public.
+   (Or keep it private and run `docker login ghcr.io` on the Unraid terminal with a personal access token that has
+   `read:packages`.)
 
 ### Add the container in Unraid
 
@@ -261,7 +261,7 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 
 | Symptom | Fix |
 |---|---|
-| `docker: ... ghcr.io/v2/.../manifests/latest: denied` | GHCR answers *denied* both when the image does not exist yet and when it is private. Check the repository's **Actions** tab for a green *CI* run (no run at all usually means `.github/workflows/ci.yml` never reached GitHub, see *Install* route B), then make the package public. Or skip GHCR: use route A. |
+| `docker: ... ghcr.io/v2/.../manifests/latest: denied` | GHCR answers *denied* both when the image does not exist yet and when it is private. Check the repository's **Actions** tab for a green *CI* run (no run at all usually means `.github/workflows/ci.yml` never reached GitHub, see *Install* route B), then check that the package is public. Or skip GHCR: use route A. |
 | *"Port 25565 is already in use by another program"* | Another container (or the host) uses it. Choose another port in the server's settings, or remove the other service. |
 | Friends cannot connect | Forward the server's **TCP** port on your router to the Unraid IP. The card on the dashboard shows the exact port and warns when it is not published by the container. |
 | *"No free port left in 25565-25575"* | Widen `PORT_RANGE` **and** the template's port mapping (they must match). |

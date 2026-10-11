@@ -8,6 +8,7 @@ requires-python = ">=3.12"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+pythonpath = ["."]  # so plain `pytest` (not just `python -m pytest`) can import pumpkin_manager
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
 

@@ -25,7 +25,46 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Test
-        run: pytest
+        run: |
+          set -o pipefail
+          pytest --junitxml=junit.xml 2>&1 | tee pytest.log
+      # Job logs are private, but annotations are shown on the run page (and readable by anyone for a public repo),
+      # so failing tests are repeated there with their assertion message.
+      - name: Show failing tests as annotations
+        if: failure()
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          CR, LF = chr(13), chr(10)
+
+          def esc(text):
+              return text.replace("%", "%25").replace(CR, "%0D").replace(LF, "%0A")
+
+          def esc_prop(text):
+              return esc(text).replace(":", "%3A").replace(",", "%2C")
+
+          shown = 0
+          if os.path.exists("junit.xml"):
+              for case in ET.parse("junit.xml").getroot().iter("testcase"):
+                  problem = case.find("failure")
+                  if problem is None:
+                      problem = case.find("error")
+                  if problem is None:
+                      continue
+                  title = esc_prop(case.get("classname", "") + "::" + case.get("name", ""))
+                  text = (problem.get("message") or "") + LF + (problem.text or "")
+                  print("::error title=" + title + "::" + esc(text[:1800]))
+                  shown += 1
+                  if shown >= 10:
+                      break
+          if not shown:
+              tail = "no pytest output"
+              if os.path.exists("pytest.log"):
+                  tail = open("pytest.log", encoding="utf-8", errors="replace").read()[-1800:]
+              print("::error title=pytest did not report a failing test::" + esc(tail))
+          PY
 
   image:
     name: Build and smoke-test the image
@@ -99,7 +138,7 @@ jobs:
           {
             echo "### Published \`${IMAGE}:latest\`"
             echo ""
-            echo "New packages start **private**, and Unraid then fails with *denied* when it pulls the image."
-            echo "Make it public once: GitHub -> your profile -> **Packages** -> \`pumpkin-manager\` -> **Package settings**"
+            echo "A package published from a public repository is normally public as well. If Unraid still says *denied*"
+            echo "when pulling it, open GitHub -> your profile -> **Packages** -> \`pumpkin-manager\` -> **Package settings**"
             echo "-> *Danger Zone* -> **Change visibility** -> Public."
           } >> "$GITHUB_STEP_SUMMARY"
