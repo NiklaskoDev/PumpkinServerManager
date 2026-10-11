@@ -23,7 +23,7 @@ from .modrinth import summarize_version
 from .mojang import available_java
 from .mrpack import PackDownloadError, PackError, read_pack
 from .net import BadDownloadError, DownloadError
-from .service import JavaServerService
+from .service import JavaServerService, client_only_info
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +168,8 @@ class PackUpdater:
             ctx.step(f"Downloading {title} {to_tag}")
             await jvm.modrinth.download_pack(version, pack_path)
             index = read_pack(pack_path)
+            if old_spec.get("leave_out_client_only", True):
+                await jvm.leave_out_client_only(index, ctx)
             major = available_java(await jvm.mojang.java_major(index.minecraft))
             java = await jvm.runtimes.ensure(major, jvm._java_progress(ctx, major))
             ctx.step("Downloading the new mods (the server keeps running meanwhile)")
@@ -218,7 +220,7 @@ class PackUpdater:
                 launch = await jvm.loaders.install(index.loader, directory, java.java, lambda message: ctx.progress(None, message))
             fresh = {k: v for k, v in old_pack.items() if k != "pending"}
             new_pack = {**fresh, "version_id": version["id"], "version_number": to_tag, "published": version.get("date_published"),
-                        "version_type": version.get("version_type", "release")}
+                        "version_type": version.get("version_type", "release"), **client_only_info(index)}
             previous = {k: old_spec.get(k) for k in PREVIOUS_FIELDS}
             svc.repo.update_server(
                 rec.id, pending_since=None, spec={

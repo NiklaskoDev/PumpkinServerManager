@@ -107,7 +107,9 @@ async def test_a_modpack_file_can_be_uploaded_instead(jvm):
     row = await finish(ctx, ctx.servers.submit_create({"name": "Uploaded", "engine": "java", "eula": True, "modpack": {"source": "upload", "upload": upload["upload"]}, "start": False}))
     assert row["status"] == "success", row["message"]
     rec = next(s for s in ctx.repo.list_servers() if s.name == "Uploaded")
-    assert rec.spec["pack"] == {"source": "upload", "title": "Cool Pack", "version_number": "1.0.0"}
+    assert {k: v for k, v in rec.spec["pack"].items() if k not in ("client_only", "client_only_count")} == {
+        "source": "upload", "title": "Cool Pack", "version_number": "1.0.0",
+    }
     assert list((ctx.settings.cache_dir / "uploads").iterdir()) == [], "a used upload is removed"
     with pytest.raises(Exception, match="not a Modrinth modpack"):
         await ctx.servers.jvm.accept_upload(stream(b"not a modpack"))
@@ -183,6 +185,49 @@ async def test_memory_and_jvm_options_can_be_changed_and_are_checked(jvm):
     assert rec.channel == "" and rec.bedrock_port is None and rec.pinned_tag is None
 
 
+# ------------------------------------------------------------------------ client-only mods
+async def test_mods_that_modrinth_says_only_work_on_a_client_are_left_out(jvm):
+    """Packs exported from a client launcher list everything as 'required' on the server; the mod's own project knows better."""
+    world, ctx = jvm
+    world.net.mod_sides((CREATE, "unsupported"), (LITHIUM, "required"))
+    rec = await create_java_server(ctx, "ClientMods", start=False)
+    directory = ctx.servers.server_dir(rec.id)
+    assert (directory / "mods" / "lithium.jar").is_file() and not (directory / "mods" / "create.jar").exists()
+    lock = ctx.servers.jvm.lock_of(rec)
+    assert lock["client_only"] == ["mods/create.jar"] and "mods/create.jar" not in lock["files"]
+    modpack = ctx.servers.view(ctx.servers.get(rec.id))["modpack"]
+    assert modpack["client_only"] == ["mods/create.jar"] and modpack["client_only_count"] == 1 and modpack["leave_out_client_only"] is True
+    assert world.net.mod_downloads.get(CREATE.url, 0) == 0, "a mod that is left out is not even downloaded"
+
+
+async def test_mods_modrinth_does_not_know_are_installed_as_the_pack_says(jvm):
+    world, ctx = jvm
+    world.net.mod_sides((LITHIUM, "optional"))  # create.jar is unknown to Modrinth here: it stays
+    rec = await create_java_server(ctx, "Unknown", start=False)
+    directory = ctx.servers.server_dir(rec.id)
+    assert (directory / "mods" / "lithium.jar").is_file() and (directory / "mods" / "create.jar").is_file()
+    assert ctx.servers.view(ctx.servers.get(rec.id))["modpack"]["client_only_count"] == 0
+
+
+async def test_leaving_client_only_mods_out_can_be_switched_off(jvm):
+    world, ctx = jvm
+    world.net.mod_sides((CREATE, "unsupported"))
+    rec = await create_java_server(ctx, "AllMods", start=False, leave_out_client_only=False)
+    assert (ctx.servers.server_dir(rec.id) / "mods" / "create.jar").is_file()
+    assert rec.spec["leave_out_client_only"] is False
+    assert ctx.servers.view(ctx.servers.get(rec.id))["modpack"]["leave_out_client_only"] is False
+
+
+async def test_a_modrinth_outage_stops_the_creation_with_a_clear_message_and_leaves_nothing_behind(jvm):
+    world, ctx = jvm
+    world.net.lookup_status = 503
+    row = await finish(ctx, ctx.servers.submit_create({
+        "name": "Outage", "engine": "java", "eula": True, "modpack": {"source": "modrinth", "project": "cool-pack"}, "start": False,
+    }))
+    assert row["status"] == "failed" and "which mods are client-only" in row["message"]
+    assert ctx.repo.list_servers() == [] and not list(ctx.settings.servers_dir.glob(".create-*"))
+
+
 # ------------------------------------------------------------------------------ running
 async def test_the_eula_file_is_written_again_if_it_went_missing(jvm):
     world, ctx = jvm
@@ -238,6 +283,19 @@ async def test_a_server_that_opens_its_port_early_is_not_called_up_before_it_say
     assert any("Done (" in line for line in lines), "the start must wait for the 'Done' line, not for the first answer on the port"
     assert ctx.pm.runtime(rec.id).state == "running"
     assert sum("still starting" in line for line in lines) <= 2, "the console is not filled with readiness probes while the server loads"
+
+
+async def test_a_server_that_ends_by_itself_while_starting_is_explained_and_starts_on_the_second_try(jvm):
+    """Some packs (Better MC) download their mods at the first start and then close the server on purpose."""
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "SelfClosing", start=False)
+    world.behavior["exit_clean_on_start"] = True
+    row = await finish(ctx, ctx.servers.submit_start(rec))
+    assert row["status"] == "failed" and "exit code 0" in row["message"] and "starting the server again" in row["message"]
+    assert "Installed 3 missing mods" in row["message"], "what the server said last is shown too"
+    world.behavior.pop("exit_clean_on_start")
+    row = await finish(ctx, ctx.servers.submit_start(ctx.servers.get(rec.id)))
+    assert row["status"] == "success", row["message"]
 
 
 async def test_a_server_that_never_says_done_is_stopped_with_a_hint_about_slow_modpacks(jvm):

@@ -42,6 +42,7 @@ class CreateBody(BaseModel):
     modpack: dict[str, Any] | None = None
     memory_mb: int | None = Field(None, ge=512, le=1_048_576)
     jvm_args: str | None = Field(None, max_length=2000)
+    leave_out_client_only: bool = True  # skip mods that Modrinth says do not work on a server (recommended)
     eula: bool = False
     channel: Channel | None = None
     pinned_tag: str | None = Field(None, max_length=100)

@@ -23,6 +23,7 @@ from collections.abc import AsyncIterable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from ..jobs import JobContext
 from ..models import ServerPolicy, ServerRecord
@@ -51,6 +52,15 @@ MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 JAVA_POLICY_DEFAULTS: dict[str, Any] = {
     "start_timeout": 900, "stop_timeout": 180, "update_mode": "notify", "backup_exclude": ["logs", "crash-reports", "cache"],
 }
+
+
+def mods_text(count: int) -> str:
+    return f"{count} mod" if count == 1 else f"{count} mods"
+
+
+def client_only_info(index: PackIndex) -> dict[str, Any]:
+    """What the server remembers about the mods that were left out because they only work on a client (for the dashboard)."""
+    return {"client_only": sorted(index.client_only)[:400], "client_only_count": len(index.client_only)}
 
 
 def default_jvm_flags(java_major: int) -> list[str]:
@@ -132,7 +142,8 @@ class JavaServerService:
         modpack = {
             "source": pack.get("source"), "title": pack.get("title"), "slug": pack.get("slug"), "icon": pack.get("icon"),
             "version_number": pack.get("version_number"), "pending": pack.get("pending"), "can_roll_back": bool(spec.get("previous")),
-            "minecraft": spec.get("minecraft"),
+            "client_only": pack.get("client_only", []), "client_only_count": pack.get("client_only_count", 0),
+            "leave_out_client_only": spec.get("leave_out_client_only", True), "minecraft": spec.get("minecraft"),
             "loader": {"kind": loader.get("kind"), "version": loader.get("version"), "label": f"{label} {loader.get('version', '')}".strip()},
         }
         installed = self.runtimes.get(int(spec.get("java") or 0))
@@ -170,15 +181,19 @@ class JavaServerService:
             ctx.step("Looking up the modpack")
             pack_path, pack_info, downloaded = await self._obtain_pack(modpack, ctx)
             index = read_pack(pack_path)
+            leave_out = spec.get("leave_out_client_only") is not False
+            if leave_out:
+                await self.leave_out_client_only(index, ctx)
+            pack_info = {**pack_info, **client_only_info(index)}
             overview = index.summary_public()
-            ctx.step(f"{index.name} {index.version_id}: Minecraft {index.minecraft}, {index.loader.label}, {overview['mods']} mods")
+            ctx.step(f"{index.name} {index.version_id}: Minecraft {index.minecraft}, {index.loader.label}, {mods_text(overview['mods'])}")
 
             major = available_java(await self.mojang.java_major(index.minecraft))
             ctx.step(f"Minecraft {index.minecraft} needs Java {major}")
             java = await self.runtimes.ensure(major, self._java_progress(ctx, major))
 
             staging.mkdir(parents=True)
-            ctx.step(f"Installing {overview['mods']} mods")
+            ctx.step(f"Installing {mods_text(overview['mods'])}")
             await self.packs.install(index, pack_path, staging, lambda fraction, message: ctx.progress(0.25 + 0.5 * fraction, message))
             ctx.step(f"Installing {index.loader.label}")
             launch = await self.loaders.install(index.loader, staging, java.java, lambda message: ctx.progress(None, message))
@@ -201,7 +216,7 @@ class JavaServerService:
                     spec={
                         "kind": "modpack", "minecraft": index.minecraft, "loader": {"kind": index.loader.kind, "version": index.loader.version},
                         "java": major, "memory_mb": memory, "jvm_args": jvm_args, "launch": launch, "pack": pack_info,
-                        "eula_accepted_at": iso(),
+                        "leave_out_client_only": leave_out, "eula_accepted_at": iso(),
                     },
                 )
                 try:
@@ -225,6 +240,24 @@ class JavaServerService:
             ctx.step("Starting the server for the first time (the world is generated now, which takes a while)")
             await svc._do_start(rec, ctx)
         return rec
+
+    async def leave_out_client_only(self, index: PackIndex, ctx: JobContext) -> None:
+        """Drop the mods Modrinth says do not work on a server, although the pack lists them for it.
+
+        Packs exported from a client launcher mark nearly every file "required" on the server, client-only mods (minimaps, shaders,
+        menus, ...) included, and many of those stop a server from starting. The mod's own project knows better."""
+        candidates = [f for f in index.server_files if any(urlsplit(u).hostname == "cdn.modrinth.com" for u in f.urls)]
+        if not candidates:
+            return
+        ctx.step("Asking Modrinth which mods only work on a client")
+        try:
+            support = await self.modrinth.server_support([f.sha1 for f in candidates])
+        except DownloadError as exc:
+            raise self._error(f"Could not ask Modrinth which mods are client-only: {exc}") from exc
+        skipped = [f.path for f in candidates if support.get(f.sha1) == "unsupported"]
+        if skipped:
+            index.leave_out(skipped)
+            ctx.step(f"Leaving out {mods_text(len(skipped))} that Modrinth says {'does' if len(skipped) == 1 else 'do'} not work on a server")
 
     def _java_progress(self, ctx: JobContext, major: int) -> Callable[[int, int], None]:
         def callback(done: int, total: int) -> None:
@@ -486,4 +519,4 @@ class JavaServerService:
             return None
 
 
-__all__ = ["JavaServerService", "JavaLaunch", "PackError", "PackIndex", "READY_RE"]
+__all__ = ["JavaServerService", "JavaLaunch", "PackError", "PackIndex", "READY_RE", "client_only_info"]

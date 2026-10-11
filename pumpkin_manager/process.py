@@ -49,6 +49,7 @@ class Runtime:
     stopping_requested: bool = False
     ready_re: re.Pattern[str] = READY_RE  # the console line that says the server is up
     timeout_hint: str = PUMPKIN_START_HINT  # what to suggest when it never comes up
+    clean_exit_hint: str = ""  # what to say when it ends by itself (exit code 0) while starting
     strict_ping: bool = False  # a server-list reply only counts as "up" when it names a version (Forge answers early with none)
     log: deque = field(default_factory=lambda: deque(maxlen=BACKLOG_LINES))
     seq: int = 0
@@ -124,6 +125,7 @@ class ProcessManager:
         ready_re: re.Pattern[str] | None = None,
         timeout_hint: str | None = None,
         strict_ping: bool = False,
+        clean_exit_hint: str = "",
     ) -> None:
         rt = self.runtime(server_id)
         if rt.is_active:
@@ -133,6 +135,7 @@ class ProcessManager:
         rt.ready_re = ready_re or READY_RE
         rt.timeout_hint = PUMPKIN_START_HINT if timeout_hint is None else timeout_hint
         rt.strict_ping = strict_ping
+        rt.clean_exit_hint = clean_exit_hint
         self._open_logfile(rt)
         self._sys(rt, f"Starting: {' '.join(argv)}")
         creation: dict[str, Any] = {}
@@ -357,7 +360,8 @@ class ProcessManager:
     def _describe_early_exit(self, rt: Runtime) -> str:
         tail = [strip_ansi(line["m"]) for line in list(rt.log)[-6:] if line["s"] == "out"]
         detail = f" Last output: {' | '.join(tail)}" if tail else ""
-        return f"The server process exited during startup (exit code {rt.exit_code}).{detail}"
+        hint = f" {rt.clean_exit_hint}" if rt.exit_code == 0 and rt.clean_exit_hint else ""
+        return f"The server process exited during startup (exit code {rt.exit_code}).{hint}{detail}"
 
     async def _wait_exit(self, rt: Runtime, timeout: float) -> bool:
         try:

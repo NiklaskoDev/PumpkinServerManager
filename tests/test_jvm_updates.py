@@ -26,6 +26,38 @@ def steps_of(ctx, row) -> list[str]:
     return [s["text"] for s in ctx.repo.get_job(row["id"])["steps"]]
 
 
+async def test_an_update_leaves_out_client_only_mods_like_the_installation_did(jvm):
+    world, ctx = jvm
+    world.net.mod_sides((JADE, "unsupported"), (LITHIUM_V2, "required"))
+    rec = await create_java_server(ctx, "ClientOnly", start=False)
+    add_update(world)  # the new version lists lithium (fine) and jade (a client-only mod that the pack still lists as required)
+    await ctx.pack_updates.check()
+    row = await finish(ctx, ctx.pack_updates.submit_update(ctx.servers.get(rec.id)))
+    assert row["status"] == "success", row["message"]
+    directory = ctx.servers.server_dir(rec.id)
+    assert (directory / "mods" / "lithium.jar").read_bytes() == LITHIUM_V2.content and not (directory / "mods" / "jade.jar").exists()
+    modpack = ctx.servers.view(ctx.servers.get(rec.id))["modpack"]
+    assert modpack["client_only"] == ["mods/jade.jar"]
+    assert ctx.servers.jvm.lock_of(ctx.servers.get(rec.id))["client_only"] == ["mods/jade.jar"]
+
+
+async def test_a_modrinth_outage_during_an_update_changes_nothing(jvm):
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "Outage", start=False)
+    add_update(world)
+    await ctx.pack_updates.check()
+    world.net.lookup_status = 503
+    row = await finish(ctx, ctx.pack_updates.submit_update(ctx.servers.get(rec.id)), timeout=120)
+    assert row["status"] == "success", "the job ends normally: the problem was handled"
+    update = ctx.repo.list_updates(rec.id)[0]
+    assert update["status"] == "failed" and "client-only" in update["message"]
+    after = ctx.servers.get(rec.id)
+    assert after.spec["pack"]["version_number"] == "1.0.0" and (ctx.servers.server_dir(rec.id) / "mods" / "create.jar").is_file()
+    assert not any(b["kind"] == "pre-update" for b in ctx.repo.list_backups(rec.id)), "nothing was touched, so nothing needed protecting"
+    world.net.lookup_status = 200
+    assert (await ctx.pack_updates.check())["servers_with_updates"] == 1, "a passing outage does not hide the update"
+
+
 # ----------------------------------------------------------------------------------- finding updates
 async def test_a_newer_version_is_found_and_offered_once(jvm):
     world, ctx = jvm

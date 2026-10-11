@@ -200,6 +200,33 @@ async def test_a_mod_that_is_already_in_the_cache_is_not_downloaded_again(tmp_pa
     assert (second / "mods" / "create.jar").stat().st_size == len(CREATE.content)
 
 
+async def test_a_pack_that_declares_a_file_one_byte_too_small_still_installs(tmp_path):
+    """Real packs do this (Better MC lists one of its mods one byte short): the checksums are the proof, not the declared size."""
+    net = FakeInternet()
+    serve(net, LITHIUM)
+    pack = write_pack(tmp_path, mods=[LITHIUM], file_patch=lambda e: e.update(fileSize=e["fileSize"] - 1))
+    installer = installer_for(tmp_path, net)
+    first, second = tmp_path / "one", tmp_path / "two"
+    first.mkdir()
+    second.mkdir()
+    await installer.install(read_pack(pack), pack, first, lambda f, m: None)
+    assert (first / "mods" / "lithium.jar").read_bytes() == LITHIUM.content
+    await installer.install(read_pack(pack), pack, second, lambda f, m: None)
+    assert net.mod_downloads == {LITHIUM.url: 1}, "the cached copy is recognised although its size differs from the declared one"
+
+
+async def test_a_download_far_larger_than_the_pack_says_is_stopped(tmp_path):
+    net = FakeInternet()
+    big = FakeMod("mods/big.jar", b"x" * (17 * 1024 * 1024))
+    serve(net, big)
+    pack = write_pack(tmp_path, mods=[big], file_patch=lambda e: e.update(fileSize=100))
+    server = tmp_path / "server"
+    server.mkdir()
+    with pytest.raises(PackError, match="mods/big.jar could not be downloaded.*much larger"):
+        await installer_for(tmp_path, net).install(read_pack(pack), pack, server, lambda f, m: None)
+    assert not (server / "mods").exists()
+
+
 async def test_two_paths_with_the_same_content_are_fetched_once(tmp_path):
     net = FakeInternet()
     twin = FakeMod("mods/twin-copy.jar", LITHIUM.content)

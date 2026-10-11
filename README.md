@@ -284,6 +284,13 @@ Pumpkin servers. What is different:
   `server.properties` is never replaced. If an update moves to another Minecraft version (or loader), the dashboard warns
   first, and the right Java and loader are installed. *Roll back* restores the backup made before the last update, mods
   and world included. Modrinth packs only; a server made from an uploaded `.mrpack` has no place to look for updates.
+* **Client-only mods are left out.** Packs made for players often list minimaps, menus and shader helpers for the server too
+  (in the popular packs it is dozens of mods), and many of those stop a server from starting. The manager asks Modrinth, which
+  knows for every mod whether it can run on a server, and does not install the ones that cannot. They are listed under
+  *Modpack → Left out*, updates treat them the same way, and a switch in the *New modpack server* dialog turns this off.
+* **Some packs finish their setup on the first start.** Better MC, for one, downloads further mods when it starts for the first
+  time and then ends the server on purpose (exit code 0). The first start then reports a failure that says so; start the server
+  again and it comes up.
 * **Modrinth packs only.** CurseForge packs are not supported yet.
 * **Which Java and why.** Minecraft 1.20.5 and newer need Java 21, 1.18-1.20.4 need Java 17, older versions Java 8, and the
   year-based versions (26.x) Java 25. The manager takes this from Mojang's metadata and keeps the runtime a server uses.
@@ -432,7 +439,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
   data (`--loader fabric|neoforge|forge|quilt|all`), creates a server from it (Java from Adoptium, the Minecraft server from Mojang, the
   loader's own installer), starts it, pings it, types commands, takes a hot backup, restores it and stops it. It starts real
   Minecraft servers, so it needs `--accept-eula` (the Minecraft EULA), internet access and a few hundred MB per loader:
-  `docker exec -it pumpkin-manager python /app/scripts/real_java_check.py --accept-eula --loader all`.
+  `docker exec -it pumpkin-manager python /app/scripts/real_java_check.py --accept-eula --loader all`. With `--pack <name or link>`
+  (repeatable) it installs real Modrinth modpacks the way the dashboard does, and `--pack-update` installs the previous release
+  first, then updates to the newest and rolls that back; such a pack needs 4 GiB and downloads its mods for real.
 * Layout: `pumpkin_manager/` (backend: `process.py` supervision, `updater.py` the update procedure,
   `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `jvm/` the Java engine for modpack servers: Java runtimes,
   mod loaders, Modrinth packs, `server.properties`, pack updates; `api/` routers, `static/` the dashboard -

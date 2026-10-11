@@ -157,6 +157,11 @@ class FakeInternet:
         self.java_downloads = 0
         self.mod_downloads: dict[str, int] = {}
         self.modrinth_projects: list[FakeModrinth] = []
+        # What the projects behind mod files say about servers: sha1 -> (project id, required | optional | unsupported)
+        self.mod_projects: dict[str, tuple[str, str]] = {}
+        self.lookup_status = 200  # the status the "which mods work on a server" lookups answer with
+        self.route("https://api.modrinth.com/v2/version_files", self._version_files)
+        self.route("https://api.modrinth.com/v2/projects", self._projects)
 
     # ----------------------------------------------------------------- plumbing
     def transport(self) -> httpx.MockTransport:
@@ -178,6 +183,25 @@ class FakeInternet:
 
     def json(self, url: str, data: Any) -> None:
         self.route(url, lambda request: httpx.Response(200, json=data))
+
+    # ----------------------------------------------------- what Modrinth says about mods
+    def mod_sides(self, *pairs: tuple[FakeMod, str]) -> None:
+        """Say what Modrinth knows about these mod files: ``(mod, 'unsupported')`` is a mod that only works on a client."""
+        for mod, side in pairs:
+            self.mod_projects[mod.sha1] = (f"P{len(self.mod_projects) + 1:07d}", side)
+
+    def _version_files(self, request: httpx.Request) -> httpx.Response:
+        if self.lookup_status != 200:
+            return httpx.Response(self.lookup_status, json={"error": "unavailable"})
+        hashes = json.loads(request.content)["hashes"]
+        return httpx.Response(200, json={h: {"id": f"V{h[:7]}", "project_id": self.mod_projects[h][0]} for h in hashes if h in self.mod_projects})
+
+    def _projects(self, request: httpx.Request) -> httpx.Response:
+        if self.lookup_status != 200:
+            return httpx.Response(self.lookup_status, json={"error": "unavailable"})
+        ids = json.loads(parse_qs(request.url.query.decode())["ids"][0])
+        sides = dict(self.mod_projects.values())
+        return httpx.Response(200, json=[{"id": pid, "server_side": sides[pid]} for pid in ids if pid in sides])
 
     def blob(self, url: str, content: bytes, content_type: str = "application/octet-stream") -> None:
         self.route(url, lambda request: httpx.Response(200, content=content, headers={"Content-Type": content_type}))

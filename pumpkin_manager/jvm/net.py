@@ -14,6 +14,7 @@ import httpx
 
 from .. import __version__
 from ..errors import UserError
+from ..util import human_bytes
 
 log = logging.getLogger(__name__)
 
@@ -45,12 +46,13 @@ def require_https(url: str, allowed_hosts: frozenset[str] | None = None) -> None
 
 async def get_json(
     client: httpx.AsyncClient, url: str, *, params: dict[str, Any] | None = None, what: str = "the server",
-    attempts: int = 3, delay: float = 1.5,
+    attempts: int = 3, delay: float = 1.5, body: Any = None,
 ) -> Any:
+    """GET ``url`` (or POST ``body`` as JSON when given) and return the JSON answer; transient failures are retried."""
     last: str = ""
     for attempt in range(attempts):
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params) if body is None else await client.post(url, params=params, json=body)
         except httpx.HTTPError as exc:
             last = f"could not reach {what}: {exc or exc.__class__.__name__}"
         else:
@@ -73,8 +75,12 @@ async def download(
     client: httpx.AsyncClient, url: str, dest: Path, *, size: int | None = None, sha1: str | None = None,
     sha256: str | None = None, sha512: str | None = None, progress: ProgressCallback | None = None,
     allowed_hosts: frozenset[str] | None = None, attempts: int = 3, delay: float = 2.0, what: str = "the file",
+    max_size: int | None = None,
 ) -> None:
-    """Stream ``url`` to ``dest`` and check size and checksums; ``dest`` only stays behind when everything matched."""
+    """Stream ``url`` to ``dest`` and check size and checksums; ``dest`` only stays behind when everything matched.
+
+    ``size`` must match exactly. ``max_size`` is only a ceiling for sources whose declared size is not reliable: the download
+    stops as soon as more arrives, so a wrong or hostile address cannot fill the disk."""
     require_https(url, allowed_hosts)
     expected = {name: value.lower() for name, value in (("sha1", sha1), ("sha256", sha256), ("sha512", sha512)) if value}
     last: Exception | None = None
@@ -94,6 +100,8 @@ async def download(
                         for hasher in hashers.values():
                             hasher.update(chunk)
                         received += len(chunk)
+                        if max_size is not None and received > max_size:
+                            raise BadDownloadError(f"Downloading {what} was stopped: it is much larger than the pack says ({human_bytes(max_size)} at most).")
                         if progress:
                             progress(received, total or size or 0)
             last = None

@@ -17,7 +17,7 @@ import shutil
 import stat
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -74,10 +74,19 @@ class PackIndex:
     minecraft: str
     loader: LoaderSpec
     files: list[PackFile] = field(default_factory=list)
+    client_only: list[str] = field(default_factory=list)  # left out because Modrinth says the mod does not work on a server
 
     @property
     def server_files(self) -> list[PackFile]:
         return [f for f in self.files if f.server != "unsupported"]
+
+    def leave_out(self, paths: Iterable[str]) -> None:
+        """Treat these files as client-only, as if the pack had said so: they are not downloaded or installed."""
+        wanted = set(paths)
+        for file in self.files:
+            if file.path in wanted and file.server != "unsupported":
+                file.server = "unsupported"
+                self.client_only.append(file.path)
 
     def summary_public(self) -> dict[str, Any]:
         files = self.server_files
@@ -184,10 +193,8 @@ class ModCache:
         return self.base / sha512[:2] / sha512
 
     def has(self, file: PackFile) -> bool:
-        try:
-            return self.path(file.sha512).stat().st_size == file.size
-        except OSError:
-            return False
+        # A file only gets its name here after its checksums matched; the size a pack declares is not part of the proof.
+        return self.path(file.sha512).is_file()
 
     def disk_usage(self) -> int:
         return dir_size(self.base)
@@ -238,6 +245,7 @@ class PackInstaller:
         return {
             "name": index.name, "version_id": index.version_id, "minecraft": index.minecraft,
             "loader": {"kind": index.loader.kind, "version": index.loader.version}, "files": files, "overrides": overrides,
+            "client_only": sorted(index.client_only),
         }
 
     async def install(self, index: PackIndex, pack: Path, server_dir: Path, progress: Progress) -> dict[str, Any]:
@@ -327,10 +335,14 @@ class PackInstaller:
         part = self.cache.base / ".partial" / uuid.uuid4().hex
         part.parent.mkdir(parents=True, exist_ok=True)
         last: DownloadError | None = None
+        # The checksums are the proof. The size a pack declares is not trusted to the byte (Better MC, with two million downloads,
+        # lists a mod one byte too small and no launcher minds), so it only sets a ceiling for what is accepted.
+        declared = pack_file.size
+        ceiling = MAX_FILE_BYTES if declared <= 0 else min(MAX_FILE_BYTES, max(2 * declared, 16 * 1024**2))
         for url in pack_file.urls:
             try:
                 await download(
-                    self._client, url, part, size=pack_file.size or None, sha1=pack_file.sha1, sha512=pack_file.sha512,
+                    self._client, url, part, sha1=pack_file.sha1, sha512=pack_file.sha512, max_size=ceiling,
                     allowed_hosts=ALLOWED_DOWNLOAD_HOSTS, what=pack_file.path.rsplit("/", 1)[-1], attempts=3, delay=self._delay,
                 )
             except DownloadError as exc:

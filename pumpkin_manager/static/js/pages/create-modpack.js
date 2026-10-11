@@ -19,7 +19,7 @@ export function openCreateModpackServer() {
   const memory = state.system?.memory;
   const f = {
     name: "", nameTouched: false, pack: null, version: "", gib: 4, touched: {}, op: 1, manualPort: false, port: "",
-    autostart: "last", schedule: "daily", keep: 7, eula: false, start: true,
+    autostart: "last", schedule: "daily", keep: 7, eula: false, start: true, clientOnly: true,
   };
   const setting = (key, value) => { f.touched[key] = value; };
 
@@ -163,6 +163,10 @@ export function openCreateModpackServer() {
 
   const body = h("div", { class: "stack" },
     h("div", { class: "section-title" }, "Modpack"), packHost,
+    switchControl({
+      label: "Leave out mods that only work on a client", checked: true, onChange: (v) => { f.clientOnly = v; },
+      hint: "Many modpacks are made for players and list minimaps, menus and shader helpers for the server too, which can stop it from starting. Modrinth knows which mods cannot run on a server; those are left out (you will see the list afterwards).",
+    }),
     field("Server name", nameInput, "Shown in this dashboard. Starts out as the modpack's name.", null),
     h("div", { class: "section-title" }, "Memory"),
     field("Memory for the server (GiB)", memInput, memHint), memNotice,
@@ -197,7 +201,7 @@ export function openCreateModpackServer() {
     const payload = {
       name: f.name.trim(), engine: "java", eula: true, memory_mb: Math.round(f.gib * 1024), start: f.start,
       modpack: f.pack.source === "upload" ? { source: "upload", upload: f.pack.upload } : { source: "modrinth", project: f.pack.id, version: f.version },
-      java_port: f.manualPort && f.port ? Number(f.port) : null,
+      java_port: f.manualPort && f.port ? Number(f.port) : null, leave_out_client_only: f.clientOnly,
       settings: { "op-permission-level": f.op, ...f.touched },
       policy: { autostart: f.autostart, backup_schedule: SCHEDULES.find((s) => s.value === f.schedule).schedule, backup_keep: Number(f.keep) || 7 },
     };

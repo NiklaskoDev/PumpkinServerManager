@@ -33,6 +33,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -149,7 +150,35 @@ async def check_loader(ctx: AppContext, client: httpx.AsyncClient, loader: str, 
     await check_server(ctx, loader, body, mods=mods, generated=True)
 
 
-async def check_pack(ctx: AppContext, reference: str, memory: int) -> None:
+async def check_pack_update(ctx: AppContext, label: str, server_id: str, older: dict[str, Any], newest: dict[str, Any]) -> None:
+    """Update the running server from the older to the newest release, then undo it: backup first, switch, start, roll back."""
+    section(f"{label}: update {older['number']} -> {newest['number']}, then roll back")
+    files_before = set((ctx.servers.jvm.lock_of(ctx.servers.get(server_id)) or {}).get("files", {}))
+    await ctx.pack_updates.check(only=ctx.servers.get(server_id))
+    pending = (ctx.servers.get(server_id).spec.get("pack") or {}).get("pending")
+    if not check(bool(pending) and pending["id"] == newest["id"], "the update check finds the newer version", str((pending or {}).get("number"))):
+        return
+    mark = max((line["n"] for line in ctx.pm.backlog(server_id, 4000)), default=0)
+    row = await wait_job(ctx, ctx.pack_updates.submit_update(ctx.servers.get(server_id)), timeout=3600)
+    show_job(row)
+    server = ctx.servers.get(server_id)
+    files_after = set((ctx.servers.jvm.lock_of(server) or {}).get("files", {}))
+    check(row["status"] == "success", "the update was applied", row["message"] or "")
+    check((server.spec.get("pack") or {}).get("version_id") == newest["id"] and ctx.pm.runtime(server_id).state == "running",
+          "the server runs the new version", f"{len(files_before)} files before, {len(files_after)} after, {len(files_after - files_before)} new")
+    check(said(ctx, server_id, "Done (", mark), "the server printed its 'Done (...)!' line again after the update")
+    safety = [b for b in ctx.repo.list_backups(server_id) if b.get("kind") == "pre-update"]
+    check(bool(safety) and bool(safety[0]["verified"]), "a verified backup was taken before the update")
+    check(bool(ctx.servers.jvm.describe(server)[0]["can_roll_back"]), "the update can be rolled back")
+    row = await wait_job(ctx, ctx.pack_updates.submit_rollback(server), timeout=3600)
+    show_job(row)
+    server = ctx.servers.get(server_id)
+    check(row["status"] == "success" and (server.spec.get("pack") or {}).get("version_id") == older["id"], "the roll back put the older version back", row["message"] or "")
+    check(set((ctx.servers.jvm.lock_of(server) or {}).get("files", {})) == files_before, "its files are exactly the ones from before the update")
+    check(ctx.pm.runtime(server_id).state == "running", "the server runs again")
+
+
+async def check_pack(ctx: AppContext, reference: str, memory: int, update: bool = False) -> None:
     """A real modpack from Modrinth, installed the way the dashboard does it: nothing about it is known in advance."""
     label = reference.rstrip("/").rsplit("/", 1)[-1][:24]
     section(f"{label}: look the modpack up on Modrinth")
@@ -167,10 +196,25 @@ async def check_pack(ctx: AppContext, reference: str, memory: int) -> None:
         "name": f"Real {label}"[:40], "engine": "java", "eula": True, "memory_mb": memory, "start": True,
         "modpack": {"source": "modrinth", "project": reference}, "settings": SETTINGS, "policy": {"start_timeout": 1800},
     }
-    await check_server(ctx, label, body, mods=[], generated=False)
+    extra = None
+    if update:
+        releases = [v for v in details["versions"] if v["type"] == "release"]
+        if not check(len(releases) >= 2, "the pack has an older release to update from", f"{len(releases)} releases"):
+            return
+        older = releases[1]
+        body["modpack"]["version"] = older["id"]
+        check(True, "installing the previous release first", f"{older['number']}, published {older['published']}")
+
+        async def extra(server_id: str) -> None:
+            await check_pack_update(ctx, label, server_id, older, releases[0])
+
+    await check_server(ctx, label, body, mods=[], generated=False, extra=extra)
 
 
-async def check_server(ctx: AppContext, label: str, body: dict[str, Any], *, mods: list[str], generated: bool) -> None:
+async def check_server(
+    ctx: AppContext, label: str, body: dict[str, Any], *, mods: list[str], generated: bool,
+    extra: Callable[[str], Awaitable[None]] | None = None,
+) -> None:
     """Create a server from ``body`` and put it through what the dashboard offers: start, talk, back up, restore, stop.
 
     ``generated``: the pack is the small one this script built, so its configuration and settings are known and checked."""
@@ -179,6 +223,12 @@ async def check_server(ctx: AppContext, label: str, body: dict[str, Any], *, mod
     row = await wait_job(ctx, ctx.servers.submit_create(body), timeout=3600)
     show_job(row)
     server = next((s for s in ctx.repo.list_servers() if s.name == body["name"]), None)
+    tries = 0
+    while server is not None and row["status"] != "success" and "exit code 0" in (row["message"] or "") and tries < 3:
+        tries += 1  # Better MC downloads its mods at the first start and then ends the server on purpose; a user would start it again
+        print(f"        the modpack ended the server by itself while starting (exit code 0); starting it again, like a user would ({tries}/3)")
+        row = await wait_job(ctx, ctx.servers.submit_start(ctx.servers.get(server.id)), timeout=3600)
+        show_job(row)
     if not check(row["status"] == "success" and server is not None, "server created and started", (row["message"] or "") + f" ({time.monotonic() - started:.0f}s)"):
         if server:
             print("\n".join(console_tail(ctx, server.id, limit=60)))
@@ -241,6 +291,9 @@ async def check_server(ctx: AppContext, label: str, body: dict[str, Any], *, mod
         check(row["status"] == "success" and restored, "restoring the backup brings the files back", row["message"] or "")
         check(ctx.pm.runtime(server.id).state == "running", "the server runs again after the restore")
 
+    if extra is not None:
+        await extra(server.id)
+
     section(f"{label}: stop")
     row = await wait_job(ctx, ctx.servers.submit_stop(ctx.servers.get(server.id)), timeout=300)
     check(row["status"] == "success" and ctx.pm.runtime(server.id).state == "stopped", "the server stops gracefully", f"exit code {ctx.pm.runtime(server.id).exit_code}")
@@ -248,7 +301,9 @@ async def check_server(ctx: AppContext, label: str, body: dict[str, Any], *, mod
     check((directory / "world").is_dir() or any(p.is_dir() for p in directory.glob("*/region")), "a world was saved")
 
 
-async def run(loaders: list[str], packs: list[str], minecraft: str | None, memory: int | None, pack_memory: int | None, keep: bool) -> int:
+async def run(
+    loaders: list[str], packs: list[str], minecraft: str | None, memory: int | None, pack_memory: int | None, keep: bool, update: bool = False
+) -> int:
     work = Path(tempfile.mkdtemp(prefix="java-real-check-"))
     print(f"Working folder: {work}")
     started = time.monotonic()
@@ -272,7 +327,7 @@ async def run(loaders: list[str], packs: list[str], minecraft: str | None, memor
                 check(False, f"{loader}: the check ran to completion", repr(exc))
         for reference in packs:
             try:
-                await check_pack(ctx, reference, pack_memory or memory or 4096)
+                await check_pack(ctx, reference, pack_memory or memory or 4096, update)
             except Exception as exc:  # noqa: BLE001
                 import traceback
 
@@ -293,6 +348,8 @@ def main() -> int:
     parser.add_argument("--loader", choices=[*LOADERS, "all", "none"], help="which mod loader to test with a small generated pack (default: fabric, or none when --pack is given)")
     parser.add_argument("--pack", action="append", default=[], metavar="SLUG_OR_LINK",
                         help="also install a real Modrinth modpack, e.g. cobblemon-fabric or its modrinth.com link (repeat for several)")
+    parser.add_argument("--pack-update", action="store_true",
+                        help="install the previous release of each --pack first, then update it to the newest release and roll that back")
     parser.add_argument("--minecraft", help="Minecraft version (default: the newest release for Fabric, a well supported one for the others)")
     parser.add_argument("--memory", type=int, help="memory per server in MiB (default 2048 for the generated packs, 4096 for real ones)")
     parser.add_argument("--pack-memory", type=int, help="memory for the real modpacks in MiB (default: --memory, or 4096)")
@@ -304,7 +361,7 @@ def main() -> int:
         return 2
     choice = args.loader or ("none" if args.pack else "fabric")
     loaders = list(LOADERS) if choice == "all" else ([] if choice == "none" else [choice])
-    return asyncio.run(run(loaders, args.pack, args.minecraft, args.memory, args.pack_memory, args.keep))
+    return asyncio.run(run(loaders, args.pack, args.minecraft, args.memory, args.pack_memory, args.keep, args.pack_update))
 
 
 if __name__ == "__main__":

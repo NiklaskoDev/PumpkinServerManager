@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 PLAYER_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
 PLAYER_DATA_DIR = "data"  # where Pumpkin keeps the lists; Java servers keep them in the server folder itself
 JAVA_START_HINT = "modded servers can need several minutes on a first start; raise the startup timeout in the server's settings if it is still working."
+JAVA_CLEAN_EXIT_HINT = (
+    "It ended by itself without crashing. Some modpacks do that on their first start, after downloading extra files "
+    "(Better MC does); starting the server again usually finishes the setup."
+)
 PLAYER_LIST_FILES = (
     ("whitelist", "whitelist.json"), ("ops", "ops.json"), ("banned_players", "banned-players.json"), ("banned_ips", "banned-ips.json"),
 )
@@ -377,6 +381,7 @@ class ServerService:
             await self.pm.start(
                 rec.id, argv, directory, env, ready_port=rec.java_port, ready_timeout=rec.policy.start_timeout,
                 ready_re=ready_re, timeout_hint=timeout_hint, strict_ping=rec.is_java,
+                clean_exit_hint=JAVA_CLEAN_EXIT_HINT if rec.is_java else "",
             )
         except ProcessError as exc:
             self.reporter.record("error", "start", f"'{rec.name}' failed to start: {exc}", rec.id, notify="crashed", title=f"{rec.name} failed to start")

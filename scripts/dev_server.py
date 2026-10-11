@@ -42,10 +42,12 @@ def main() -> None:
     # Modpack servers: a fake Modrinth, Adoptium and loader sites, and a fake Java server (nothing is downloaded for real).
     world = JavaWorld()
     world.net.maven_installer("forge", "1.20.1", "47.2.0")
+    jei = FakeMod("mods/jei.jar", b"jei" * 400)
+    world.net.mod_sides((jei, "unsupported"))  # the pack lists it for the server, but Modrinth says it only works on a client
     packs: dict[str, FakeModrinth] = {}
     for slug, title, version, minecraft, loader, mods in (
         ("skyblock-dreams", "Skyblock Dreams", "2.4.1", "1.21.1", ("fabric", "0.16.9"), [FakeMod("mods/fabric-api.jar", b"fabric-api" * 500), FakeMod("mods/lithium.jar", b"lithium" * 200)]),
-        ("old-school-adventures", "Old School Adventures", "7.0", "1.20.1", ("forge", "47.2.0"), [FakeMod("mods/jei.jar", b"jei" * 400), FakeMod("mods/waystones.jar", b"waystones" * 100)]),
+        ("old-school-adventures", "Old School Adventures", "7.0", "1.20.1", ("forge", "47.2.0"), [jei, FakeMod("mods/waystones.jar", b"waystones" * 100)]),
     ):
         packs[slug] = FakeModrinth(world.net, slug=slug, title=title, project_id=slug.replace("-", "")[:8].ljust(8, "x"))
         packs[slug].add_version(version, minecraft=minecraft, loader=loader, mods=mods)

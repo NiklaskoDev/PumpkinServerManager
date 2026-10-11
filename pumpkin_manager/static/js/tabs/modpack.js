@@ -48,6 +48,16 @@ export function render({ id, getServer }) {
         h("dt", {}, "Configuration files"), h("dd", {}, `${info.config_files} from the modpack`)));
   }
 
+  function leftOutCard(info) {
+    const m = info.modpack;
+    if (!m.client_only_count) return null;
+    return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Left out"), h("span", { class: "muted small" }, `${m.client_only_count} ${m.client_only_count === 1 ? "mod" : "mods"}`)),
+      h("p", { class: "hint" }, "Modrinth says these mods only work on a client (minimaps, menus, shader helpers, ...). The modpack lists them for the server as well, but they can stop a server from starting, so they were not installed. Updates leave them out too."),
+      h("details", {}, h("summary", {}, "Show the list"),
+        h("div", { class: "mod-list", style: { marginTop: "10px" } }, m.client_only.map((p) => h("div", { class: "mod mono small truncate", title: p }, p.replace(/^mods\//, ""))))),
+      m.client_only_count > m.client_only.length ? h("p", { class: "hint" }, `Showing the first ${m.client_only.length}.`) : null);
+  }
+
   function javaCard(info) {
     if (!info.java.major) return null;
     const s = getServer();
@@ -145,10 +155,10 @@ export function render({ id, getServer }) {
     try { info = await get(`/api/servers/${id}/modpack`); } catch (err) { return notifyError(err); }
     const updates = await updatesCard(info, load);
     shown = shapeOf(getServer());
-    clear(host).append(packCard(info), updates, modsCard(info), ...(javaCard(info) ? [javaCard(info)] : []));
+    clear(host).append(packCard(info), updates, modsCard(info), ...[leftOutCard(info), javaCard(info)].filter(Boolean));
   }
 
-  const shapeOf = (s) => JSON.stringify([s.modpack?.version_number, s.modpack?.pending?.id, s.modpack?.can_roll_back, s.busy, s.policy?.update_mode]);
+  const shapeOf = (s) => JSON.stringify([s.modpack?.version_number, s.modpack?.pending?.id, s.modpack?.can_roll_back, s.modpack?.client_only_count, s.busy, s.policy?.update_mode]);
   load();
   // The server view changes when a check finds something or an update ends: redraw then (and only then).
   return { el: host, onServer: (s) => { if (shapeOf(s) !== shown) load(); } };
