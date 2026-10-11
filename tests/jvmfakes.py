@@ -159,6 +159,7 @@ class FakeInternet:
         self.modrinth_projects: list[FakeModrinth] = []
         # What the projects behind mod files say about servers: sha1 -> (project id, required | optional | unsupported)
         self.mod_projects: dict[str, tuple[str, str]] = {}
+        self.mod_dependencies: dict[str, list[str]] = {}  # sha1 -> the sha1s of the mods its version requires
         self.lookup_status = 200  # the status the "which mods work on a server" lookups answer with
         self.route("https://api.modrinth.com/v2/version_files", self._version_files)
         self.route("https://api.modrinth.com/v2/projects", self._projects)
@@ -190,11 +191,22 @@ class FakeInternet:
         for mod, side in pairs:
             self.mod_projects[mod.sha1] = (f"P{len(self.mod_projects) + 1:07d}", side)
 
+    def mod_requires(self, mod: FakeMod, *needed: FakeMod) -> None:
+        """Say that this mod's Modrinth version lists these mods as required dependencies."""
+        self.mod_dependencies[mod.sha1] = [m.sha1 for m in needed]
+
     def _version_files(self, request: httpx.Request) -> httpx.Response:
         if self.lookup_status != 200:
             return httpx.Response(self.lookup_status, json={"error": "unavailable"})
         hashes = json.loads(request.content)["hashes"]
-        return httpx.Response(200, json={h: {"id": f"V{h[:7]}", "project_id": self.mod_projects[h][0]} for h in hashes if h in self.mod_projects})
+        known = {}
+        for h in hashes:
+            if h not in self.mod_projects:
+                continue
+            needs = [{"project_id": self.mod_projects[n][0], "dependency_type": "required", "version_id": None}
+                     for n in self.mod_dependencies.get(h, []) if n in self.mod_projects]
+            known[h] = {"id": f"V{h[:7]}", "project_id": self.mod_projects[h][0], "dependencies": needs}
+        return httpx.Response(200, json=known)
 
     def _projects(self, request: httpx.Request) -> httpx.Response:
         if self.lookup_status != 200:

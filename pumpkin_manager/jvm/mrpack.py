@@ -41,6 +41,8 @@ MAX_TOTAL_BYTES = 20 * 1024**3
 MAX_INDEX_BYTES = 20 * 1024**2
 MAX_OVERRIDE_BYTES = 4 * 1024**3
 MAX_OVERRIDE_ENTRIES = 100_000
+MAX_OVERRIDE_MODS = 2000  # mod jars inside the override folders that are looked up on Modrinth
+MAX_OVERRIDE_MOD_BYTES = 1024**3
 LOADER_DEPENDENCIES = {"fabric-loader": "fabric", "quilt-loader": "quilt", "forge": "forge", "neoforge": "neoforge"}
 _HEX = {"sha1": re.compile(r"^[0-9a-f]{40}$"), "sha512": re.compile(r"^[0-9a-f]{128}$")}
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -75,6 +77,7 @@ class PackIndex:
     loader: LoaderSpec
     files: list[PackFile] = field(default_factory=list)
     client_only: list[str] = field(default_factory=list)  # left out because Modrinth says the mod does not work on a server
+    skip_overrides: set[str] = field(default_factory=set)  # mods the pack ships inside overrides/ that are left out for the same reason
 
     @property
     def server_files(self) -> list[PackFile]:
@@ -87,6 +90,13 @@ class PackIndex:
             if file.path in wanted and file.server != "unsupported":
                 file.server = "unsupported"
                 self.client_only.append(file.path)
+
+    def leave_out_overrides(self, paths: Iterable[str]) -> None:
+        """Do not unpack these mods from the pack's override folders."""
+        for path in paths:
+            if path not in self.skip_overrides:
+                self.skip_overrides.add(path)
+                self.client_only.append(path)
 
     def summary_public(self) -> dict[str, Any]:
         files = self.server_files
@@ -181,6 +191,38 @@ def read_pack(pack: Path) -> PackIndex:
     )
 
 
+def override_mods(pack: Path) -> dict[str, str]:
+    """The mods a pack ships inside its ``overrides/`` folders instead of listing them: {path in the server folder: SHA-1}.
+
+    Pack makers do this a lot (the most downloaded server pack on Modrinth carries sixteen), so what Modrinth knows about a mod
+    can only be asked for after hashing it. A later ``server-overrides/`` entry replaces an ``overrides/`` one, as when unpacking."""
+    found: dict[str, str] = {}
+    try:
+        with zipfile.ZipFile(pack) as zf:
+            infos = zf.infolist()
+            if len(infos) > MAX_OVERRIDE_ENTRIES:
+                return {}
+            for prefix in ("overrides/", "server-overrides/"):
+                for info in infos:
+                    name = info.filename
+                    if not name.startswith(prefix) or info.is_dir() or not name.lower().endswith(".jar"):
+                        continue
+                    if stat.S_ISLNK(info.external_attr >> 16) or info.file_size > MAX_OVERRIDE_MOD_BYTES or len(found) >= MAX_OVERRIDE_MODS:
+                        continue
+                    try:
+                        rel = safe_relative_path(name[len(prefix):], what="A mod in the modpack")
+                    except PackError:
+                        continue
+                    digest = hashlib.sha1(usedforsecurity=False)  # Modrinth identifies files by it; nothing is trusted because of it
+                    with zf.open(info) as src:
+                        while chunk := src.read(1 << 20):
+                            digest.update(chunk)
+                    found[rel] = digest.hexdigest()
+    except (zipfile.BadZipFile, RuntimeError, OSError):
+        return {}
+    return found
+
+
 class ModCache:
     """Downloaded mod files, kept by checksum so a mod that several servers (or several versions) use is fetched once."""
 
@@ -256,7 +298,7 @@ class PackInstaller:
             await asyncio.to_thread(self._place, pack_file, server_dir)
             placed[pack_file.path] = pack_file.sha512
         progress(0.95, "Applying the modpack's own configuration")
-        overrides, _ = await asyncio.to_thread(self._apply_overrides, pack, server_dir)
+        overrides, _ = await asyncio.to_thread(self._apply_overrides, pack, server_dir, skip=index.skip_overrides)
         lock = self._lock_of(index, placed, overrides)
         atomic_write_text(server_dir / LOCK_DIR / LOCK_NAME, json.dumps(lock, indent=1))
         return lock
@@ -299,7 +341,8 @@ class PackInstaller:
             report["updated" if path in old_files else "added"].append(path)
         progress(0.95, "Applying the modpack's own configuration")
         overrides, kept = await asyncio.to_thread(
-            self._apply_overrides, pack, server_dir, protect=old_lock.get("overrides", {}), never_replace=frozenset({"server.properties"})
+            self._apply_overrides, pack, server_dir, protect=old_lock.get("overrides", {}), never_replace=frozenset({"server.properties"}),
+            skip=index.skip_overrides,
         )
         report["kept_configs"] = kept
         lock = self._lock_of(index, placed, overrides)
@@ -365,14 +408,17 @@ class PackInstaller:
 
     # ----------------------------------------------------------------- overrides
     def _apply_overrides(
-        self, pack: Path, server_dir: Path, protect: dict[str, str] | None = None, never_replace: frozenset[str] = frozenset()
+        self, pack: Path, server_dir: Path, protect: dict[str, str] | None = None, never_replace: frozenset[str] = frozenset(),
+        skip: Iterable[str] = (),
     ) -> tuple[dict[str, str], list[str]]:
         """Copy ``overrides/`` and then ``server-overrides/`` (which win) into the server folder.
 
         With ``protect`` (an update: {path: sha256 the previous pack version wrote}) a file that exists is only replaced when
         it still has that content; otherwise the new version is saved beside it as ``<name>.pack-new``. Files in
-        ``never_replace`` are left alone. Returns ({path: sha256 of the pack's version}, the files that were kept).
+        ``never_replace`` are left alone, and files in ``skip`` are not unpacked at all. Returns ({path: sha256 of the pack's
+        version}, the files that were kept).
         """
+        skipped = frozenset(skip)
         written: dict[str, str] = {}
         kept: list[str] = []
         total = 0
@@ -389,6 +435,8 @@ class PackInstaller:
                         if stat.S_ISLNK(info.external_attr >> 16):
                             continue  # a link inside a pack could point anywhere
                         rel = safe_relative_path(info.filename[len(prefix):], what="A configuration file in the modpack")
+                        if rel in skipped:
+                            continue
                         dest = server_dir / rel
                         if not dest.resolve().is_relative_to(root):
                             raise PackError(f"{rel} points outside the server folder, so the modpack was refused.")

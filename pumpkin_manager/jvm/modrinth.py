@@ -98,25 +98,34 @@ class ModrinthClient:
         listed = [v for v in data if v.get("status", "listed") in ("listed", "archived") and pack_file(v)]
         return sorted(listed, key=lambda v: v.get("date_published", ""), reverse=True)
 
-    async def server_support(self, sha1s: list[str]) -> dict[str, str]:
-        """What the projects behind files say about running on a server: {sha1: required | optional | unsupported}.
+    async def server_support(self, sha1s: list[str]) -> dict[str, dict[str, Any]]:
+        """What Modrinth knows about files, by SHA-1: {sha1: {"project", "side", "requires"}}.
 
-        Only files Modrinth knows by their SHA-1 are in the answer. Packs exported from a client launcher mark almost every
-        mod "required" on the server, including the many that only work on a client, so the project's own word is what counts."""
-        project_of: dict[str, str] = {}
+        ``side`` is what the project says about running on a server (required, optional or unsupported) and ``requires`` the
+        projects this version needs. Only files Modrinth knows are in the answer. Packs exported from a client launcher mark
+        almost every mod "required" on the server, including the many that only work on a client, so the project's own word
+        is what counts, unless another mod needs it."""
+        project_of: dict[str, dict[str, Any]] = {}
         unique = sorted({s.lower() for s in sha1s})
         for start in range(0, len(unique), 400):
             found = await get_json(
                 self._client, f"{API}/version_files", body={"hashes": unique[start:start + 400], "algorithm": "sha1"},
                 what="Modrinth", delay=self._delay,
             )
-            if isinstance(found, dict):
-                for sha1, version in found.items():
-                    project = version.get("project_id") if isinstance(version, dict) else None
-                    if isinstance(project, str) and _PROJECT_ID_RE.match(project):
-                        project_of[str(sha1).lower()] = project
+            if not isinstance(found, dict):
+                continue
+            for sha1, version in found.items():
+                project = version.get("project_id") if isinstance(version, dict) else None
+                if not (isinstance(project, str) and _PROJECT_ID_RE.match(project)):
+                    continue
+                needs = [
+                    d["project_id"] for d in version.get("dependencies") or []
+                    if isinstance(d, dict) and d.get("dependency_type") == "required" and isinstance(d.get("project_id"), str)
+                    and _PROJECT_ID_RE.match(d["project_id"])
+                ]
+                project_of[str(sha1).lower()] = {"project": project, "requires": needs}
         side: dict[str, str] = {}
-        ids = sorted(set(project_of.values()))
+        ids = sorted({entry["project"] for entry in project_of.values()})
         for start in range(0, len(ids), 100):
             projects = await get_json(
                 self._client, f"{API}/projects", params={"ids": json.dumps(ids[start:start + 100], separators=(",", ":"))},
@@ -125,7 +134,7 @@ class ModrinthClient:
             for project in projects if isinstance(projects, list) else []:
                 if isinstance(project, dict) and project.get("server_side") in ("required", "optional", "unsupported"):
                     side[str(project.get("id"))] = project["server_side"]
-        return {sha1: side[project] for sha1, project in project_of.items() if project in side}
+        return {sha1: {**entry, "side": side[entry["project"]]} for sha1, entry in project_of.items() if entry["project"] in side}
 
     async def fetch_image(self, url: str) -> tuple[bytes, str]:
         """A modpack's icon (from Modrinth's image host only), so the dashboard never has to contact another site itself."""

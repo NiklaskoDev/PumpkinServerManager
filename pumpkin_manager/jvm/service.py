@@ -34,7 +34,7 @@ from . import properties as props
 from .loaders import LoaderInstaller, find_launch, launch_arguments
 from .modrinth import ModrinthClient, parse_project_reference, summarize_version
 from .mojang import MojangMeta, available_java
-from .mrpack import LOCK_DIR, LOCK_NAME, PackError, PackIndex, PackInstaller, read_pack
+from .mrpack import LOCK_DIR, LOCK_NAME, PackError, PackIndex, PackInstaller, override_mods, read_pack
 from .net import DownloadError
 from .runtime import JavaRuntimes
 
@@ -187,7 +187,7 @@ class JavaServerService:
             index = read_pack(pack_path)
             leave_out = spec.get("leave_out_client_only") is not False
             if leave_out:
-                await self.leave_out_client_only(index, ctx)
+                await self.leave_out_client_only(index, ctx, pack_path)
             pack_info = {**pack_info, **client_only_info(index)}
             overview = index.summary_public()
             ctx.step(f"{index.name} {index.version_id}: Minecraft {index.minecraft}, {index.loader.label}, {mods_text(overview['mods'])}")
@@ -245,23 +245,44 @@ class JavaServerService:
             await svc._do_start(rec, ctx)
         return rec
 
-    async def leave_out_client_only(self, index: PackIndex, ctx: JobContext) -> None:
+    async def leave_out_client_only(self, index: PackIndex, ctx: JobContext, pack_path: Path | None = None) -> None:
         """Drop the mods Modrinth says do not work on a server, although the pack lists them for it.
 
         Packs exported from a client launcher mark nearly every file "required" on the server, client-only mods (minimaps, shaders,
-        menus, ...) included, and many of those stop a server from starting. The mod's own project knows better."""
+        menus, ...) included, and many of those stop a server from starting. The mod's own project knows better. Mods that the
+        pack ships inside its override folders are looked up too, and a mod that another mod needs stays, whatever its own
+        project says about servers (a client-only library that a server mod depends on is still needed there)."""
         candidates = [f for f in index.server_files if any(urlsplit(u).hostname == "cdn.modrinth.com" for u in f.urls)]
-        if not candidates:
+        shipped = await asyncio.to_thread(override_mods, pack_path) if pack_path is not None else {}
+        hashes = [f.sha1 for f in candidates] + list(shipped.values())
+        if not hashes:
             return
         ctx.step("Asking Modrinth which mods only work on a client")
         try:
-            support = await self.modrinth.server_support([f.sha1 for f in candidates])
+            support = await self.modrinth.server_support(hashes)
         except DownloadError as exc:
             raise self._error(f"Could not ask Modrinth which mods are client-only: {exc}") from exc
-        skipped = [f.path for f in candidates if support.get(f.sha1) == "unsupported"]
-        if skipped:
-            index.leave_out(skipped)
-            ctx.step(f"Leaving out {mods_text(len(skipped))} that Modrinth says {'does' if len(skipped) == 1 else 'do'} not work on a server")
+        client_only = {sha1 for sha1 in hashes if support.get(sha1, {}).get("side") == "unsupported"}
+        needed = {need for sha1 in hashes if sha1 not in client_only for need in support.get(sha1, {}).get("requires", [])}
+        kept: set[str] = set()
+        grew = True
+        while grew:  # something that stays can need a client-only library, which can need another one
+            grew = False
+            for sha1 in client_only - kept:
+                if support[sha1]["project"] in needed:
+                    kept.add(sha1)
+                    needed.update(support[sha1]["requires"])
+                    grew = True
+        out = client_only - kept
+        paths = [f.path for f in candidates if f.sha1 in out]
+        shipped_paths = [path for path, sha1 in shipped.items() if sha1 in out]
+        index.leave_out(paths)
+        index.leave_out_overrides(shipped_paths)
+        count = len(paths) + len(shipped_paths)
+        if count:
+            ctx.step(f"Leaving out {mods_text(count)} that Modrinth says {'does' if count == 1 else 'do'} not work on a server")
+        if kept:
+            ctx.step(f"Keeping {mods_text(len(kept))} that only work{'s' if len(kept) == 1 else ''} on a client, because other mods in the pack need {'it' if len(kept) == 1 else 'them'}")
 
     def _java_progress(self, ctx: JobContext, major: int) -> Callable[[int, int], None]:
         def callback(done: int, total: int) -> None:

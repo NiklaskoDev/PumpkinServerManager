@@ -169,7 +169,7 @@ class PackUpdater:
             await jvm.modrinth.download_pack(version, pack_path)
             index = read_pack(pack_path)
             if old_spec.get("leave_out_client_only", True):
-                await jvm.leave_out_client_only(index, ctx)
+                await jvm.leave_out_client_only(index, ctx, pack_path)
             major = available_java(await jvm.mojang.java_major(index.minecraft))
             java = await jvm.runtimes.ensure(major, jvm._java_progress(ctx, major))
             ctx.step("Downloading the new mods (the server keeps running meanwhile)")

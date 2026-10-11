@@ -287,10 +287,17 @@ Pumpkin servers. What is different:
 * **Client-only mods are left out.** Packs made for players often list minimaps, menus and shader helpers for the server too
   (in the popular packs it is dozens of mods), and many of those stop a server from starting. The manager asks Modrinth, which
   knows for every mod whether it can run on a server, and does not install the ones that cannot. They are listed under
-  *Modpack → Left out*, updates treat them the same way, and a switch in the *New modpack server* dialog turns this off.
+  *Modpack → Left out*, updates treat them the same way, and a switch in the *New modpack server* dialog turns this off. A mod
+  that another mod of the pack needs stays, and mods the pack carries inside its own folders are checked too. What Modrinth
+  cannot tell (a mod it does not know, or one that is wrongly marked) still shows up as a failed start, with the loader's own
+  message; see *Troubleshooting*. **Packs made as a player's collection are the usual case**: expect to remove a mod or two by
+  hand from the biggest ones, while packs that were prepared for servers (Cobblemon, for one) start without any help.
 * **Some packs finish their setup on the first start.** Better MC, for one, downloads further mods when it starts for the first
-  time and then ends the server on purpose (exit code 0). The first start then reports a failure that says so; start the server
-  again and it comes up.
+  time and then ends the server on purpose (exit code 0). The manager starts such a server once more by itself; if it still
+  does not come up, the message says what the server last wrote.
+* **A server that cannot start is stopped at once.** Forge and NeoForge print *Failed to start the minecraft server* and can
+  then keep running without doing anything; the manager acts on that line, stops the server after a short grace period, and
+  shows the reason instead of waiting for the startup timeout.
 * **Modrinth packs only.** CurseForge packs are not supported yet.
 * **Which Java and why.** Minecraft 1.20.5 and newer need Java 21, 1.18-1.20.4 need Java 17, older versions Java 8, and the
   year-based versions (26.x) Java 25. The manager takes this from Mojang's metadata and keeps the runtime a server uses.
@@ -298,6 +305,11 @@ Pumpkin servers. What is different:
   Alpine, so older modpacks cannot run there.
 * **The image is Alpine Linux** (musl). Almost every mod works; the few that ship native libraries built only for the
   common Linux (glibc) may fail to load, which then shows in the console.
+
+* **Run for real.** Servers on Fabric, NeoForge, Forge and Quilt, and the Modrinth packs Cobblemon (installed, updated to the next
+  version, rolled back) and Better MC (installed, backed up, restored, and an update that could not start was rolled back by
+  itself), have been run on Windows and in this image on Linux, with the real Java, Minecraft server and mods;
+  `scripts/real_java_check.py` repeats that whenever you want to see it for your own setup.
 
 > **Mods are code.** Every mod runs with the container's access, like Pumpkin plugins would. Only install packs you trust,
 > and give the Admin role of a modpack server only to people you trust (see [Accounts for friends](#accounts-for-friends)).
@@ -396,6 +408,8 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | A friend forgot their password, or cannot sign in | Open *Accounts* and use *New password* for them: they get a new temporary password and choose their own again. After a few wrong attempts a name is locked out for a few minutes. |
 | A friend sees "No servers yet" or is missing a server | Servers have to be assigned per account: *Accounts → Access*. The change shows up in their browser without a reload. |
 | A modpack server stops while starting, or says it *did not become ready* | Open the console tab: `OutOfMemoryError` means the memory is too small (*Settings → Java*), a mod that complains names itself in the log, and a big modpack may simply need more than the startup timeout (*Settings → Startup timeout*). |
+| A modpack server says *"The server reported that it could not start"* and names a mod (*"X has failed to load correctly"* with `net/minecraft/client/...`, or *"Mod A requires B ... B is not installed"*) | The pack was made for players and lists a mod for the server that only works on a client (or one that the manager left out is needed after all). The message is the loader's own: open the *Files* tab and delete the named jar from `mods/` for the first kind, or find the jar of the second kind (*Modpack → Left out* lists what was skipped; the modpack's page has the file) and upload it to `mods/`, then start again. Packs with a proper server version (a *server pack*) are the other way out. |
+| A modpack update was rolled back by itself | The new version did not start, so the backup made before it was restored; the update's history entry says why (the same loader message as above). Nothing was lost. |
 | *"Could not download Java ..."* or a runtime that does not start | The container needs internet access to Adoptium. In the container console, `python -m pumpkin_manager java-install 21` tries it and prints the reason. |
 | A mod does not load and the log mentions a native library | The image uses Alpine Linux (musl); a few mods bring native code for glibc only. Look for a variant of that mod without native code, or report it to the mod's author. |
 | Backups fill the disk | Lower *Keep the newest*, or put `/backups` on a bigger share. Modpack servers are much bigger than Pumpkin servers (mods, libraries and world). |

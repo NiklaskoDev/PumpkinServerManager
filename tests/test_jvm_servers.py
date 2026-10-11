@@ -7,6 +7,7 @@ import time
 
 import pytest
 from conftest import create_java_server, finish, wait_until
+from jvmfakes import FakeMod
 from jvmworld import CREATE, LITHIUM
 
 from pumpkin_manager.jvm import properties as props
@@ -198,6 +199,55 @@ async def test_mods_that_modrinth_says_only_work_on_a_client_are_left_out(jvm):
     modpack = ctx.servers.view(ctx.servers.get(rec.id))["modpack"]
     assert modpack["client_only"] == ["mods/create.jar"] and modpack["client_only_count"] == 1 and modpack["leave_out_client_only"] is True
     assert world.net.mod_downloads.get(CREATE.url, 0) == 0, "a mod that is left out is not even downloaded"
+
+
+async def test_a_client_only_mod_that_another_mod_needs_stays(jvm):
+    """Battle Armory: tp_shooting needs Shoulder Surfing, which Modrinth lists as client-only; without it the server cannot load."""
+    world, ctx = jvm
+    world.net.mod_sides((LITHIUM, "required"), (CREATE, "unsupported"))
+    world.net.mod_requires(LITHIUM, CREATE)
+    row = await finish(ctx, ctx.servers.submit_create({
+        "name": "Needed", "engine": "java", "eula": True, "modpack": {"source": "modrinth", "project": "cool-pack"}, "start": False,
+    }))
+    assert row["status"] == "success", row["message"]
+    rec = next(s for s in ctx.repo.list_servers() if s.name == "Needed")
+    assert (ctx.servers.server_dir(rec.id) / "mods" / "create.jar").is_file()
+    assert ctx.servers.view(rec)["modpack"]["client_only_count"] == 0
+    assert any("Keeping 1 mod that only works on a client" in s["text"] for s in ctx.repo.get_job(row["id"])["steps"])
+
+
+async def test_what_a_kept_client_only_mod_needs_stays_too_and_the_rest_is_left_out(jvm):
+    world, ctx = jvm
+    jade = FakeMod("mods/jade.jar", b"jade" * 80)
+    library = FakeMod("mods/library.jar", b"library" * 80)
+    minimap = FakeMod("mods/minimap.jar", b"minimap" * 80)
+    version = world.pack.add_version("2.0.0", mods=[LITHIUM, CREATE, jade, library, minimap])
+    world.net.mod_sides((LITHIUM, "required"), (CREATE, "unsupported"), (jade, "unsupported"), (library, "unsupported"), (minimap, "unsupported"))
+    world.net.mod_requires(LITHIUM, CREATE)  # lithium needs create, which needs jade, which needs the library: all of them stay
+    world.net.mod_requires(CREATE, jade)
+    world.net.mod_requires(jade, library)
+    rec = await create_java_server(ctx, "Chain", start=False, modpack={"source": "modrinth", "project": "cool-pack", "version": version["id"]})
+    mods = {p.name for p in (ctx.servers.server_dir(rec.id) / "mods").iterdir()}
+    assert mods == {"lithium.jar", "create.jar", "jade.jar", "library.jar"}, "the minimap is the only one nobody needs"
+    assert ctx.servers.view(ctx.servers.get(rec.id))["modpack"]["client_only"] == ["mods/minimap.jar"]
+
+
+async def test_client_only_mods_that_a_pack_ships_inside_its_overrides_are_left_out_too(jvm):
+    """Zombie Invade carries sixteen mod jars in overrides/ (CIT Resewn among them) instead of listing them."""
+    world, ctx = jvm
+    shaders = FakeMod("mods/shader-helper.jar", b"shader helper" * 50)
+    kept = FakeMod("mods/extra-library.jar", b"extra library" * 50)
+    version = world.pack.add_version(
+        "3.0.0", mods=[LITHIUM], overrides={"mods/shader-helper.jar": shaders.content, "mods/extra-library.jar": kept.content, "config/a.toml": b"a=1\n"},
+        server_overrides={"mods/server-only.jar": b"x" * 40},
+    )
+    world.net.mod_sides((shaders, "unsupported"), (kept, "optional"))  # the jar in server-overrides is not known to Modrinth at all
+    rec = await create_java_server(ctx, "Shipped", start=False, modpack={"source": "modrinth", "project": "cool-pack", "version": version["id"]})
+    directory = ctx.servers.server_dir(rec.id)
+    assert not (directory / "mods" / "shader-helper.jar").exists()
+    assert (directory / "mods" / "extra-library.jar").is_file() and (directory / "mods" / "server-only.jar").is_file() and (directory / "config" / "a.toml").is_file()
+    lock = ctx.servers.jvm.lock_of(ctx.servers.get(rec.id))
+    assert lock["client_only"] == ["mods/shader-helper.jar"] and "mods/shader-helper.jar" not in lock["overrides"]
 
 
 async def test_mods_modrinth_does_not_know_are_installed_as_the_pack_says(jvm):
