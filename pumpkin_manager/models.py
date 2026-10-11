@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -156,12 +157,19 @@ class ServerRecord:
     last_update_check_at: str | None
     pending_build_id: str | None
     pending_since: str | None
+    # "pumpkin" servers run a downloaded Pumpkin build (build_id, channel and the pending_* fields describe it).
+    # "java" servers run a Java server (a modpack): ``spec`` says which one and how it is started.
+    engine: str = "pumpkin"
+    spec: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_java(self) -> bool:
+        return self.engine == "java"
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "ServerRecord":
-        import json
-
         data = dict(row)
         data["policy"] = ServerPolicy.model_validate(json.loads(data["policy"] or "{}"))
         data["desired_running"] = bool(data["desired_running"])
+        data["spec"] = json.loads(data.get("spec") or "{}")
         return cls(**data)

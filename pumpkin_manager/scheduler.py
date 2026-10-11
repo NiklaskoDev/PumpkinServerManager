@@ -95,6 +95,9 @@ class Scheduler:
         result = await self.ctx.updater.check()
         if result["errors"]:
             log.info("Update check finished with errors: %s", result["errors"])
+        packs = await self.ctx.pack_updates.check()
+        if packs["errors"]:
+            log.info("Modpack update check finished with errors: %s", packs["errors"])
 
     def reset_update_timer(self) -> None:
         self._next_update_check = 0.0
@@ -120,4 +123,5 @@ class Scheduler:
         ctx.auth.housekeeping()
         ctx.repo.prune_jobs()
         ctx.repo.prune_activity()
+        ctx.servers.jvm.purge_old_uploads()  # modpack files that were uploaded but never used
         await ctx.servers.refresh_disk_usage()

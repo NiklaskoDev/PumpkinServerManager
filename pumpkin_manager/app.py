@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +27,14 @@ from .db import Database
 from .errors import UserError
 from .events import EventBus
 from .jobs import JobService
+from .jvm.loaders import LoaderInstaller, Runner, run_process
+from .jvm.modrinth import ModrinthClient
+from .jvm.mojang import MojangMeta
+from .jvm.mrpack import ModCache, PackInstaller
+from .jvm.net import new_client
+from .jvm.packupdates import PackUpdater
+from .jvm.runtime import AdoptiumSource, JavaRuntimes, JavaSource, run_java_version
+from .jvm.service import JavaServerService
 from .models import AppSettings
 from .notify import Notifier
 from .process import ProcessManager
@@ -37,6 +46,7 @@ from .scheduler import Scheduler
 from .security import AuthService
 from .servers import CommandBuilder, ServerService
 from .updater import UpdateService
+from .util import memory_info
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
@@ -54,6 +64,10 @@ class AppContext:
         verify_elf: bool = True,
         background: bool = True,
         stability_seconds: float | None = None,
+        http_client: httpx.AsyncClient | None = None,
+        java_source: JavaSource | None = None,
+        java_runner: Runner | None = None,
+        verify_java: bool = True,
     ):
         self.settings = settings
         self.background = background
@@ -93,14 +107,39 @@ class AppContext:
         )
         self.servers.backups = self.backups
         self.servers.access = self.access
+        self._setup_java(http_client, java_source, java_runner, verify_java)
         extra = {} if stability_seconds is None else {"stability_seconds": stability_seconds}
         self.updater = UpdateService(
             self.repo, self.builds, self.pm, self.servers, self.backups, self.jobs, self.reporter,
             lambda: self.release_source, self.app_settings, **extra,
         )
+        self.pack_updates = PackUpdater(self.servers.jvm, **extra)
         self.scheduler = Scheduler(self)
         self.jobs.on_finish = self._on_job_finished
         self.generated_admin_password: str | None = None
+
+    def _setup_java(
+        self, http_client: httpx.AsyncClient | None, java_source: JavaSource | None, java_runner: Runner | None, verify_java: bool
+    ) -> None:
+        """The Java engine: one HTTP client for Mojang, Modrinth, Adoptium and the loaders' download sites."""
+        self.java_http = http_client or new_client()
+        self._own_java_http = http_client is None
+        self._java_source: JavaSource | None = java_source
+
+        def source() -> JavaSource:
+            if self._java_source is None:  # looked at only when Java is first needed, so an unusual CPU only matters then
+                self._java_source = AdoptiumSource(self.java_http)
+            return self._java_source
+
+        self.mojang = MojangMeta(self.java_http, self.repo)
+        self.runtimes = JavaRuntimes(self.settings.java_dir, source, verifier=run_java_version if verify_java else None)
+        self.modrinth = ModrinthClient(self.java_http)
+        self.loader_installer = LoaderInstaller(self.java_http, java_runner or run_process)
+        self.mod_cache = ModCache(self.settings.cache_dir / "mods")
+        self.packs = PackInstaller(self.java_http, self.mod_cache)
+        self.servers.jvm = JavaServerService(
+            self.servers, self.runtimes, self.mojang, self.modrinth, self.loader_installer, self.packs, self.settings.cache_dir / "uploads"
+        )
 
     # ----------------------------------------------------------------- settings
     def app_settings(self) -> AppSettings:
@@ -140,6 +179,7 @@ class AppContext:
                 bar, self.settings.admin_user, self.generated_admin_password, bar,
             )
         self.servers.reconcile()
+        self.servers.jvm.purge_old_uploads()
         self.updater.restore_state()
         result = await asyncio.to_thread(self.backups.reconcile)
         if result["added"] or result["removed"]:
@@ -160,6 +200,8 @@ class AppContext:
             log.warning("Cancelled %d running operation(s) because the manager is shutting down", cancelled)
         await self.servers.shutdown()
         await self.reporter.drain()
+        if self._own_java_http:
+            await self.java_http.aclose()
         for closable in (self.release_source, self.notifier):
             close = getattr(closable, "aclose", None)
             if close:
@@ -191,6 +233,8 @@ class AppContext:
                 "java_range": list(s.port_range), "bedrock_range": list(s.bedrock_port_range),
                 "java_used": sorted(used["java"]), "bedrock_used": sorted(used["bedrock"]),
             },
+            "memory": memory_info(),
+            "java_installed": [j.major for j in self.runtimes.installed()],
             "update_check": {
                 "enabled": self.app_settings().update_check_enabled,
                 "last": self.updater.last_check,
@@ -220,11 +264,16 @@ def create_app(
     verify_elf: bool = True,
     background: bool = True,
     stability_seconds: float | None = None,
+    http_client: httpx.AsyncClient | None = None,
+    java_source: JavaSource | None = None,
+    java_runner: Runner | None = None,
+    verify_java: bool = True,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     ctx = AppContext(
         settings, release_source=release_source, command_builder=command_builder, verify_elf=verify_elf,
-        background=background, stability_seconds=stability_seconds,
+        background=background, stability_seconds=stability_seconds, http_client=http_client, java_source=java_source,
+        java_runner=java_runner, verify_java=verify_java,
     )
 
     @asynccontextmanager
@@ -267,9 +316,9 @@ def create_app(
             body["code"] = exc.code  # type: ignore[attr-defined]
         return JSONResponse(body, status_code=exc.status)
 
-    from .api import auth, backups, files, servers, system, users, versions
+    from .api import auth, backups, files, modpacks, servers, system, users, versions
 
-    for module in (auth, system, users, servers, files, backups, versions):
+    for module in (auth, system, users, servers, files, backups, versions, modpacks):
         app.include_router(module.router, prefix="/api")
 
     if STATIC_DIR.is_dir():

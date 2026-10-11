@@ -10,6 +10,7 @@
 tests
 scripts/*
 !scripts/real_binary_check.py
+!scripts/real_java_check.py
 unraid
 docker-compose.yml
 *.md

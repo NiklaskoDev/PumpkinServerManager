@@ -147,7 +147,14 @@ CREATE TABLE user_servers (
 CREATE INDEX idx_user_servers_server ON user_servers(server_id);
 """
 
-MIGRATIONS: list[str] = [SCHEMA_V1, SCHEMA_V2]
+# Servers that are not Pumpkin servers (Java servers, for now modpacks): which engine runs the server and everything that
+# engine needs to know about it (a JSON document). Every existing server keeps running on the Pumpkin engine.
+SCHEMA_V3 = """
+ALTER TABLE servers ADD COLUMN engine TEXT NOT NULL DEFAULT 'pumpkin';
+ALTER TABLE servers ADD COLUMN spec TEXT NOT NULL DEFAULT '{}';
+"""
+
+MIGRATIONS: list[str] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3]
 
 
 class Database:

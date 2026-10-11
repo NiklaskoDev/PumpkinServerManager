@@ -1,4 +1,4 @@
-"""Command line entry point: ``python -m pumpkin_manager [serve|reset-password]``."""
+"""Command line entry point: ``python -m pumpkin_manager [serve|reset-password|java-install|version]``."""
 
 from __future__ import annotations
 
@@ -87,6 +87,40 @@ def reset_password(user: str | None, password: str | None) -> int:
     return 0
 
 
+def java_install(major: int) -> int:
+    """Download a Java runtime the way modpack servers do and start it once: proves that Java runs in this container."""
+    from .jvm.net import DownloadError, new_client
+    from .jvm.runtime import AdoptiumSource, JavaRuntimes, run_java_version
+
+    settings = Settings.from_env()
+    _configure_logging(settings.log_level)
+
+    async def run() -> int:
+        client = new_client()
+        try:
+            source = AdoptiumSource(client)
+            runtimes = JavaRuntimes(settings.java_dir, lambda: source)
+            shown = {"tenth": -1}
+
+            def progress(received: int, total: int) -> None:
+                tenth = int(10 * received / total) if total else 0
+                if tenth != shown["tenth"]:
+                    shown["tenth"] = tenth
+                    print(f"  downloading Java {major}: {received // 1048576} of {total // 1048576} MiB", flush=True)
+
+            installed = await runtimes.ensure(major, progress)
+            print(f"Java {major} ({installed.release}) is installed in {installed.path}")
+            print(await run_java_version(installed.java))
+            return 0
+        except DownloadError as exc:
+            print(f"Could not install Java {major}: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            await client.aclose()
+
+    return asyncio.run(run())
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pumpkin_manager", description="Pumpkin Server Manager")
     sub = parser.add_subparsers(dest="command")
@@ -95,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
     reset.add_argument("--user", help="account name (default: ADMIN_USER or 'admin')")
     reset.add_argument("--password", help="new password (prompted for when omitted)")
     sub.add_parser("version", help="print the version")
+    java = sub.add_parser("java-install", help="download a Java runtime for modpack servers and check that it starts")
+    java.add_argument("major", type=int, help="Java version, for example 21")
     args = parser.parse_args(argv)
 
     if args.command == "reset-password":
@@ -102,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "version":
         print(__version__)
         return 0
+    if args.command == "java-install":
+        return java_install(args.major)
     return serve()
 
 

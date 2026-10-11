@@ -24,7 +24,7 @@
   <WebUI>http://[IP]:[PORT:8420]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/NiklaskoDev/PumpkinServerManager/main/unraid/pumpkin-manager.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/NiklaskoDev/PumpkinServerManager/main/pumpkin_manager/static/favicon.svg</Icon>
-  <ExtraParams>--stop-timeout 120</ExtraParams>
+  <ExtraParams>--stop-timeout 300</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>

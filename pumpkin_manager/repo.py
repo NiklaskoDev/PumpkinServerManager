@@ -183,12 +183,12 @@ class Repo:
         self.db.execute(
             "INSERT INTO servers(id,name,created_at,channel,pinned_tag,build_id,previous_build_id,java_port,"
             "bedrock_port,mgmt_port,mgmt_secret,policy,desired_running,last_backup_at,last_update_check_at,"
-            "pending_build_id,pending_since) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "pending_build_id,pending_since,engine,spec) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 rec.id, rec.name, rec.created_at, rec.channel, rec.pinned_tag, rec.build_id,
                 rec.previous_build_id, rec.java_port, rec.bedrock_port, rec.mgmt_port, rec.mgmt_secret,
                 rec.policy.model_dump_json(), int(rec.desired_running), rec.last_backup_at,
-                rec.last_update_check_at, rec.pending_build_id, rec.pending_since,
+                rec.last_update_check_at, rec.pending_build_id, rec.pending_since, rec.engine, json.dumps(rec.spec),
             ),
         )
 
@@ -203,7 +203,9 @@ class Repo:
         if "policy" in fields:
             policy = fields.pop("policy")
             fields["policy"] = (policy if isinstance(policy, ServerPolicy) else ServerPolicy.model_validate(policy)).model_dump_json()
-        allowed = _SERVER_COLUMNS | {"policy"}
+        if "spec" in fields:
+            fields["spec"] = json.dumps(fields["spec"])
+        allowed = _SERVER_COLUMNS | {"policy", "spec"}
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"unknown server column(s): {sorted(bad)}")

@@ -23,7 +23,7 @@ from websockets.exceptions import InvalidStatus
 
 from pumpkin_manager import access, security
 from pumpkin_manager.app import AppContext, create_app
-from pumpkin_manager.db import SCHEMA_V1, Database, _split_script
+from pumpkin_manager.db import MIGRATIONS, SCHEMA_V1, Database, _split_script
 from pumpkin_manager.security import SESSION_COOKIE
 
 OWN_PASSWORD = "my own password 42"
@@ -825,11 +825,16 @@ def test_an_existing_database_is_upgraded_and_its_account_becomes_the_administra
         db.execute(statement)
     db.execute("PRAGMA user_version = 1")
     db.execute("INSERT INTO users(username, password_hash, created_at) VALUES('root', 'x', '2026-01-01T00:00:00Z')")
+    db.execute(
+        "INSERT INTO servers(id, name, created_at, java_port, mgmt_port, mgmt_secret) VALUES('old', 'Old', '2026-01-01T00:00:00Z', 1, 2, 'z')"
+    )
     db.migrate()
     row = db.one("SELECT * FROM users WHERE username='root'")
     assert row["kind"] == "admin" and row["must_change_password"] == 0
-    assert db.scalar("PRAGMA user_version") == 2
+    assert db.scalar("PRAGMA user_version") == len(MIGRATIONS)
     assert db.scalar("SELECT COUNT(*) FROM user_servers") == 0
+    server = db.one("SELECT engine, spec FROM servers WHERE id='old'")
+    assert (server["engine"], server["spec"]) == ("pumpkin", "{}"), "a server from before modpacks is a Pumpkin server"
     db.close()
 
 

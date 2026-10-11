@@ -54,7 +54,7 @@ class Settings:
     public_address: str | None = None
     log_level: str = "INFO"
     api_docs: bool = False
-    shutdown_timeout: int = 90
+    shutdown_timeout: int = 240  # a big modded world needs minutes to save when the container stops
     max_upload_bytes: int = 4096 * 1024 * 1024
     extra_env_passthrough: tuple[str, ...] = field(default_factory=tuple)
 
@@ -77,6 +77,14 @@ class Settings:
     @property
     def logs_dir(self) -> Path:
         return self.data_dir / "logs"
+
+    @property
+    def java_dir(self) -> Path:
+        return self.data_dir / "java"  # Java runtimes, one folder per major version
+
+    @property
+    def cache_dir(self) -> Path:
+        return self.data_dir / "cache"  # downloaded mods and uploaded modpacks
 
     @property
     def db_path(self) -> Path:
@@ -111,6 +119,6 @@ class Settings:
             public_address=env.get("PUBLIC_ADDRESS") or None,
             log_level=env.get("LOG_LEVEL", "INFO").upper(),
             api_docs=_bool(env.get("ENABLE_API_DOCS"), False),
-            shutdown_timeout=max(10, int(env.get("SHUTDOWN_TIMEOUT", "90"))),
+            shutdown_timeout=max(10, int(env.get("SHUTDOWN_TIMEOUT", "240"))),
             max_upload_bytes=max(1, int(env.get("MAX_UPLOAD_MB", "4096"))) * 1024 * 1024,
         )

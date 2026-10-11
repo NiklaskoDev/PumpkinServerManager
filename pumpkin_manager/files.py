@@ -14,6 +14,7 @@ from .util import atomic_write_text, is_within
 MAX_EDIT_BYTES = 1024 * 1024
 TEXT_EXTENSIONS = {
     ".toml", ".json", ".txt", ".log", ".yml", ".yaml", ".properties", ".cfg", ".conf", ".ini", ".md", ".csv", ".mcmeta", ".lang",
+    ".json5", ".snbt", ".xml", ".js", ".zs", ".mcfunction",  # what modpacks keep in config/, kubejs/ and scripts/
 }
 
 

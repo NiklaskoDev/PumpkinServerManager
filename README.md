@@ -7,6 +7,9 @@ Pumpkin is a Minecraft server written in Rust. This manager downloads it from th
 as many servers as you like (each with its own port, world and settings), keeps them running, checks for new
 Pumpkin versions on a schedule and **never applies an update without first making a verified backup**.
 
+For modded play it also runs **Java modpack servers**: pick a modpack from [Modrinth](https://modrinth.com) and the
+manager downloads Java, the mods and the mod loader and starts it. See [Modpack servers](#modpack-servers-java).
+
 ![The dashboard with three servers](docs/dashboard.jpg)
 
 ## Features
@@ -14,6 +17,7 @@ Pumpkin versions on a schedule and **never applies an update without first makin
 | | |
 |---|---|
 | **One-click servers** | Pick a name, a Pumpkin channel and a few settings; the manager downloads the binary, writes `pumpkin.toml`, assigns ports and starts it. |
+| **Modpack servers** | Java servers from Modrinth modpacks (Fabric, Quilt, Forge, NeoForge): the right Java, every mod (checksum-verified), the loader and the pack's configuration are set up for you. Search from the dashboard, paste a link or upload a `.mrpack`. |
 | **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators with individual levels, bans). |
 | **Automatic updates** | Checks GitHub for new Pumpkin builds (stable releases, plus the rolling *nightly* and *canary* builds), per server: install automatically, notify only, or off. Waits until nobody is online. |
 | **Safe by construction** | Download and checksum first, stop gracefully, **verified backup**, switch version, start, watch for crashes. If anything fails the version *and the world* roll back automatically. |
@@ -26,7 +30,7 @@ Pumpkin versions on a schedule and **never applies an update without first makin
 
 - [Install on Unraid](#install-on-unraid) · [Docker Compose](#docker-compose) · [First steps](#first-steps)
 - [Ports and networking](#ports-and-networking) · [Configuration](#configuration)
-- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Accounts for friends](#accounts-for-friends)
+- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Modpack servers](#modpack-servers-java) · [Accounts for friends](#accounts-for-friends)
 - [Security](#security) · [Where things are stored](#where-things-are-stored) · [Troubleshooting](#troubleshooting)
 - [Pumpkin notes](#notes-about-pumpkin) · [Development](#development)
 
@@ -108,7 +112,7 @@ port of each server from your router to the Unraid IP.
 
 > Prefer the command line? This is equivalent:
 > ```bash
-> docker run -d --name pumpkin-manager --restart unless-stopped --stop-timeout 120 \
+> docker run -d --name pumpkin-manager --restart unless-stopped --stop-timeout 300 \
 >   -p 8420:8420 -p 25565-25575:25565-25575/tcp -p 19132-19142:19132-19142/udp \
 >   -e PUID=99 -e PGID=100 -e TZ=Europe/Berlin -e BACKUP_DIR=/backups -e ADMIN_PASSWORD='choose-a-password' \
 >   -v /mnt/user/appdata/pumpkin-manager:/data -v /mnt/user/backups/pumpkin-manager:/backups \
@@ -171,7 +175,7 @@ Everything has a sensible default; the template sets the ones you usually want.
 | `UPDATE_CHECK_MINUTES` | `360` | Initial check interval; changeable in the dashboard. |
 | `SESSION_HOURS` | `168` | Sign-in lifetime. |
 | `MAX_UPLOAD_MB` | `4096` | Largest file the file manager accepts. |
-| `SHUTDOWN_TIMEOUT` | `90` | Seconds to wait for servers when the container stops. |
+| `SHUTDOWN_TIMEOUT` | `240` | Seconds to wait for servers when the container stops. Keep it below Docker's own stop timeout (the template sets 300). A modded server with a big world needs minutes to save. |
 | `COOKIE_SECURE` | `auto` | `auto`, `always` or `never` for the session cookie's *Secure* flag. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy addresses (see [Security](#security)). |
 | `PUMPKIN_REPO` | `Pumpkin-MC/Pumpkin` | GitHub repository releases are taken from. |
@@ -180,6 +184,9 @@ Everything has a sensible default; the template sets the ones you usually want.
 ---
 
 ## How updates work
+
+This is about Pumpkin servers. A modpack server has its own, similar procedure, described under
+[Modpack servers](#modpack-servers-java).
 
 **Channels.** Each server follows one channel:
 
@@ -238,6 +245,56 @@ you notice after playing for a while. That is what the pre-update backup and the
 * **Download / upload**: move backups to another machine or restore an archive from elsewhere.
 * A backup needs free space about the size of the world; the manager checks first and says so if there is not enough.
 
+## Modpack servers (Java)
+
+Besides Pumpkin servers the manager runs **modded Java servers from Modrinth modpacks**. Choose *New server → Modpack
+server*, search Modrinth (or paste a modpack link, or upload a `.mrpack` file), pick a version, set the memory, accept the
+[Minecraft EULA](https://aka.ms/MinecraftEULA) and create. The manager then
+
+1. reads the pack and downloads the **Java** its Minecraft version needs (Eclipse Temurin: Java 8, 17, 21 or 25, chosen
+   from Mojang's own data and installed in `/data/java`, so it is not part of the image);
+2. downloads every mod, checked against the checksums in the pack (the format only allows Modrinth, GitHub and GitLab as
+   sources), and puts the pack's configuration in place;
+3. installs the **mod loader** (Fabric, Quilt, Forge or NeoForge) with its official installer;
+4. writes `server.properties` and `eula.txt` and starts the server.
+
+Console, players (whitelist, operators with individual levels, bans), files, backups and accounts for friends work as for
+Pumpkin servers. What is different:
+
+* **Memory.** A modpack server needs gigabytes (most packs 4-8 GiB), where a Pumpkin server needs next to nothing. The
+  dashboard shows how much the machine has. The memory and extra Java options are settings of the server that only the
+  administrator can change (*Settings → Java*).
+* **The first start is slow.** The world is generated and the mods load; a big pack takes several minutes. The startup
+  timeout is 15 minutes by default (*Settings → Startup timeout*) and the stop timeout 3 minutes. Saving a big world
+  can take that long when the container stops, so the template gives the container 300 seconds (`--stop-timeout 300`,
+  *Extra Parameters*): raise it in a container you created from an older template, or Docker ends the servers early.
+* **Backups** copy the server only after it said that the world is saved (`save-off`, `save-all flush`, then "Saved the
+  game"), and leave out `logs/` and `crash-reports/`. Mods and configuration are included, so a restore brings back the
+  whole server. Backup size is mostly the mods plus the world.
+* **Files.** Mods live in `mods/`, their configuration in `config/` (and folders like `kubejs/`). Change them in the
+  *Files* tab and restart. Game settings are in *Settings*, which edits `server.properties`.
+* **Extra ports.** Some mods open their own port (voice chat on UDP 24454, a web map, ...). Add those to the container's
+  port mappings yourself; the manager only manages the game port.
+* **Updating the modpack.** The *Modpack* tab asks Modrinth for newer versions (on the same schedule as the Pumpkin update
+  check, or with *Check now*) and tells you, but never installs one by itself. *Update now* works like a Pumpkin update: the
+  new version and its mods are downloaded while the server keeps running, then the server is stopped, a **verified backup**
+  is made, the mods and configuration are switched, and the server starts again and is watched; if it does not come up, the
+  backup is restored automatically. Mods the new version dropped are removed. **Whatever you changed by hand is kept**: a
+  configuration file you edited stays as it is, with the modpack's new version saved beside it as `<name>.pack-new`, and
+  `server.properties` is never replaced. If an update moves to another Minecraft version (or loader), the dashboard warns
+  first, and the right Java and loader are installed. *Roll back* restores the backup made before the last update, mods
+  and world included. Modrinth packs only; a server made from an uploaded `.mrpack` has no place to look for updates.
+* **Modrinth packs only.** CurseForge packs are not supported yet.
+* **Which Java and why.** Minecraft 1.20.5 and newer need Java 21, 1.18-1.20.4 need Java 17, older versions Java 8, and the
+  year-based versions (26.x) Java 25. The manager takes this from Mojang's metadata and keeps the runtime a server uses.
+  *Versions → Java runtimes* lists what is installed and removes what no server needs. On arm64 only Java 21 and 25 exist for
+  Alpine, so older modpacks cannot run there.
+* **The image is Alpine Linux** (musl). Almost every mod works; the few that ship native libraries built only for the
+  common Linux (glibc) may fail to load, which then shows in the console.
+
+> **Mods are code.** Every mod runs with the container's access, like Pumpkin plugins would. Only install packs you trust,
+> and give the Admin role of a modpack server only to people you trust (see [Accounts for friends](#accounts-for-friends)).
+
 ## Accounts for friends
 
 The account created on the first start is the **administrator**: it can do everything, including creating and deleting
@@ -275,8 +332,11 @@ filtered the same way, so a friend's browser never even receives events about ot
 no role on answers exactly like one that does not exist. Role changes take effect on the next request.
 
 > **Give the Admin role only to people you trust.** Admins can edit the server's files, upload things and run console
-> commands, and all servers run inside this one container under the same user: Pumpkin plugins or other files an admin
+> commands, and all servers run inside this one container under the same user: Pumpkin plugins, mods or other files an admin
 > adds run with the container's access to every server's data and to the manager. Moderators and players cannot do any of that.
+> (On a modpack server mods are Java code, so this is not a theoretical risk there. The memory and Java options of a server
+> are for the administrator alone.)
+
 ## Security
 
 * Sign-in with a password (scrypt-hashed), server-side sessions in `HttpOnly`, `SameSite=Strict` cookies,
@@ -299,7 +359,11 @@ no role on answers exactly like one that does not exist. Role changes take effec
 /data
 ├── manager.db                    settings, users, server records, history (SQLite)
 ├── servers/<id>/                 one folder per server: pumpkin.toml, world/, data/ (whitelist, ops and ban lists), ...
+│                                 (a modpack server has server.properties, mods/, config/, world/, ... instead)
 ├── binaries/<build>/pumpkin      downloaded Pumpkin binaries, shared by all servers
+├── java/<major>/                 Java runtimes for modpack servers, downloaded when needed
+├── cache/mods/                   mod files downloaded for modpacks, kept once by checksum
+├── cache/uploads/                .mrpack files you uploaded, until a server was created from them
 └── logs/<id>/console.log         console output of the last run (+ console.prev.log)
 /backups/<id>/<date>_<kind>.tar.gz
 ```
@@ -324,7 +388,10 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | The *Management API* shows "not available" | Normal for stable Pumpkin 0.2.0, which does not have it yet. The manager then uses console commands and server pings. |
 | A friend forgot their password, or cannot sign in | Open *Accounts* and use *New password* for them: they get a new temporary password and choose their own again. After a few wrong attempts a name is locked out for a few minutes. |
 | A friend sees "No servers yet" or is missing a server | Servers have to be assigned per account: *Accounts → Access*. The change shows up in their browser without a reload. |
-| Backups fill the disk | Lower *Keep the newest*, or put `/backups` on a bigger share. |
+| A modpack server stops while starting, or says it *did not become ready* | Open the console tab: `OutOfMemoryError` means the memory is too small (*Settings → Java*), a mod that complains names itself in the log, and a big modpack may simply need more than the startup timeout (*Settings → Startup timeout*). |
+| *"Could not download Java ..."* or a runtime that does not start | The container needs internet access to Adoptium. In the container console, `python -m pumpkin_manager java-install 21` tries it and prints the reason. |
+| A mod does not load and the log mentions a native library | The image uses Alpine Linux (musl); a few mods bring native code for glibc only. Look for a variant of that mod without native code, or report it to the mod's author. |
+| Backups fill the disk | Lower *Keep the newest*, or put `/backups` on a bigger share. Modpack servers are much bigger than Pumpkin servers (mods, libraries and world). |
 | Dashboard unreachable after Unraid reboots | Check that the container is set to autostart; servers come back in the state they were in. |
 
 ## Notes about Pumpkin
@@ -350,6 +417,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
 .venv/bin/pytest                                  # archives, updates, rollback, API, security, ...
 .venv/bin/python scripts/dev_server.py            # dashboard on :8420 with a fake GitHub + fake Pumpkin (admin / devpassword)
 .venv/bin/python scripts/real_binary_check.py /path/to/pumpkin   # end-to-end check against a REAL Pumpkin binary
+.venv/bin/python scripts/real_java_check.py --accept-eula          # the same for a modpack server (real Java, Mojang, Modrinth, loader)
 ```
 
 * `scripts/real_binary_check.py` drives the manager's own code against a real Pumpkin executable: create, start,
@@ -360,7 +428,14 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
   `docker exec -it pumpkin-manager python /app/scripts/real_binary_check.py --download`
   (it downloads the official release to a temporary folder, tests it on loopback ports and cleans up; it does not
   touch your servers).
+* `scripts/real_java_check.py` does the same for modpack servers, with nothing mocked: it builds a small modpack from live Modrinth
+  data (`--loader fabric|neoforge|forge|quilt|all`), creates a server from it (Java from Adoptium, the Minecraft server from Mojang, the
+  loader's own installer), starts it, pings it, types commands, takes a hot backup, restores it and stops it. It starts real
+  Minecraft servers, so it needs `--accept-eula` (the Minecraft EULA), internet access and a few hundred MB per loader:
+  `docker exec -it pumpkin-manager python /app/scripts/real_java_check.py --accept-eula --loader all`.
 * Layout: `pumpkin_manager/` (backend: `process.py` supervision, `updater.py` the update procedure,
-  `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `api/` routers, `static/` the dashboard -
-  plain ES modules, no build step), `tests/` (including `fake_pumpkin.py`, a stand-in server), `docker/`, `unraid/`.
+  `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `jvm/` the Java engine for modpack servers: Java runtimes,
+  mod loaders, Modrinth packs, `server.properties`, pack updates; `api/` routers, `static/` the dashboard -
+  plain ES modules, no build step), `tests/` (including `fake_pumpkin.py` and `fake_java_server.py`, stand-in servers, and
+  `jvmfakes.py`, a fake internet for Modrinth, Adoptium, Mojang and the loaders), `docker/`, `unraid/`.
 * The frontend has no dependencies and never uses inline scripts or styles, so the strict CSP stays strict.

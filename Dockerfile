@@ -16,7 +16,10 @@ LABEL org.opencontainers.image.title="Pumpkin Server Manager" \
 # tini    - PID 1 that reaps zombies and forwards SIGTERM, so "docker stop" shuts servers down cleanly
 # su-exec - drops privileges to PUID:PGID after the entrypoint has prepared the folders
 # tzdata  - makes the TZ variable work (the daily backup time is interpreted in this time zone)
-RUN apk add --no-cache tini su-exec tzdata ca-certificates
+# Modpack servers run on a Java that the manager downloads when it is needed (Temurin builds for Alpine), so Java itself is not
+# in the image. What it needs around it is: zlib and libstdc++ for the JVM, fontconfig and a font for the few mods that use
+# AWT, and gcompat so that mods with native libraries built for glibc (zstd, opus, ...) can still load.
+RUN apk add --no-cache tini su-exec tzdata ca-certificates zlib libstdc++ gcompat fontconfig ttf-dejavu
 
 WORKDIR /app
 
@@ -25,8 +28,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --only-binary=:all: -r requirements.txt
 
 COPY pumpkin_manager ./pumpkin_manager
-# Self-check you can run inside the container: python /app/scripts/real_binary_check.py --download
+# Self-checks you can run inside the container: python /app/scripts/real_binary_check.py --download
+# and, for modpack servers (real Java, Mojang, Modrinth and loaders), python /app/scripts/real_java_check.py --accept-eula
 COPY scripts/real_binary_check.py ./scripts/real_binary_check.py
+COPY scripts/real_java_check.py ./scripts/real_java_check.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 755 /usr/local/bin/entrypoint.sh \
  && python -m compileall -q pumpkin_manager

@@ -1,9 +1,9 @@
 // Server settings: game settings (from the server-side schema), automation, network, raw pumpkin.toml, delete.
 
-import { PERM, can } from "../access.js";
+import { PERM, can, isAdministrator } from "../access.js";
 import { del, get, patch, post, put } from "../api.js";
 import { clear, h, icon } from "../dom.js";
-import { confirmDialog, field, jobDialog, notifyError, quickJob, selectControl, switchControl, toast } from "../ui.js";
+import { confirmDialog, field, fmtMemoryMb, jobDialog, notifyError, quickJob, selectControl, switchControl, toast } from "../ui.js";
 
 export function render({ id, getServer }) {
   const host = h("div", { class: "stack" });
@@ -43,12 +43,12 @@ export function render({ id, getServer }) {
         input = switchControl({ label: f.label, hint: f.help, checked: !!values[f.key], onChange: set });
         return h("div", {}, input, err);
       }
-      if (f.type === "enum") input = selectControl(f.options.map((o) => ({ value: o, label: o })), values[f.key], set);
+      if (f.type === "enum") input = selectControl(f.options.map((o, i) => ({ value: o, label: f.labels?.[i] || o })), values[f.key], set);
       else if (f.type === "int" || f.type === "float") {
         input = h("input", { class: "input", type: "number", min: f.min ?? undefined, max: f.max ?? undefined, step: f.type === "float" ? "any" : "1", value: String(values[f.key]),
           oninput: (e) => { const n = e.target.value === "" ? NaN : Number(e.target.value); if (!Number.isNaN(n)) set(n); } });
       } else {
-        input = h("input", { class: "input", maxlength: String(f.maxlen || 200), value: values[f.key] ?? "", placeholder: f.key === "seed" ? "random" : "", oninput: (e) => set(e.target.value) });
+        input = h("input", { class: "input", maxlength: String(f.maxlen || 200), value: values[f.key] ?? "", placeholder: f.placeholder || (f.key === "seed" ? "random" : ""), oninput: (e) => set(e.target.value) });
       }
       return h("label", { class: "field" }, h("span", {}, f.label), input, f.help ? h("span", { class: "hint" }, f.help) : null, err);
     }
@@ -101,6 +101,7 @@ export function render({ id, getServer }) {
     let name = s.name;
     let bedrock = !!s.ports.bedrock;
     let port = s.ports.java;
+    const pumpkin = s.engine !== "java";
     return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Server & network")),
       h("div", { class: "form-grid" },
         field("Display name", h("input", { class: "input", maxlength: "40", value: name, oninput: (e) => { name = e.target.value; } })),
@@ -109,13 +110,14 @@ export function render({ id, getServer }) {
         ], draft.autostart, (v) => { draft.autostart = v; })),
         field("Game port (TCP)", h("input", { class: "input", type: "number", min: "1024", max: "65535", value: String(port), oninput: (e) => { port = Number(e.target.value); } }),
           s.ports.java_published ? "Inside the range published by the container." : "Outside the published range: add this port to the container's port mappings."),
-        h("div", {}, switchControl({ label: "Allow Bedrock players", hint: s.ports.bedrock ? `UDP port ${s.ports.bedrock}` : "Opens an extra UDP port (experimental).", checked: bedrock, onChange: (v) => { bedrock = v; } })),
+        pumpkin ? h("div", {}, switchControl({ label: "Allow Bedrock players", hint: s.ports.bedrock ? `UDP port ${s.ports.bedrock}` : "Opens an extra UDP port (experimental).", checked: bedrock, onChange: (v) => { bedrock = v; } })) : null,
         field("Graceful stop timeout (seconds)", h("input", { class: "input", type: "number", min: "5", max: "600", value: String(draft.stop_timeout), oninput: (e) => { draft.stop_timeout = Number(e.target.value); } }), "After this the process is terminated."),
         field("Startup timeout (seconds)", h("input", { class: "input", type: "number", min: "15", max: "1800", value: String(draft.start_timeout), oninput: (e) => { draft.start_timeout = Number(e.target.value); } }))),
       switchControl({ label: "Restart automatically after a crash", hint: "Up to three attempts in ten minutes, with growing delays.", checked: draft.restart_on_crash, onChange: (v) => { draft.restart_on_crash = v; } }),
       h("div", {}, h("button", { class: "btn primary sm", onclick: async () => {
         try {
-          const body = { name, policy: draft, bedrock };
+          const body = { name, policy: draft };
+          if (pumpkin) body.bedrock = bedrock;
           if (port !== s.ports.java) body.java_port = port;
           const result = await patch(`/api/servers/${id}`, body);
           if (result.restart_required) restartNotice(); else toast("Saved", "success");
@@ -123,9 +125,30 @@ export function render({ id, getServer }) {
       } }, icon("save", "sm"), "Save")));
   }
 
+  // ---- Java (modpack servers; how much of the machine they use is the administrator's call) -----------------------
+  function buildJava() {
+    const s = getServer();
+    let gib = (s.java.memory_mb || 4096) / 1024;
+    let options = s.java.jvm_args || "";
+    return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Java")),
+      h("div", { class: "form-grid" },
+        field("Memory for the server (GiB)", h("input", { class: "input", type: "number", min: "1", max: "1024", step: "0.5", value: String(gib), oninput: (e) => { gib = Number(e.target.value) || 0; } }),
+          `Now ${fmtMemoryMb(s.java.memory_mb)}. Java ${s.java.major} is used for Minecraft ${s.modpack?.minecraft || ""}.`),
+        field("Extra Java options", h("input", { class: "input", value: options, placeholder: "for example -Dfml.readTimeout=90", spellcheck: "false", maxlength: "2000", oninput: (e) => { options = e.target.value; } }),
+          "Optional. Only options that start with - are accepted; they are added to the command that starts Java.")),
+      h("div", {}, h("button", { class: "btn primary sm", onclick: async () => {
+        try {
+          const result = await patch(`/api/servers/${id}`, { java: { memory_mb: Math.round(gib * 1024), jvm_args: options } });
+          if (result.restart_required) restartNotice(); else toast("Saved", "success");
+        } catch (err) { notifyError(err); }
+      } }, icon("save", "sm"), "Save")));
+  }
+
   // ---- raw config ----------------------------------------------------------------------------------------
   function buildRaw() {
-    const area = h("textarea", { class: "input", rows: "18", spellcheck: "false", "aria-label": "pumpkin.toml" });
+    const java = getServer().engine === "java";
+    const file = java ? "server.properties" : "pumpkin.toml";
+    const area = h("textarea", { class: "input", rows: "18", spellcheck: "false", "aria-label": file });
     const info = h("div", {});
     const details = h("details", { ontoggle: async (e) => {
       if (!e.target.open || area.dataset.loaded) return;
@@ -136,20 +159,22 @@ export function render({ id, getServer }) {
         info.appendChild(h("p", { class: "hint" }, "Managed by the dashboard and reset on every start: ", h("code", {}, raw.managed_keys.join(", "))));
       } catch (err) { notifyError(err); }
     } },
-      h("summary", {}, "Advanced: edit pumpkin.toml directly"),
+      h("summary", {}, `Advanced: edit ${file} directly`),
       h("div", { class: "stack-sm", style: { marginTop: "12px" } },
-        h("div", { class: "notice warning" }, icon("alert", "sm"), "If Pumpkin cannot read this file it silently falls back to default settings. The dashboard checks the syntax before saving, but not every value."),
+        java
+          ? h("div", { class: "notice" }, icon("info", "sm"), "The server rewrites this file when it starts. Settings that are not listed above (such as spawn-monsters or pause-when-empty-seconds) can be changed here.")
+          : h("div", { class: "notice warning" }, icon("alert", "sm"), "If Pumpkin cannot read this file it silently falls back to default settings. The dashboard checks the syntax before saving, but not every value."),
         info, area,
         h("div", {}, h("button", { class: "btn primary sm", onclick: async () => {
           try {
             const result = await put(`/api/servers/${id}/config/raw`, { content: area.value });
             if (result.reset_managed_keys?.length) toast(`Reset keys owned by the manager: ${result.reset_managed_keys.join(", ")}`, "warning");
-            if (result.restart_required) restartNotice(); else toast("pumpkin.toml saved", "success");
+            if (result.restart_required) restartNotice(); else toast(`${file} saved`, "success");
           } catch (err) {
             notifyError(err);
             if (err.data?.errors) toast(Object.values(err.data.errors).join("\n"), "error");
           }
-        } }, icon("save", "sm"), "Save pumpkin.toml"))));
+        } }, icon("save", "sm"), `Save ${file}`))));
     return h("div", { class: "card" }, details);
   }
 
@@ -174,7 +199,8 @@ export function render({ id, getServer }) {
 
   buildGameSettings().then((card) => {
     // Only the administrator may delete a server; server admins manage everything else about it.
-    host.append(restartHost, card, buildAutomation(), buildRaw(), ...(can(getServer(), PERM.DELETE) ? [buildDanger()] : []));
+    const java = getServer().engine === "java" && getServer().java && isAdministrator();
+    host.append(restartHost, card, buildAutomation(), ...(java ? [buildJava()] : []), buildRaw(), ...(can(getServer(), PERM.DELETE) ? [buildDanger()] : []));
   }).catch(notifyError);
   return { el: host };
 }

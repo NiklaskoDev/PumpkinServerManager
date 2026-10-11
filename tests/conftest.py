@@ -141,3 +141,52 @@ async def create_server(ctx: AppContext, name: str = "Survival", **spec: Any):
     assert row["status"] == "success", row["message"]
     server = next(s for s in ctx.repo.list_servers() if s.name == name)
     return server
+
+
+@pytest_asyncio.fixture
+async def jvm(tmp_path: Path, source: FakeReleaseSource):
+    """A started application context whose Java side talks to a fake world (see jvmworld.py). Yields (world, ctx)."""
+    from jvmworld import JavaWorld
+
+    world = JavaWorld()
+    app_ctx = AppContext(
+        make_settings(tmp_path), release_source=source, verify_elf=False, background=False, stability_seconds=0.6, **world.app_options()
+    )
+    world.attach(app_ctx)
+    app_ctx.servers.command_builder = lambda rec, build: [sys.executable, "-u", str(FAKE), str(app_ctx.builds.binary_path(build.id))]
+    await app_ctx.startup()
+    try:
+        yield world, app_ctx
+    finally:
+        await app_ctx.shutdown()
+
+
+async def create_java_server(ctx: AppContext, name: str = "Modded", **spec: Any):
+    """Create a modpack server from the fake Modrinth pack and wait for the job; returns the server record."""
+    body = {"name": name, "engine": "java", "eula": True, "modpack": {"source": "modrinth", "project": "cool-pack"}, "start": spec.pop("start", True), **spec}
+    row = await finish(ctx, ctx.servers.submit_create(body))
+    assert row["status"] == "success", row["message"]
+    return next(s for s in ctx.repo.list_servers() if s.name == name)
+
+
+@pytest_asyncio.fixture
+async def jvm_live(tmp_path, source):
+    """The whole application over HTTP with the fake Java world behind it. Yields (world, api, ctx)."""
+    from jvmworld import JavaWorld
+
+    world = JavaWorld()
+    settings = make_settings(tmp_path)
+    app = create_app(settings, release_source=source, verify_elf=False, background=False, stability_seconds=0.6, **world.app_options())
+    ctx = app.state.ctx
+    world.attach(ctx)
+    ctx.servers.command_builder = lambda rec, build: [sys.executable, "-u", str(FAKE), str(ctx.builds.binary_path(build.id))]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=settings.web_port, log_level="warning", access_log=False))
+    task = asyncio.create_task(server.serve())
+    await wait_until(lambda: server.started, 20, what="web server")
+    api = Api(f"http://127.0.0.1:{settings.web_port}")
+    try:
+        yield world, api, ctx
+    finally:
+        await api.http.aclose()
+        server.should_exit = True
+        await asyncio.wait_for(task, 60)

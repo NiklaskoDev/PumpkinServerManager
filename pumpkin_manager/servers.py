@@ -35,7 +35,8 @@ from .util import SERVER_ID_RE, atomic_write_text, dir_size, iso, slugify
 log = logging.getLogger(__name__)
 
 PLAYER_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
-PLAYER_DATA_DIR = "data"
+PLAYER_DATA_DIR = "data"  # where Pumpkin keeps the lists; Java servers keep them in the server folder itself
+JAVA_START_HINT = "modded servers can need several minutes on a first start; raise the startup timeout in the server's settings if it is still working."
 PLAYER_LIST_FILES = (
     ("whitelist", "whitelist.json"), ("ops", "ops.json"), ("banned_players", "banned-players.json"), ("banned_ips", "banned-ips.json"),
 )
@@ -93,6 +94,7 @@ class ServerService:
         self.command_builder: CommandBuilder = command_builder or (lambda rec, build: [str(builds.binary_path(build.id))])
         self.backups: Any = None  # attached by the application factory (BackupService)
         self.access: Any = None  # attached by the application factory (AccessService)
+        self.jvm: Any = None  # attached by the application factory (JavaServerService: the Java engine)
         self._create_lock = asyncio.Lock()
         self._disk_cache: dict[str, tuple[float, int]] = {}
         self._last_poll: dict[str, float] = {}
@@ -137,6 +139,9 @@ class ServerService:
             "uptime": rt.uptime(),
             "exit_code": rt.exit_code,
             "last_error": rt.last_error,
+            "engine": rec.engine,
+            "modpack": None,
+            "java": None,
             "channel": rec.channel,
             "pinned_tag": rec.pinned_tag,
             "build": build.public() if build else None,
@@ -164,6 +169,10 @@ class ServerService:
             "last_backup_at": rec.last_backup_at,
             "policy": rec.policy.model_dump(),
         }
+        if rec.is_java and self.jvm is not None:
+            view["modpack"], view["java"] = self.jvm.describe(rec)
+            view["update"]["pending_pack"] = view["modpack"]["pending"]
+            view["update"]["available"] = view["modpack"]["pending"] is not None
         if detail:
             view["stats"]["cpu_history"] = list(rt.cpu_history)
             view["stats"]["mem_history"] = list(rt.mem_history)
@@ -242,6 +251,10 @@ class ServerService:
         return candidate
 
     async def create(self, spec: dict[str, Any], ctx: JobContext) -> ServerRecord:
+        if spec.get("engine") == "java":
+            if self.jvm is None:
+                raise ServerError("Java servers are not available in this installation.")
+            return await self.jvm.create(spec, ctx)
         name = " ".join(str(spec["name"]).split())
         if not 1 <= len(name) <= 40:
             raise ServerError("The server name must be 1-40 characters long.")
@@ -299,6 +312,8 @@ class ServerService:
     # -------------------------------------------------------------- start / stop
     def ensure_config(self, rec: ServerRecord, ctx: JobContext | None = None) -> None:
         """Re-assert manager-owned keys; refuse to start on a file Pumpkin would silently ignore."""
+        if rec.is_java:
+            return self.jvm.ensure_config(rec, ctx)
         path = self.config_path(rec.id)
         text = path.read_text(encoding="utf-8") if path.is_file() else ""
         try:
@@ -330,35 +345,46 @@ class ServerService:
         if self.pm.runtime(rec.id).is_active:
             ctx.step("The server is already running")
             return
-        build = self.repo.get_build(rec.build_id)
-        if build is None:
-            raise ServerError("This server has no Pumpkin version assigned.")
-        if not self.builds.is_available(build):
-            ctx.step(f"Downloading Pumpkin {build.label}")
-            build = await self.builds.ensure(build, self._download_progress(ctx, span=0.5))
         directory = self.server_dir(rec.id)
-        if not directory.is_dir():
-            raise ServerError("The server folder is missing.")
-        self.ensure_config(rec, ctx)
+        ready_re = timeout_hint = None
+        if rec.is_java:
+            if self.jvm is None:
+                raise ServerError("Java servers are not available in this installation.")
+            if not directory.is_dir():
+                raise ServerError("The server folder is missing.")
+            launch = await self.jvm.prepare_start(rec, ctx)
+            argv, env, label, ready_re, timeout_hint = launch.argv, launch.env, launch.label, launch.ready_re, JAVA_START_HINT
+        else:
+            build = self.repo.get_build(rec.build_id)
+            if build is None:
+                raise ServerError("This server has no Pumpkin version assigned.")
+            if not self.builds.is_available(build):
+                ctx.step(f"Downloading Pumpkin {build.label}")
+                build = await self.builds.ensure(build, self._download_progress(ctx, span=0.5))
+            if not directory.is_dir():
+                raise ServerError("The server folder is missing.")
+            self.ensure_config(rec, ctx)
+            argv, env, label = self.command_builder(rec, build), self.child_env(rec), f"Pumpkin {build.label}"
         if not port_is_free(rec.java_port):
             raise ServerError(f"Port {rec.java_port} is already in use by another program. Change the server port in its settings.")
         if rec.bedrock_port and not port_is_free(rec.bedrock_port, udp=True):
             raise ServerError(f"UDP port {rec.bedrock_port} (Bedrock) is already in use by another program.")
-        fresh_world = self._world_is_new(rec)  # must be looked at before Pumpkin creates the world
+        fresh_world = False if rec.is_java else self._world_is_new(rec)  # must be looked at before Pumpkin creates the world
 
-        ctx.step(f"Starting Pumpkin {build.label}")
+        ctx.step(f"Starting {label}")
         ctx.progress(0.6)
         try:
             await self.pm.start(
-                rec.id, self.command_builder(rec, build), directory, self.child_env(rec),
-                ready_port=rec.java_port, ready_timeout=rec.policy.start_timeout,
+                rec.id, argv, directory, env, ready_port=rec.java_port, ready_timeout=rec.policy.start_timeout,
+                ready_re=ready_re, timeout_hint=timeout_hint,
             )
         except ProcessError as exc:
             self.reporter.record("error", "start", f"'{rec.name}' failed to start: {exc}", rec.id, notify="crashed", title=f"{rec.name} failed to start")
             raise ServerError(str(exc)) from exc
         self.repo.update_server(rec.id, desired_running=1)
         ctx.step("The server is up and accepting connections")
-        await self._apply_difficulty(rec, ctx, fresh_world=fresh_world)
+        if not rec.is_java:
+            await self._apply_difficulty(rec, ctx, fresh_world=fresh_world)
         self.reporter.record("success", "start", f"'{rec.name}' started", rec.id)
         self.publish_state(rec.id)
 
@@ -449,6 +475,11 @@ class ServerService:
                 columns["policy"] = ServerPolicy.model_validate(merged)
             except ValueError as exc:
                 raise ServerError(f"Invalid policy: {exc}") from exc
+        if rec.is_java:
+            for key in ("channel", "pinned_tag", "bedrock", "bedrock_port"):
+                changes.pop(key, None)  # these belong to Pumpkin servers
+            if "java" in changes:
+                restart_required |= self.jvm.patch(rec, changes["java"])
         if "channel" in changes and changes["channel"] != rec.channel:
             columns.update(channel=changes["channel"], pending_build_id=None, pending_since=None)
         if "pinned_tag" in changes:
@@ -477,6 +508,8 @@ class ServerService:
 
     # ------------------------------------------------------------------- config
     def read_config(self, rec: ServerRecord) -> dict[str, Any]:
+        if rec.is_java:
+            return self.jvm.read_config(rec)
         path = self.config_path(rec.id)
         text = path.read_text(encoding="utf-8") if path.is_file() else ""
         try:
@@ -488,6 +521,8 @@ class ServerService:
                 "restart_required_hint": self.pm.runtime(rec.id).is_active}
 
     def update_config(self, rec: ServerRecord, values: dict[str, Any]) -> dict[str, Any]:
+        if rec.is_java:
+            return self.jvm.update_config(rec, values)
         clean = pc.validate_values(values)
         path = self.config_path(rec.id)
         text = path.read_text(encoding="utf-8") if path.is_file() else ""
@@ -496,11 +531,15 @@ class ServerService:
         return {"saved": True, "restart_required": self.pm.runtime(rec.id).is_active}
 
     def read_raw_config(self, rec: ServerRecord) -> dict[str, Any]:
+        if rec.is_java:
+            return self.jvm.read_raw_config(rec)
         path = self.config_path(rec.id)
         text = path.read_text(encoding="utf-8") if path.is_file() else ""
         return {"content": pc.strip_secrets(text), "managed_keys": [".".join(p) for p, _ in self.managed(rec).items()]}
 
     def write_raw_config(self, rec: ServerRecord, content: str) -> dict[str, Any]:
+        if rec.is_java:
+            return self.jvm.write_raw_config(rec, content)
         if len(content.encode("utf-8")) > 512 * 1024:
             raise ServerError("pumpkin.toml is limited to 512 KiB.")
         path = self.config_path(rec.id)
@@ -524,7 +563,7 @@ class ServerService:
         """Save game settings and, where the running server allows it, apply them without a restart."""
         result = self.update_config(rec, values)
         applied: list[str] = []
-        if "default_difficulty" in values and self.pm.runtime(rec.id).state == "running":
+        if not rec.is_java and "default_difficulty" in values and self.pm.runtime(rec.id).state == "running":
             if await self._apply_difficulty(rec, force=True):
                 applied.append("default_difficulty")
         result["applied_live"] = applied
@@ -574,17 +613,20 @@ class ServerService:
         return True
 
     # ------------------------------------------------------------------ players
+    def _lists_dir(self, rec: ServerRecord) -> Path:
+        return self.jvm.lists_dir(rec) if rec.is_java else self.server_dir(rec.id) / PLAYER_DATA_DIR
+
     def read_player_lists(self, rec: ServerRecord) -> dict[str, list[dict[str, Any]]]:
         # Unlike vanilla, Pumpkin keeps these files in a "data" folder inside the server directory and writes them as soon as
         # a command changes a list.
-        directory = self.server_dir(rec.id) / PLAYER_DATA_DIR
+        directory = self._lists_dir(rec)
         result: dict[str, list[dict[str, Any]]] = {}
         for key, filename in PLAYER_LIST_FILES:
             entries: list[dict[str, Any]] = []
             try:
                 data = json.loads((directory / filename).read_text(encoding="utf-8"))
                 if isinstance(data, list):
-                    entries = [e for e in data if isinstance(e, dict)][:2000]
+                    entries = [self.jvm.normalize_entry(e) if rec.is_java else e for e in data if isinstance(e, dict)][:2000]
             except (OSError, ValueError):
                 pass
             result[key] = entries
@@ -626,6 +668,8 @@ class ServerService:
     # in data/ops.json, which the server reads only when it starts (editing the file while it runs has no effect and is
     # overwritten by the next /op or /deop). So changing a level on a running server means: stop, edit the file, start.
     def op_default_level(self, rec: ServerRecord) -> int:
+        if rec.is_java:
+            return self.jvm.op_default_level(rec)
         try:
             return int(pc.read_values(self._config_text(rec))["op_permission_level"])
         except (pc.ConfigError, TypeError, ValueError):
@@ -636,7 +680,7 @@ class ServerService:
         return next((e for e in self.read_player_lists(rec)["ops"] if str(e.get("name", "")).lower() == wanted), None)
 
     def _write_op_level(self, rec: ServerRecord, name: str, level: int) -> None:
-        path = self.server_dir(rec.id) / PLAYER_DATA_DIR / "ops.json"
+        path = self._lists_dir(rec) / "ops.json"
         try:
             entries = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(entries, list):
@@ -677,7 +721,7 @@ class ServerService:
             ctx.step(f"{name} is already operator level {level}")
             return
         if running:
-            ctx.step("Pumpkin reads operator levels only when it starts, so the server restarts now")
+            ctx.step("The server reads operator levels only when it starts, so it restarts now")
             await self._do_stop(rec, ctx)
             self._write_op_level(rec, name, level)
             await self._do_start(rec, ctx)
@@ -761,6 +805,8 @@ class ServerService:
             rt.ping_ok = False
             names = list(rt.player_names)
         try:
+            if rec.is_java:
+                raise MsmpError("Java servers have no management protocol here")
             async with MsmpClient(rec.mgmt_port, rec.mgmt_secret, timeout=4) as client:
                 players = await client.players()
                 names = [p.get("name") for p in players if p.get("name")]
@@ -806,6 +852,8 @@ class ServerService:
             if not directory.exists():
                 log.warning("The folder of server %s is missing; creating an empty one", rec.id)
                 directory.mkdir()
+        for leftover in base.glob(".create-*"):  # a modpack install that was interrupted
+            shutil.rmtree(leftover, ignore_errors=True)
 
     def autostart_targets(self) -> list[ServerRecord]:
         return [

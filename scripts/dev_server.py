@@ -19,6 +19,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import uvicorn  # noqa: E402
 from fakes import FAKE, FakeReleaseSource  # noqa: E402
+from jvmfakes import FakeMod, FakeModrinth  # noqa: E402
+from jvmworld import JavaWorld  # noqa: E402
 
 from pumpkin_manager.app import create_app  # noqa: E402
 from pumpkin_manager.config import Settings  # noqa: E402
@@ -37,13 +39,29 @@ def main() -> None:
     source.publish("nightly", "nightly-1")
     source.publish("canary", "canary-1")
 
-    app = create_app(settings, release_source=source, verify_elf=False, stability_seconds=3)
+    # Modpack servers: a fake Modrinth, Adoptium and loader sites, and a fake Java server (nothing is downloaded for real).
+    world = JavaWorld()
+    world.net.maven_installer("forge", "1.20.1", "47.2.0")
+    packs: dict[str, FakeModrinth] = {}
+    for slug, title, version, minecraft, loader, mods in (
+        ("skyblock-dreams", "Skyblock Dreams", "2.4.1", "1.21.1", ("fabric", "0.16.9"), [FakeMod("mods/fabric-api.jar", b"fabric-api" * 500), FakeMod("mods/lithium.jar", b"lithium" * 200)]),
+        ("old-school-adventures", "Old School Adventures", "7.0", "1.20.1", ("forge", "47.2.0"), [FakeMod("mods/jei.jar", b"jei" * 400), FakeMod("mods/waystones.jar", b"waystones" * 100)]),
+    ):
+        packs[slug] = FakeModrinth(world.net, slug=slug, title=title, project_id=slug.replace("-", "")[:8].ljust(8, "x"))
+        packs[slug].add_version(version, minecraft=minecraft, loader=loader, mods=mods)
+    app = create_app(settings, release_source=source, verify_elf=False, stability_seconds=3, **world.app_options())
     ctx = app.state.ctx
     ctx.servers.command_builder = lambda rec, build: [sys.executable, "-u", str(FAKE), str(ctx.builds.binary_path(build.id))]
+    world.attach(ctx)
 
     def publish_update() -> None:  # a newer stable release "appears" so the update flow is visible
         source.publish("stable", "0.2.0")
         print("[dev] published fake release 0.2.0 - the next update check will find it", flush=True)
+        packs["skyblock-dreams"].add_version(
+            "2.5.0", minecraft="1.21.1", loader=("fabric", "0.16.9"), mods=[FakeMod("mods/fabric-api.jar", b"fabric-api" * 500), FakeMod("mods/sodium-server.jar", b"sodium" * 300)],
+            overrides={"config/skyblock.toml": b"islands = 4\n"},
+        )
+        print("[dev] published fake modpack version Skyblock Dreams 2.5.0", flush=True)
 
     threading.Timer(float(os.environ.get("DEV_UPDATE_AFTER", "90")), publish_update).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

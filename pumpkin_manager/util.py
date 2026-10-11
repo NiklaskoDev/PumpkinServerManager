@@ -37,6 +37,23 @@ def slugify(name: str, max_len: int = 32) -> str:
     return slug or "server"
 
 
+def memory_info() -> dict[str, int | None]:
+    """RAM of the machine and, when the container is limited (Docker's --memory), that limit."""
+    import psutil
+
+    total = psutil.virtual_memory().total
+    limit = None
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            text = Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text.isdigit() and int(text) < total:  # "max" or an enormous number means: no limit
+            limit = int(text)
+            break
+    return {"total": total, "available": psutil.virtual_memory().available, "limit": limit}
+
+
 def human_bytes(n: float) -> str:
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if abs(n) < 1024 or unit == "TiB":

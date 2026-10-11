@@ -52,11 +52,13 @@ ROLE_LABELS = {PLAYER: "Player", MODERATOR: "Moderator", ADMIN: "Admin"}
 # What a player or moderator gets to see of a server; everything else (update policy, backup times, ...) is for admins.
 _LIMITED_FIELDS = (
     "id", "name", "created_at", "state", "busy", "desired_running", "uptime", "exit_code", "channel", "build", "ports",
-    "public_address", "players", "mc_version", "motd", "ping_ok", "stats", "disk_bytes",
+    "public_address", "players", "mc_version", "motd", "ping_ok", "stats", "disk_bytes", "engine", "modpack",
 )
+_MODPACK_MANAGEMENT = ("pending", "can_roll_back")
 # Placeholders for the parts the dashboard expects to find on every server, so it never trips over a missing key.
 _NEUTRAL_FIELDS: dict[str, Any] = {
     "pinned_tag": None,
+    "java": None,  # how a Java server is launched (memory, options) is for those who manage it
     "previous_build": None,
     "policy": {},
     "last_backup_at": None,
@@ -141,6 +143,8 @@ class AccessService:
             shaped = dict(view)
         else:
             shaped = {**copy.deepcopy(_NEUTRAL_FIELDS), **{key: view[key] for key in _LIMITED_FIELDS if key in view}}
+            if shaped.get("modpack"):  # which modpack it is is for everybody; updates and undo are for those who manage it
+                shaped["modpack"] = {k: v for k, v in shaped["modpack"].items() if k not in _MODPACK_MANAGEMENT}
             if CONSOLE_VIEW in perms:
                 shaped["last_error"] = view.get("last_error")
         shaped["access"] = {"role": role, "can": sorted(perms)}

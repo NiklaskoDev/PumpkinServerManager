@@ -110,6 +110,8 @@ class UpdateService:
 
     def _evaluate(self, rec: ServerRecord) -> bool:
         """Set or clear the pending-update flag of one server. Returns True if an update is pending."""
+        if rec.engine != "pumpkin":
+            return False  # servers of other engines are not on a Pumpkin channel; their own updates are checked elsewhere
         now = iso()
         if rec.pinned_tag or rec.policy.update_mode == "off":
             self.repo.update_server(rec.id, pending_build_id=None, pending_since=None, last_update_check_at=now)
@@ -142,7 +144,9 @@ class UpdateService:
         started = 0
         now = utcnow()
         for rec in self.repo.list_servers():
-            if not rec.pending_build_id or rec.policy.update_mode != "auto" or rec.pinned_tag or self.jobs.is_busy(rec.id):
+            if rec.engine != "pumpkin" or not rec.pending_build_id or rec.policy.update_mode != "auto" or rec.pinned_tag:
+                continue
+            if self.jobs.is_busy(rec.id):
                 continue
             target = self.repo.get_build(rec.pending_build_id)
             current = self.repo.get_build(rec.build_id)

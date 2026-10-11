@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
 
     # Servers are stopped gracefully (the world is saved) when the container stops. Give them time.
-    stop_grace_period: 2m
+    stop_grace_period: 5m
 
     ports:
       - "8420:8420"                          # web dashboard

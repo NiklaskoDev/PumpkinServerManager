@@ -4,7 +4,7 @@ import { PERM, can } from "../access.js";
 import { get, post } from "../api.js";
 import { clear, h, icon } from "../dom.js";
 import { bus, state } from "../store.js";
-import { channelChip, confirmDialog, emptyState, notifyError, quickJob, statusBadge, versionText } from "../ui.js";
+import { confirmDialog, emptyState, notifyError, serverChips, statusBadge } from "../ui.js";
 import { connectAddress, serverActions } from "./dashboard.js";
 import * as backupsTab from "../tabs/backups.js";
 import * as consoleTab from "../tabs/console.js";
@@ -12,6 +12,7 @@ import * as filesTab from "../tabs/files.js";
 import * as overviewTab from "../tabs/overview.js";
 import * as playersTab from "../tabs/players.js";
 import * as settingsTab from "../tabs/settings.js";
+import * as modpackTab from "../tabs/modpack.js";
 import * as versionTab from "../tabs/version.js";
 
 // `perm` is what the signed-in account needs on this server to see the tab at all (the server enforces it as well).
@@ -50,10 +51,7 @@ export async function render([id, tabId]) {
     if (!server) return;
     title.textContent = server.name;
     clear(badge).appendChild(statusBadge(server));
-    clear(meta).append(
-      h("span", { class: "chip" }, icon("layers", "sm"), versionText(server.build)),
-      channelChip(server.channel),
-      h("span", { class: "chip mono" }, icon("globe", "sm"), connectAddress(server)));
+    clear(meta).append(...serverChips(server), h("span", { class: "chip mono" }, icon("globe", "sm"), connectAddress(server)));
     clear(actions).append(...serverActions(server));
     if (can(server, PERM.CONTROL) && (server.state === "starting" || server.state === "stopping" || (server.busy && server.state !== "stopped"))) {
       actions.appendChild(h("button", { class: "btn danger sm", title: "Terminate the server process immediately (the world may not be saved)", onclick: async () => {
@@ -64,9 +62,10 @@ export async function render([id, tabId]) {
   }
 
   const tabsNav = h("div", { class: "tabs", role: "tablist" }, tabs.map((t) =>
-    h("a", { href: `#/server/${id}/${t.id}`, role: "tab", class: t.id === tab.id ? "active" : "", "aria-selected": String(t.id === tab.id) }, icon(t.icon, "sm"), t.label)));
+    h("a", { href: `#/server/${id}/${t.id}`, role: "tab", class: t.id === tab.id ? "active" : "", "aria-selected": String(t.id === tab.id) }, icon(t.icon, "sm"),
+      t.id === "version" && getServer().engine === "java" ? "Modpack" : t.label)));
 
-  const view = tab.mod.render({ id, getServer });
+  const view = (tab.id === "version" && getServer().engine === "java" ? modpackTab : tab.mod).render({ id, getServer });
   content.appendChild(view.el);
   renderHeader();
 

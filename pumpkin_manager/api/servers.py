@@ -36,6 +36,13 @@ def accepted(job: dict[str, Any]) -> JSONResponse:
 
 class CreateBody(BaseModel):
     name: str = Field(min_length=1, max_length=60)
+    engine: Literal["pumpkin", "java"] = "pumpkin"
+    # Java servers: which modpack ({"source": "modrinth", "project": ..., "version": ...} or {"source": "upload", "upload": ...}),
+    # how much memory it gets, extra JVM options, and that the Minecraft EULA was accepted
+    modpack: dict[str, Any] | None = None
+    memory_mb: int | None = Field(None, ge=512, le=1_048_576)
+    jvm_args: str | None = Field(None, max_length=2000)
+    eula: bool = False
     channel: Channel | None = None
     pinned_tag: str | None = Field(None, max_length=100)
     java_port: int | None = Field(None, ge=1024, le=65535)
@@ -54,6 +61,7 @@ class PatchBody(BaseModel):
     bedrock: bool | None = None
     bedrock_port: int | None = Field(None, ge=1024, le=65535)
     policy: dict[str, Any] | None = None
+    java: dict[str, Any] | None = None  # Java servers: {"memory_mb": ..., "jvm_args": ...}; the administrator only
 
 
 class CommandBody(BaseModel):
@@ -114,6 +122,9 @@ async def patch_server(
     principal: Principal = Depends(require_principal),
 ) -> dict:
     ctx = get_ctx(request)
+    if body.java is not None and not principal.is_owner:
+        # How much of the machine a server may use, and the options its Java is started with, are the administrator's call.
+        raise HTTPException(status_code=403, detail=NOT_ALLOWED)
     rec, restart_required = ctx.servers.patch(rec, body.model_dump(exclude_unset=True))
     view = _view(request, principal, rec, detail=True)
     view["restart_required"] = restart_required

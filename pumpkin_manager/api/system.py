@@ -38,7 +38,7 @@ async def system(request: Request) -> dict:
         "servers": len(ctx.repo.list_servers()),
         "running": len(ctx.pm.running_ids()),
         "players": sum(ctx.pm.runtime(sid).players_online for sid in ctx.pm.running_ids()),
-        "updates": sum(1 for r in ctx.repo.list_servers() if r.pending_build_id),
+        "updates": sum(1 for r in ctx.repo.list_servers() if r.pending_build_id or (r.spec.get("pack") or {}).get("pending")),
         "active_jobs": ctx.jobs.active_count(),
     }
     return info

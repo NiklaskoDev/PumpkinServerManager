@@ -77,14 +77,14 @@ export function render({ id, getServer }) {
       } }, "Ban"))));
   }
 
-  // Pumpkin reads operator levels only when it starts, so on a running server this restarts it (the manager edits data/ops.json
+  // Servers read operator levels only when they start, so on a running server this restarts it (the manager edits ops.json
   // between the stop and the start). `select` is the dropdown to put back if the change is cancelled or fails.
   async function setLevel(name, level, select = null, previous = null) {
     const revert = () => { if (select) select.value = String(previous); };
     if (data.running) {
       const ok = await confirmDialog({
         title: `Make ${name} operator level ${level}?`, confirmLabel: "Restart and apply",
-        message: "Pumpkin only reads operator levels when it starts, so the server restarts to apply this. Players who are online are disconnected for a few seconds and can rejoin afterwards.",
+        message: `The server only reads operator levels when it starts, so it restarts to apply this. Players who are online are disconnected${getServer().engine === "java" ? " while it starts again (a big modpack takes a few minutes)" : " for a few seconds"} and can rejoin afterwards.`,
       });
       if (!ok) return revert();
     }

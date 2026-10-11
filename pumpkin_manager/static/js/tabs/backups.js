@@ -61,7 +61,7 @@ export function backupsPanel({ serverId = null } = {}) {
           h("td", {}, h("span", { class: `badge ${cls}` }, label), b.protected ? h("span", { class: "chip", title: "Protected from automatic deletion" }, icon("shield", "sm")) : null,
             !b.consistent ? h("span", { class: "chip", title: "Taken while the server was running and not fully paused" }, "crash-consistent") : null),
           h("td", { class: "nowrap" }, fmtBytes(b.size), b.verified ? h("span", { class: "muted", title: "Archive was read back and its checksum verified" }, " ", icon("check", "sm")) : null),
-          h("td", { class: "small" }, b.note ? h("div", {}, b.note) : null, h("div", { class: "muted" }, b.build_tag ? `Pumpkin ${b.build_tag}` : "–")),
+          h("td", { class: "small" }, b.note ? h("div", {}, b.note) : null, h("div", { class: "muted" }, b.build_tag ? (/^(\d+\.\d+|nightly|canary)/.test(b.build_tag) ? `Pumpkin ${b.build_tag}` : b.build_tag) : "–")),
           h("td", { class: "actions-cell" }, h("div", { class: "row", style: { justifyContent: "flex-end" } },
             h("button", { class: "btn sm", disabled: !b.server_exists, title: b.server_exists ? "" : "The server no longer exists", onclick: () => restore(b) }, icon("rollback", "sm"), "Restore"),
             h("a", { class: "btn ghost sm icon-only", href: `/api/backups/${b.id}/download`, title: "Download", "aria-label": "Download backup", download: "" }, icon("download", "sm")),

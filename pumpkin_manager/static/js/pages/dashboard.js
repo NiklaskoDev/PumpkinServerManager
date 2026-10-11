@@ -2,8 +2,8 @@ import { PERM, can, canAnywhere, isAdministrator } from "../access.js";
 import { post } from "../api.js";
 import { clear, copyText, fmtBytes, fmtDuration, h, icon, replaceChildren } from "../dom.js";
 import { bus, serverList, state } from "../store.js";
-import { activityItem, channelChip, emptyState, jobDialog, quickJob, statusBadge, toast, versionText } from "../ui.js";
-import { openCreateServer } from "./create.js";
+import { activityItem, emptyState, jobDialog, pendingText, quickJob, serverChips, statusBadge, toast } from "../ui.js";
+import { openNewServer } from "./new-server.js";
 
 export function connectAddress(server) {
   return `${server.public_address || location.hostname}:${server.ports.java}`;
@@ -66,7 +66,7 @@ function serverCard(initial) {
     if (statsOnly) return;
 
     // Structural parts are rebuilt only when what they show actually changed (keeps hover/focus stable).
-    const shape = JSON.stringify([server.state, server.busy, server.name, server.build?.id, server.channel, server.update.available, server.update.pending_build?.id, server.ports, server.public_address, server.access]);
+    const shape = JSON.stringify([server.state, server.busy, server.name, server.engine, server.modpack, server.java?.major, server.build?.id, server.channel, server.update.available, server.update.pending_build?.id, server.ports, server.public_address, server.access]);
     if (shape === lastShape) return;
     lastShape = shape;
     name.textContent = server.name;
@@ -75,16 +75,12 @@ function serverCard(initial) {
     refs.openLabel.textContent = can(server, PERM.SETTINGS) ? "Manage" : "Open";
     address.firstChild.textContent = connectAddress(server);
     clear(refs.badge).appendChild(statusBadge(server));
-    replaceChildren(refs.meta,
-      h("span", { class: "chip" }, icon("layers", "sm"), versionText(server.build)),
-      channelChip(server.channel),
-      server.pinned_tag ? h("span", { class: "chip", title: "Pinned: automatic updates are off" }, icon("shield", "sm"), "pinned") : null,
-      server.ports.bedrock ? h("span", { class: "chip", title: `Bedrock UDP port ${server.ports.bedrock}` }, "Bedrock") : null);
+    replaceChildren(refs.meta, ...serverChips(server));
     clear(refs.update);
     if (server.update.available) {
       refs.update.appendChild(h("div", { class: "update-banner" }, icon("arrowUp"),
-        h("div", { class: "grow" }, "Update available: ", h("strong", {}, versionText(server.update.pending_build))),
-        server.update.mode === "auto"
+        h("div", { class: "grow" }, "Update available: ", h("strong", {}, pendingText(server))),
+        server.update.mode === "auto" && server.engine !== "java"
           ? h("span", { class: "muted small" }, "installs automatically")
           : h("a", { class: "btn sm primary", href: `#/server/${server.id}/version` }, "Review")));
     }
@@ -146,8 +142,8 @@ export function render() {
     if (!servers.length) {
       emptyHost.appendChild(h("div", { class: "card" }, isAdministrator()
         ? emptyState("server", "Create your first server",
-          "Pumpkin is a fast Minecraft server written in Rust. The manager downloads it, sets it up and keeps it updated and backed up for you.",
-          h("button", { class: "btn primary", onclick: openCreateServer }, icon("plus", "sm"), "New server"))
+          "Run a fast Pumpkin server, or a Java modpack server with mods from Modrinth. The manager downloads and sets it up, and keeps it backed up (and Pumpkin updated) for you.",
+          h("button", { class: "btn primary", onclick: openNewServer }, icon("plus", "sm"), "New server"))
         : emptyState("server", "No servers yet", "The administrator has not given you access to a server. Once they do, it shows up here.")));
     }
     activityCard.classList.toggle("hidden", !(isAdministrator() || canAnywhere(PERM.ACTIVITY)));
@@ -185,8 +181,8 @@ export function render() {
   const owner = isAdministrator();
   const el = h("div", { class: "stack" },
     h("div", { class: "page-head" },
-      h("div", { class: "titles" }, h("h1", {}, "Dashboard"), h("p", {}, owner ? "All your Pumpkin servers at a glance." : "The servers you have access to.")),
-      owner ? h("div", { class: "actions" }, h("button", { class: "btn primary", onclick: openCreateServer }, icon("plus", "sm"), "New server")) : null),
+      h("div", { class: "titles" }, h("h1", {}, "Dashboard"), h("p", {}, owner ? "All your servers at a glance." : "The servers you have access to.")),
+      owner ? h("div", { class: "actions" }, h("button", { class: "btn primary", onclick: openNewServer }, icon("plus", "sm"), "New server")) : null),
     h("div", { class: "grid cols-4" },
       statTile("Servers", "server", tiles.servers, tiles.serversSub),
       statTile("Players", "users", tiles.players, tiles.playersSub),

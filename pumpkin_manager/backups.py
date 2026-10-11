@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import tarfile
@@ -38,6 +39,9 @@ MANIFEST_NAME = ".pumpkin-manager/manifest.json"
 KINDS = ("manual", "scheduled", "pre-update", "pre-restore", "pre-delete", "uploaded", "imported")
 COLD_KINDS = {"pre-update", "pre-restore", "pre-delete"}
 PROGRESS_STEP_BYTES = 8 * 1024 * 1024
+# What a Java server prints when it has done what the backup asked of it (vanilla and modded alike).
+_SAVE_OFF_RE = re.compile(r"Automatic saving is now disabled", re.IGNORECASE)
+_SAVED_RE = re.compile(r"Saved the (game|world)", re.IGNORECASE)
 
 
 class BackupError(UserError):
@@ -288,6 +292,7 @@ class BackupService:
         self.jobs = jobs
         self._start_server = start_server
         self._stop_server = stop_server
+        self.java_save_timeout = 900.0  # seconds a Java server may take to save its world before a hot backup (a test can shorten it)
         settings.backup_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------- helpers
@@ -389,6 +394,8 @@ class BackupService:
         final = self.settings.backup_dir / file_name
         partial = final.with_name(final.name + ".partial")
         build = self.repo.get_build(rec.build_id)
+        pack = rec.spec.get("pack") or {}
+        pack_tag = f"{pack.get('title') or 'Modpack'} {pack.get('version_number') or ''}".strip() if rec.is_java else None
         manifest = {
             "format": 1,
             "created_at": iso(),
@@ -398,7 +405,7 @@ class BackupService:
             "kind": kind,
             "mode": mode,
             "build_id": rec.build_id,
-            "build_tag": build_tag or (build.tag if build else None),
+            "build_tag": build_tag or (build.tag if build else pack_tag),
             "build_digest": build.digest if build else None,
             "uncompressed_bytes": total,
             "note": note,
@@ -452,8 +459,38 @@ class BackupService:
         await asyncio.to_thread(self.prune, rec)
         return row
 
+    async def _quiesce_java(self, rec: ServerRecord, ctx: JobContext) -> tuple[bool, bool]:
+        """Pause autosave and flush the world on a Java server, waiting for the server to say that it is done.
+
+        A big modded world can need minutes for ``save-all flush``, so unlike the fixed pauses used for Pumpkin the
+        backup starts only after the server printed "Saved the game".
+        """
+        consistent = True
+        paused = False
+
+        async def ask(command: str, confirmation: re.Pattern[str], timeout: float) -> bool:
+            after = self.pm.runtime(rec.id).seq
+            await self.pm.send_command(rec.id, command, echo=False)
+            return await self.pm.wait_for_output(rec.id, confirmation, after, timeout)
+
+        try:
+            paused = True  # from here on save-on must be sent, even if the confirmation never comes
+            if not await ask("save-off", _SAVE_OFF_RE, 30):
+                ctx.warn("The server did not confirm that autosave is paused")
+                consistent = False
+            ctx.step("Saving the world before the backup (large worlds take a while)")
+            if not await ask("save-all flush", _SAVED_RE, self.java_save_timeout):
+                ctx.warn(f"The server did not confirm within {int(self.java_save_timeout)} seconds that the world is saved")
+                consistent = False
+        except ProcessError as exc:
+            ctx.warn(f"Could not flush the world: {exc}")
+            consistent = False
+        return consistent, paused
+
     async def _quiesce(self, rec: ServerRecord, ctx: JobContext) -> tuple[bool, bool]:
         """Best-effort flush + pause autosave. Returns (consistent, autosave_paused)."""
+        if rec.is_java:
+            return await self._quiesce_java(rec, ctx)
         consistent = True
         paused = False
         try:

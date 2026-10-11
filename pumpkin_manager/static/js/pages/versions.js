@@ -76,9 +76,33 @@ export async function render() {
           } }, icon("trash", "sm")))))))) : h("p", { class: "muted", style: { padding: "0 18px 18px" } }, "No builds downloaded yet. They are fetched automatically when a server is created.")));
   }
 
+  // ---- Java runtimes: what modpack servers run on ---------------------------------------------------------------
+  const javaHost = h("div", {});
+  async function drawJava() {
+    let info;
+    try { info = await get("/api/java/runtimes"); } catch (err) { return clear(javaHost).appendChild(h("div", { class: "notice danger" }, icon("alert", "sm"), err.message)); }
+    const missing = info.available.filter((major) => !info.installed.some((j) => j.major === major));
+    clear(javaHost).appendChild(h("div", { class: "card tight" },
+      h("div", { class: "card-section" }, h("div", { class: "row" }, h("h2", { class: "grow" }, "Java runtimes"), h("span", { class: "muted small" }, `${fmtBytes(info.disk_bytes)} on disk`)),
+        h("p", { class: "muted small" }, "Modpack servers run on Java. The version a server needs is downloaded when it first starts; versions no server uses can be removed here.")),
+      info.installed.length ? h("div", { class: "table-wrap" }, h("table", { class: "table" },
+        h("thead", {}, h("tr", {}, h("th", {}, "Java"), h("th", {}, "Build"), h("th", {}, "Size"), h("th", {}, "Used by"), h("th", {}, ""))),
+        h("tbody", {}, info.installed.map((j) => h("tr", {},
+          h("td", {}, h("strong", {}, `Java ${j.major}`)), h("td", { class: "mono small" }, j.release || "–"), h("td", { class: "nowrap" }, fmtBytes(j.size)),
+          h("td", {}, j.used_by.length ? j.used_by.map((sid) => h("a", { href: `#/server/${sid}`, class: "chip", style: { marginRight: "4px" } }, state.servers.get(sid)?.name || sid)) : h("span", { class: "muted" }, "nobody")),
+          h("td", { class: "actions-cell" }, h("button", { class: "btn ghost sm icon-only", disabled: j.used_by.length > 0, title: j.used_by.length ? "A server uses this version" : "Remove from disk", "aria-label": `Remove Java ${j.major}`, onclick: async () => {
+            if (!(await confirmDialog({ title: `Remove Java ${j.major}?`, message: "It is downloaded again when a server needs it.", confirmLabel: "Remove", danger: true }))) return;
+            try { await del(`/api/java/runtimes/${j.major}`); await drawJava(); } catch (err) { notifyError(err); }
+          } }, icon("trash", "sm")))))))) : h("p", { class: "muted", style: { padding: "0 18px 14px" } }, "No Java downloaded yet."),
+      missing.length ? h("div", { class: "card-section row" }, h("span", { class: "muted small" }, "Download in advance:"),
+        ...missing.map((major) => h("button", { class: "btn sm", onclick: () => jobDialog(post(`/api/java/runtimes/${major}`), { title: `Downloading Java ${major}`, successToast: "Downloaded" }).then(drawJava) }, icon("download", "sm"), `Java ${major}`))) : null,
+      info.mods_cache_bytes ? h("div", { class: "card-section muted small" }, `Mods that were downloaded for modpacks stay in a shared cache (${fmtBytes(info.mods_cache_bytes)}), so a mod that several servers or versions use is fetched only once.`) : null));
+  }
+
   async function reload() {
     data = await get("/api/versions");
     draw();
+    drawJava();
   }
 
   const checkBtn = h("button", { class: "btn primary", onclick: async (e) => {
@@ -92,11 +116,12 @@ export async function render() {
 
   const offs = [bus.on("servers", draw), bus.on("job", ({ job, previous }) => { if (previous?.status === "running" && job.status !== "running" && ["update", "download", "create"].includes(job.kind)) reload(); })];
   draw();
+  drawJava();
   return {
     el: h("div", { class: "stack" },
       h("div", { class: "page-head" }, h("div", { class: "titles" }, h("h1", {}, "Versions"), h("p", {}, "Pumpkin builds from GitHub. Servers follow a channel and update automatically with a backup first."), statusHost),
         h("div", { class: "actions" }, checkBtn)),
-      channelsHost, buildsHost),
+      channelsHost, buildsHost, javaHost),
     dispose: () => offs.forEach((o) => o()),
   };
 }

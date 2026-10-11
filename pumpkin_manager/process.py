@@ -25,6 +25,7 @@ from .util import iso, strip_ansi, utcnow
 log = logging.getLogger(__name__)
 
 READY_RE = re.compile(r"server is now running", re.IGNORECASE)
+PUMPKIN_START_HINT = "if Pumpkin rejected pumpkin.toml it silently falls back to default settings."
 MAX_LINE = 8000
 MAX_LOG_FILE_BYTES = 20 * 1024 * 1024
 BACKLOG_LINES = 3000
@@ -46,6 +47,8 @@ class Runtime:
     exit_code: int | None = None
     last_error: str | None = None
     stopping_requested: bool = False
+    ready_re: re.Pattern[str] = READY_RE  # the console line that says the server is up
+    timeout_hint: str = PUMPKIN_START_HINT  # what to suggest when it never comes up
     log: deque = field(default_factory=lambda: deque(maxlen=BACKLOG_LINES))
     seq: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -117,12 +120,16 @@ class ProcessManager:
         env: dict[str, str],
         ready_port: int | None,
         ready_timeout: float,
+        ready_re: re.Pattern[str] | None = None,
+        timeout_hint: str | None = None,
     ) -> None:
         rt = self.runtime(server_id)
         if rt.is_active:
             raise ProcessError(f"The server is already {rt.state}.")
 
         self._reset_for_start(rt)
+        rt.ready_re = ready_re or READY_RE
+        rt.timeout_hint = PUMPKIN_START_HINT if timeout_hint is None else timeout_hint
         self._open_logfile(rt)
         self._sys(rt, f"Starting: {' '.join(argv)}")
         creation: dict[str, Any] = {}
@@ -192,6 +199,21 @@ class ProcessManager:
         await self._write_stdin(rt, command)
         if echo:
             self._append(rt, "in", command)
+
+    async def wait_for_output(self, server_id: str, pattern: re.Pattern[str], after: int, timeout: float) -> bool:
+        """Wait for a console line matching ``pattern`` that the server printed after line number ``after`` (see ``Runtime.seq``)."""
+        rt = self.runtime(server_id)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            for line in reversed(rt.log):
+                if line["n"] <= after:
+                    break
+                if line["s"] == "out" and pattern.search(strip_ansi(line["m"])):
+                    return True
+            if rt.exited.is_set() or loop.time() > deadline:
+                return False
+            await asyncio.sleep(0.2)
 
     async def shutdown_all(self, timeout_for: Callable[[str], float], overall: float) -> None:
         ids = self.running_ids()
@@ -263,7 +285,7 @@ class ProcessManager:
                 break
             text = raw.decode("utf-8", "replace").rstrip("\r\n")
             self._append(rt, "out", text)
-            if not rt.ready.is_set() and READY_RE.search(strip_ansi(text)):
+            if not rt.ready.is_set() and rt.ready_re.search(strip_ansi(text)):
                 rt.ready.set()
 
     async def _watch(self, rt: Runtime, proc: asyncio.subprocess.Process, pump: asyncio.Task) -> None:
@@ -310,8 +332,8 @@ class ProcessManager:
                     pass
             if loop.time() > deadline:
                 raise ProcessError(
-                    f"The server did not become ready within {int(timeout)} seconds. Check the console output; "
-                    "if Pumpkin rejected pumpkin.toml it silently falls back to default settings."
+                    f"The server did not become ready within {int(timeout)} seconds. Check the console output"
+                    f"{'; ' + rt.timeout_hint if rt.timeout_hint else '.'}"
                 )
             await asyncio.sleep(0.4)
 

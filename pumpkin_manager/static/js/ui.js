@@ -181,6 +181,45 @@ export function versionText(build) {
   return build.label || build.tag;
 }
 
+// What an update banner names: the Pumpkin build, or the modpack version.
+export function pendingText(server) {
+  if (server.engine === "java") {
+    const pending = server.update?.pending_pack;
+    return pending ? `${server.modpack?.title || "modpack"} ${pending.number}` : "";
+  }
+  return versionText(server.update?.pending_build);
+}
+
+export const fmtMemoryMb = (mb) => (mb % 1024 === 0 ? `${mb / 1024} GiB` : `${mb} MiB`);
+
+// The chips under a server's name: a Pumpkin server shows its build and channel, a modpack server the pack and its loader.
+export function serverChips(server) {
+  if (server.engine === "java") {
+    const pack = server.modpack || {};
+    return [
+      h("span", { class: "chip", title: "Modpack" }, icon("layers", "sm"), [pack.title, pack.version_number].filter(Boolean).join(" ") || "Modpack"),
+      pack.loader?.label ? h("span", { class: "chip", title: "Mod loader" }, pack.loader.label) : null,
+      pack.minecraft ? h("span", { class: "chip" }, `Minecraft ${pack.minecraft}`) : null,
+      server.java ? h("span", { class: "chip", title: `Java ${server.java.major}, ${fmtMemoryMb(server.java.memory_mb)} of memory` }, icon("cpu", "sm"), `Java ${server.java.major}`) : null,
+    ];
+  }
+  return [
+    h("span", { class: "chip" }, icon("layers", "sm"), versionText(server.build)),
+    channelChip(server.channel),
+    server.pinned_tag ? h("span", { class: "chip", title: "Pinned: automatic updates are off" }, icon("shield", "sm"), "pinned") : null,
+    server.ports?.bedrock ? h("span", { class: "chip", title: `Bedrock UDP port ${server.ports.bedrock}` }, "Bedrock") : null,
+  ];
+}
+
+// A modpack's icon. It comes through the manager (the dashboard may not contact other sites) and falls back to a plain symbol.
+export function packIcon(url, size = 40) {
+  const fallback = () => h("span", { class: "pack-icon pack-icon-empty", style: { width: `${size}px`, height: `${size}px` } }, icon("layers"));
+  if (!url) return fallback();
+  const img = h("img", { class: "pack-icon", src: `/api/modpacks/icon?url=${encodeURIComponent(url)}`, alt: "", width: String(size), height: String(size), loading: "lazy" });
+  img.addEventListener("error", () => img.replaceWith(fallback()));
+  return img;
+}
+
 export function levelIcon(level) {
   const name = { success: "check", warning: "alert", error: "alert", info: "info" }[level] || "info";
   return h("span", { class: `ico ${level}` }, icon(name, "sm"));
