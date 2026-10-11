@@ -265,10 +265,16 @@ async def check_server(
 
     section(f"{label}: talk to the running server")
     info = None
-    try:
-        info = await server_list_ping("127.0.0.1", server.java_port, timeout=10)
-    except Exception as exc:  # noqa: BLE001
-        check(False, "the server answers the server-list ping", repr(exc))
+    failure: Exception | None = None
+    for _ in range(15):  # for a moment after "Done" some servers (Vanilla Perfected on 26.3) close the first status requests
+        try:
+            info = await server_list_ping("127.0.0.1", server.java_port, timeout=10)
+            break
+        except Exception as exc:  # noqa: BLE001
+            failure = exc
+            await asyncio.sleep(2)
+    if info is None:
+        check(False, "the server answers the server-list ping", repr(failure))
     if info:
         check(True, "the server answers the server-list ping", f"{info['version']!r}, {info['online']}/{info['max']} players, motd {info['motd']!r}")
         check(info["max"] == 5 and "real java check" in info["motd"], "max players and motd are the ones chosen")
