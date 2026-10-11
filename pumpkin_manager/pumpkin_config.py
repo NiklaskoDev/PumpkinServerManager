@@ -68,7 +68,8 @@ FIELDS: tuple[Field, ...] = (
     Field("default_gamemode", ("default_gamemode",), "enum", "Default game mode", "General", "Survival",
           options=GAMEMODES),
     Field("default_difficulty", ("default_difficulty",), "enum", "Difficulty", "General", "Normal",
-          options=DIFFICULTIES),
+          "Pumpkin ignores this in its config file, so the manager sets it with the /difficulty command when the "
+          "server first starts and as soon as you change it here.", options=DIFFICULTIES),
     Field("hardcore", ("hardcore",), "bool", "Hardcore", "General", False,
           "Players cannot respawn in survival mode."),
     Field("online_mode", ("networking", "java", "online_mode"), "bool", "Online mode (verify accounts)",

@@ -252,7 +252,7 @@ you notice after playing for a while. That is what the pre-update backup and the
 ```
 /data
 ├── manager.db                    settings, users, server records, history (SQLite)
-├── servers/<id>/                 one folder per server: pumpkin.toml, world/, whitelist.json, ...
+├── servers/<id>/                 one folder per server: pumpkin.toml, world/, data/ (whitelist, ops and ban lists), ...
 ├── binaries/<build>/pumpkin      downloaded Pumpkin binaries, shared by all servers
 └── logs/<id>/console.log         console output of the last run (+ console.prev.log)
 /backups/<id>/<date>_<kind>.tar.gz
@@ -272,6 +272,8 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | *"No free port left in 25565-25575"* | Widen `PORT_RANGE` **and** the template's port mapping (they must match). |
 | Update check says *rate limit* | Add a `GITHUB_TOKEN` (Settings or environment variable). |
 | Server stops right after starting | Open the console tab for the output. After editing `pumpkin.toml` by hand, use the Advanced editor, which validates it. |
+| Adding a player to the whitelist, operators or bans changes nothing | Those buttons type the command into the running server's console, and the Players tab shows what the server then wrote to its `data/` folder. The dashboard tells you when a list did not change; the console tab has the server's answer (for example *No player was found* when an account name does not exist and online mode is on). The server must be running. |
+| The difficulty is not the one I chose | Pumpkin ignores `default_difficulty` in `pumpkin.toml`, so the manager sets it with the `/difficulty` command when a server starts for the first time and whenever you change it in *Settings* (a running server switches at once). A difficulty an operator sets in-game stays until you change the setting here. |
 | The *Management API* shows "not available" | Normal for stable Pumpkin 0.2.0, which does not have it yet. The manager then uses console commands and server pings. |
 | Backups fill the disk | Lower *Keep the newest*, or put `/backups` on a bigger share. |
 | Dashboard unreachable after Unraid reboots | Check that the container is set to autostart; servers come back in the state they were in. |
@@ -286,6 +288,10 @@ can do - the dashboard asks for confirmation and backs up first.
 Pumpkin's own telemetry heartbeat (to `market.pumpkinmc.org`) is **off for servers created by this manager** unless you
 enable it in *Settings → Defaults* or per server.
 
+Two behaviours of the current Pumpkin builds that the manager works around (both found by running the real server):
+the whitelist, operator and ban lists are kept in a `data/` folder next to `pumpkin.toml` (not beside it, as in vanilla
+Minecraft), and the `default_difficulty` setting is not applied to new worlds, which always start on Normal.
+
 ## Development
 
 ```bash
@@ -296,9 +302,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
 ```
 
 * `scripts/real_binary_check.py` drives the manager's own code against a real Pumpkin executable: create, start,
-  ping, console, hot backup, settings change, a real update, a download that is not an executable (refused up
-  front), a build that cannot start (rolled back), three servers side by side (one with Bedrock) and graceful
-  shutdown. It is part of the image, so you can validate
+  ping, console, whitelist/operator/ban lists, difficulty, hot backup, settings change, a real update, a download
+  that is not an executable (refused up front), a build that cannot start (rolled back), three servers side by side
+  (one with Bedrock) and graceful shutdown. It is part of the image, so you can validate
   the exact Linux build on your own server in about 30 seconds:
   `docker exec -it pumpkin-manager python /app/scripts/real_binary_check.py --download`
   (it downloads the official release to a temporary folder, tests it on loopback ports and cleans up; it does not

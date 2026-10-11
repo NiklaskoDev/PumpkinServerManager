@@ -18,6 +18,8 @@ _SERVER_COLUMNS = {
 _BACKUP_COLUMNS = {"size", "sha256", "verified", "protected", "note", "consistent", "file_name"}
 _JOB_COLUMNS = {"status", "progress", "message", "steps", "finished_at", "title", "server_id"}
 _UPDATE_COLUMNS = {"status", "message", "finished_at", "backup_id", "to_build_id", "to_tag"}
+# Keys of the settings table that belong to one server ("<prefix>:<server id>"); removed together with the server.
+PER_SERVER_KV = ("skip", "autofails", "autoattempt", "difficulty")
 
 
 def new_id() -> str:
@@ -177,6 +179,9 @@ class Repo:
 
     def delete_server(self, server_id: str) -> None:
         self.db.execute("DELETE FROM servers WHERE id=?", (server_id,))
+        # Per-server bookkeeping must not leak into a later server that gets the same id.
+        for prefix in PER_SERVER_KV:
+            self.db.execute("DELETE FROM settings WHERE key=?", (f"{prefix}:{server_id}",))
 
     def used_ports(self) -> dict[str, set[int]]:
         rows = self.db.all("SELECT java_port, bedrock_port, mgmt_port FROM servers")

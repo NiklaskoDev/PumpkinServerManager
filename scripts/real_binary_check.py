@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from functools import partial
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -112,6 +113,32 @@ def console_tail(ctx: AppContext, server_id: str, since: int = 0, limit: int = 4
     return [strip_ansi(line["m"]) for line in ctx.pm.backlog(server_id, 4000) if line["n"] > since][-limit:]
 
 
+async def eventually(predicate, timeout: float = 15.0, interval: float = 0.3) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval)
+    return bool(predicate())
+
+
+async def ask(ctx: AppContext, server_id: str, command: str, prefix: str, timeout: float = 10.0) -> str | None:
+    """Type a command into the server's console and return the first answer line that starts with ``prefix``."""
+    await ctx.pm.send_command(server_id, command)
+    echo = max(line["n"] for line in ctx.pm.backlog(server_id, 4000) if line["s"] == "in" and line["m"] == command)
+    found: list[str] = []
+
+    def answered() -> bool:
+        for line in ctx.pm.backlog(server_id, 4000):
+            text = strip_ansi(line["m"])
+            if line["n"] > echo and text.startswith(prefix):
+                found.append(text)
+                return True
+        return False
+
+    return found[0] if await eventually(answered, timeout, 0.2) else None
+
+
 async def run(binary: Path, keep: bool) -> int:
     work = Path(tempfile.mkdtemp(prefix="pumpkin-real-check-"))
     print(f"Working folder: {work}")
@@ -149,7 +176,7 @@ async def run(binary: Path, keep: bool) -> int:
         job = ctx.servers.submit_create({
             "name": "Real Check", "start": True,
             "settings": {"online_mode": False, "view_distance": 4, "simulation_distance": 4, "max_players": 7,
-                         "motd": "real binary check", "default_gamemode": "Creative"},
+                         "motd": "real binary check", "default_gamemode": "Creative", "default_difficulty": "Hard"},
         })
         row = await wait_job(ctx, job)
         show_job(row)
@@ -233,6 +260,47 @@ async def run(binary: Path, keep: bool) -> int:
         check("disabled" in joined or "off" in joined, "'save-off' acknowledged")
         check("enabled" in joined or " on" in joined, "'save-on' acknowledged")
 
+        # ------------------------------------------------------------------------------------------ player lists
+        section("Whitelist, operators and bans (the Players tab shows the files the real server writes)")
+        rec = ctx.repo.get_server(server.id)
+        data_dir = settings.servers_dir / server.id / "data"
+        check(sorted(p.name for p in data_dir.glob("*.json")) == ["banned-ips.json", "banned-players.json", "ops.json", "whitelist.json"],
+              "Pumpkin keeps its player lists in the data/ folder", ", ".join(sorted(p.name for p in data_dir.glob("*.json"))))
+
+        def listed(key: str, value: str) -> bool:
+            return any(value in (e.get("name"), e.get("ip")) for e in ctx.servers.read_player_lists(rec)[key])
+
+        def unlisted(key: str, value: str) -> bool:
+            return not listed(key, value)
+
+        for action, target, reason, key in (
+            ("whitelist_add", "RealWhite", None, "whitelist"), ("op", "RealOp", None, "ops"),
+            ("ban", "RealBan", "checking the lists", "banned_players"), ("ban_ip", "203.0.113.77", "checking the lists", "banned_ips"),
+        ):
+            await ctx.servers.player_action(rec, action, target, reason)
+            check(await eventually(partial(listed, key, target)), f"'{action} {target}' shows up in the {key.replace('_', ' ')} list")
+        lists = ctx.servers.read_player_lists(rec)
+        check(any(e.get("level") == 4 for e in lists["ops"]), "the operator entry carries its permission level", str(lists["ops"]))
+        check(any(e.get("reason") == "checking the lists" for e in lists["banned_players"] + lists["banned_ips"]),
+              "ban reasons are recorded", str(lists["banned_players"]))
+        for action, target, key in (
+            ("whitelist_remove", "RealWhite", "whitelist"), ("deop", "RealOp", "ops"),
+            ("pardon", "RealBan", "banned_players"), ("pardon_ip", "203.0.113.77", "banned_ips"),
+        ):
+            await ctx.servers.player_action(rec, action, target)
+            check(await eventually(partial(unlisted, key, target)), f"'{action} {target}' takes it off the list again")
+
+        # ------------------------------------------------------------------------------------------- difficulty
+        section("Difficulty (Pumpkin ignores default_difficulty in pumpkin.toml, so the manager sets it with a command)")
+        check(cfg["default_difficulty"] == "Hard", "pumpkin.toml says Hard, as chosen when the server was created")
+        answer = await ask(ctx, server.id, "difficulty", "The difficulty is")
+        check(answer == "The difficulty is Hard", "the real server is on Hard (left alone it would be on Normal)", answer or "no answer")
+        result = await ctx.servers.save_settings(ctx.repo.get_server(server.id), {"default_difficulty": "Easy"})
+        check(result["applied_live"] == ["default_difficulty"] and not result["restart_required"],
+              "changing it in the dashboard needs no restart", str(result))
+        answer = await ask(ctx, server.id, "difficulty", "The difficulty is")
+        check(answer == "The difficulty is Easy", "the running server switched to Easy", answer or "no answer")
+
         # ----------------------------------------------------------------------------------------------- backup
         section("Hot backup of the running server")
         row = await wait_job(ctx, ctx.backups.submit_backup(ctx.repo.get_server(server.id), "manual", "real binary"))
@@ -253,6 +321,10 @@ async def run(binary: Path, keep: bool) -> int:
         check(row["status"] == "success", "restart succeeded", row["message"] or "")
         info = await server_list_ping("127.0.0.1", server.java_port, timeout=5)
         check(info["max"] == 11 and "second start" in info["motd"], "new settings are live", f"{info['online']}/{info['max']} {info['motd']!r}")
+        answer = await ask(ctx, server.id, "difficulty", "The difficulty is")
+        check(answer == "The difficulty is Easy", "the difficulty was saved with the world and survived the restart", answer or "no answer")
+        sent = [line["m"] for line in ctx.pm.backlog(server.id, 4000) if line["s"] == "in" and line["m"].startswith("difficulty ")]
+        check(sent == ["difficulty hard", "difficulty easy"], "the manager sets the difficulty only when it changes, not on every start", str(sent))
         check(ctx.pm.runtime(server.id).exit_code == 0 or ctx.pm.runtime(server.id).exit_code is None, "the previous process exited cleanly", f"code {ctx.pm.runtime(server.id).exit_code}")
 
         # ------------------------------------------------------------------------------------- real update flow

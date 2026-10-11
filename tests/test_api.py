@@ -120,7 +120,7 @@ async def test_server_lifecycle_over_http(live):
     assert any(f["key"] == "view_distance" for f in cfg["schema"])
 
     saved = await api.call("PUT", f"/api/servers/{server['id']}/config", json={"values": {"max_players": 7}})
-    assert saved.json() == {"saved": True, "restart_required": True}
+    assert saved.json() == {"saved": True, "restart_required": True, "applied_live": []}
     bad = await api.call("PUT", f"/api/servers/{server['id']}/config", json={"values": {"view_distance": 99, "motd": "x" * 500}})
     assert bad.status_code == 422 and set(bad.json()["errors"]) == {"view_distance", "motd"}
 
@@ -238,9 +238,18 @@ async def test_player_management_goes_through_the_console(live):
     sid = server["id"]
     ok = await api.call("POST", f"/api/servers/{sid}/players", json={"action": "whitelist_add", "target": "Steve_01"})
     assert ok.status_code == 200
-    await wait_until(
-        lambda: "Steve_01" in json.dumps(ctx.servers.read_player_lists(ctx.repo.get_server(sid))["whitelist"]), 10, what="whitelist file"
-    )
+
+    for action, target in (("op", "Alex"), ("ban", "Griefer"), ("ban_ip", "203.0.113.9")):
+        assert (await api.call("POST", f"/api/servers/{sid}/players", json={"action": action, "target": target})).status_code == 200
+
+    async def every_list_filled() -> dict[str, list[dict[str, Any]]] | None:
+        seen = (await api.call("GET", f"/api/servers/{sid}/players")).json()["lists"]
+        return seen if all(seen[key] for key in ("whitelist", "ops", "banned_players", "banned_ips")) else None
+
+    seen = await wait_until(every_list_filled, 10, what="every list on the Players tab")
+    assert seen["whitelist"][0]["name"] == "Steve_01" and seen["ops"][0]["name"] == "Alex"
+    assert seen["banned_players"][0]["name"] == "Griefer" and seen["banned_ips"][0]["ip"] == "203.0.113.9"
+    assert (await api.call("GET", f"/api/servers/{sid}/players")).json()["running"] is True
     for target in ["Steve; stop", "a b", "x" * 40, "../etc"]:
         resp = await api.call("POST", f"/api/servers/{sid}/players", json={"action": "op", "target": target})
         assert resp.status_code in (400, 422), target
@@ -248,6 +257,23 @@ async def test_player_management_goes_through_the_console(live):
     await api.job(await api.call("POST", f"/api/servers/{sid}/stop"))
     stopped = await api.call("POST", f"/api/servers/{sid}/players", json={"action": "op", "target": "Alex"})
     assert stopped.status_code == 400 and "must be running" in stopped.json()["detail"]
+
+
+async def test_saving_a_new_difficulty_applies_it_to_the_running_server(live):
+    api, ctx = live
+    await api.login()
+    server = await api.create_server("Dial", settings={"default_difficulty": "Easy"})
+    sid = server["id"]
+    await wait_until(lambda: any("Set game difficulty to Easy" in line["m"] for line in ctx.pm.backlog(sid)), 10, what="the creation setting")
+
+    saved = (await api.call("PUT", f"/api/servers/{sid}/config", json={"values": {"default_difficulty": "Hard"}})).json()
+    assert saved["saved"] and saved["applied_live"] == ["default_difficulty"] and saved["restart_required"] is False
+    await wait_until(lambda: any("Set game difficulty to Hard" in line["m"] for line in ctx.pm.backlog(sid)), 10, what="the live change")
+
+    other = (await api.call("PUT", f"/api/servers/{sid}/config", json={"values": {"motd": "changed"}})).json()
+    assert other["applied_live"] == [] and other["restart_required"] is True
+    bad = await api.call("PUT", f"/api/servers/{sid}/config", json={"values": {"default_difficulty": "Impossible"}})
+    assert bad.status_code == 422
 
 
 async def test_console_websocket_streams_and_checks_origin(live):

@@ -35,6 +35,12 @@ from .util import SERVER_ID_RE, atomic_write_text, dir_size, iso, slugify
 log = logging.getLogger(__name__)
 
 PLAYER_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
+PLAYER_DATA_DIR = "data"
+PLAYER_LIST_FILES = (
+    ("whitelist", "whitelist.json"), ("ops", "ops.json"), ("banned_players", "banned-players.json"), ("banned_ips", "banned-ips.json"),
+)
+# Pumpkin ignores ``default_difficulty``: every new world starts on Normal and only the /difficulty command changes it.
+NEW_WORLD_DIFFICULTY = "Normal"
 _SECRET_ALPHABET = string.ascii_letters + string.digits
 _CHILD_ENV_KEEP = {"PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR"}
 _CHILD_ENV_KEEP_WINDOWS = {
@@ -335,6 +341,7 @@ class ServerService:
             raise ServerError(f"Port {rec.java_port} is already in use by another program. Change the server port in its settings.")
         if rec.bedrock_port and not port_is_free(rec.bedrock_port, udp=True):
             raise ServerError(f"UDP port {rec.bedrock_port} (Bedrock) is already in use by another program.")
+        fresh_world = self._world_is_new(rec)  # must be looked at before Pumpkin creates the world
 
         ctx.step(f"Starting Pumpkin {build.label}")
         ctx.progress(0.6)
@@ -348,6 +355,7 @@ class ServerService:
             raise ServerError(str(exc)) from exc
         self.repo.update_server(rec.id, desired_running=1)
         ctx.step("The server is up and accepting connections")
+        await self._apply_difficulty(rec, ctx, fresh_world=fresh_world)
         self.reporter.record("success", "start", f"'{rec.name}' started", rec.id)
         self.publish_state(rec.id)
 
@@ -506,14 +514,66 @@ class ServerService:
         pc.parse(new_text)  # never write something we cannot read back
         atomic_write_text(path, new_text)
 
+    async def save_settings(self, rec: ServerRecord, values: dict[str, Any]) -> dict[str, Any]:
+        """Save game settings and, where the running server allows it, apply them without a restart."""
+        result = self.update_config(rec, values)
+        applied: list[str] = []
+        if "default_difficulty" in values and self.pm.runtime(rec.id).state == "running":
+            if await self._apply_difficulty(rec, force=True):
+                applied.append("default_difficulty")
+        result["applied_live"] = applied
+        result["restart_required"] = result["restart_required"] and any(key not in applied for key in values)
+        return result
+
+    # --------------------------------------------------------------- difficulty
+    def _config_text(self, rec: ServerRecord) -> str:
+        path = self.config_path(rec.id)
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    def _world_is_new(self, rec: ServerRecord) -> bool:
+        """True while the server has no saved world, i.e. when the next start makes Pumpkin create one."""
+        try:
+            level_name = pc.read_values(self._config_text(rec))["default_level_name"]
+        except pc.ConfigError:
+            return False
+        return not (self.server_dir(rec.id) / level_name / "level.dat").is_file()
+
+    async def _apply_difficulty(
+        self, rec: ServerRecord, ctx: JobContext | None = None, *, fresh_world: bool = False, force: bool = False
+    ) -> bool:
+        """Set the configured difficulty on the running server with the ``difficulty`` console command.
+
+        Pumpkin does not read ``default_difficulty`` from pumpkin.toml, so without this every world would stay on Normal.
+        The manager remembers the difficulty it applied last and only sends the command when the setting differs from
+        that (or the world is brand new, or ``force`` is set): a difficulty changed in-game survives restarts.
+        """
+        try:
+            wanted = pc.read_values(self._config_text(rec))["default_difficulty"]
+        except pc.ConfigError:
+            return False
+        key = f"difficulty:{rec.id}"
+        known = NEW_WORLD_DIFFICULTY if fresh_world else self.repo.get_kv(key)
+        if known == wanted and not force:
+            self.repo.set_kv(key, wanted)
+            return False
+        try:
+            await self.pm.send_command(rec.id, f"difficulty {wanted.lower()}")  # the command only accepts lower case
+        except ProcessError as exc:
+            if ctx:
+                ctx.warn(f"Could not set the difficulty to {wanted}: {exc}")
+            return False
+        self.repo.set_kv(key, wanted)
+        if ctx:
+            ctx.step(f"Difficulty set to {wanted} (Pumpkin does not read it from pumpkin.toml, so the manager sets it with a command)")
+        return True
+
     # ------------------------------------------------------------------ players
     def read_player_lists(self, rec: ServerRecord) -> dict[str, list[dict[str, Any]]]:
-        directory = self.server_dir(rec.id)
+        # Unlike vanilla, Pumpkin keeps these files in a "data" folder inside the server directory and writes them as soon as
+        # a command changes a list.
+        directory = self.server_dir(rec.id) / PLAYER_DATA_DIR
         result: dict[str, list[dict[str, Any]]] = {}
-        for key, filename in (
-            ("whitelist", "whitelist.json"), ("ops", "ops.json"), ("banned_players", "banned-players.json"),
-            ("banned_ips", "banned-ips.json"),
-        ):
+        for key, filename in PLAYER_LIST_FILES:
             entries: list[dict[str, Any]] = []
             try:
                 data = json.loads((directory / filename).read_text(encoding="utf-8"))

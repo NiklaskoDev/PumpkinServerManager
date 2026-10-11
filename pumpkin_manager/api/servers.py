@@ -148,7 +148,7 @@ async def read_config(request: Request, server_id: str) -> dict:
 
 @router.put("/servers/{server_id}/config")
 async def write_config(request: Request, server_id: str, body: ConfigBody) -> dict:
-    return get_ctx(request).servers.update_config(load_server(request, server_id), body.values)
+    return await get_ctx(request).servers.save_settings(load_server(request, server_id), body.values)
 
 
 @router.get("/servers/{server_id}/config/raw")

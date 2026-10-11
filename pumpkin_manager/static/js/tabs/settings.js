@@ -8,11 +8,11 @@ export function render({ id, getServer }) {
   const host = h("div", { class: "stack" });
   const restartHost = h("div", {});
 
-  function restartNotice() {
+  function restartNotice(appliedLive = false) {
     clear(restartHost);
     if (getServer().state === "running") {
       restartHost.appendChild(h("div", { class: "notice warning" }, icon("alert", "sm"),
-        h("div", { class: "grow" }, "Restart the server for these changes to take effect."),
+        h("div", { class: "grow" }, appliedLive ? "The difficulty is already live. Restart the server for the other changes to take effect." : "Restart the server for these changes to take effect."),
         h("button", { class: "btn sm primary", onclick: () => quickJob(post(`/api/servers/${id}/restart`), { success: "Restarted", failure: "Restart failed" }) }, "Restart now")));
     } else {
       toast("Saved. The changes apply the next time the server starts.", "success");
@@ -76,7 +76,9 @@ export function render({ id, getServer }) {
           Object.assign(cfg.values, changed);
           for (const k of Object.keys(changed)) delete changed[k];
           mark();
-          if (result.restart_required) restartNotice(); else toast("Settings saved", "success");
+          const live = result.applied_live?.length > 0;
+          if (result.restart_required) restartNotice(live);
+          else toast(live ? "Settings saved. The difficulty was changed on the running server." : "Settings saved", "success");
         } catch (err) {
           notifyError(err);
           for (const [key, message] of Object.entries(err.data?.errors || {})) {

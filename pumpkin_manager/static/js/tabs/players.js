@@ -11,9 +11,24 @@ const LISTS = [
   { id: "banned_ips", label: "Banned IPs", remove: "pardon_ip", key: "ip" },
 ];
 
+// What each console command should leave behind in the lists. Kicking changes no list.
+const OUTCOME = {
+  whitelist_add: { list: "whitelist", present: true, key: "name", done: "Added to the whitelist" },
+  whitelist_remove: { list: "whitelist", present: false, key: "name", done: "Removed from the whitelist" },
+  op: { list: "ops", present: true, key: "name", done: "Now an operator" },
+  deop: { list: "ops", present: false, key: "name", done: "No longer an operator" },
+  ban: { list: "banned_players", present: true, key: "name", done: "Player banned" },
+  pardon: { list: "banned_players", present: false, key: "name", done: "Player pardoned" },
+  ban_ip: { list: "banned_ips", present: true, key: "ip", done: "IP address banned" },
+  pardon_ip: { list: "banned_ips", present: false, key: "ip", done: "IP address pardoned" },
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export function render({ id, getServer }) {
   let data = { online: { count: 0, max: 0, names: [] }, lists: {}, running: false };
   let active = "whitelist";
+  let disposed = false;
   const onlineHost = h("div", {});
   const listHost = h("div", {});
   const nameInput = h("input", { class: "input", placeholder: "Player name", maxlength: "32", autocomplete: "off", "aria-label": "Player name" });
@@ -22,11 +37,25 @@ export function render({ id, getServer }) {
   async function act(action, target, reason) {
     try {
       await post(`/api/servers/${id}/players`, { action, target, reason: reason || null });
-      toast("Done", "success", null, 1500);
-      setTimeout(load, 900); // the server writes its list files a moment later
     } catch (err) {
-      notifyError(err);
+      return notifyError(err);
     }
+    const outcome = OUTCOME[action];
+    if (!outcome) {
+      toast("Command sent", "success", null, 1500);
+      return setTimeout(load, 900);
+    }
+    // The command only goes to the server's console, so check that the list really changed. The server writes its files a moment
+    // later, and looking up a Mojang account name can take a few seconds.
+    const wanted = target.trim().toLowerCase();
+    const listed = () => (data.lists[outcome.list] || []).some((e) => String(e[outcome.key] ?? "").toLowerCase() === wanted);
+    for (const delay of [700, 1300, 2000, 3000]) {
+      await sleep(delay);
+      if (disposed) return;
+      await load();
+      if (listed() === outcome.present) return toast(outcome.done, "success", null, 2000);
+    }
+    toast("The list did not change. The server's answer is in the Console tab.", "warning");
   }
 
   function renderOnline() {
@@ -88,5 +117,5 @@ export function render({ id, getServer }) {
 
   load();
   const timer = setInterval(load, 10000);
-  return { el, dispose: () => clearInterval(timer), onServer: () => load() };
+  return { el, dispose: () => { disposed = true; clearInterval(timer); }, onServer: () => load() };
 }
