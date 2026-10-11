@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .config import Settings
 from .models import BuildRecord
-from .releases import ProgressCallback, ReleaseError, ReleaseSource, RemoteBuild
+from .releases import BadBuildError, ProgressCallback, ReleaseError, ReleaseSource, RemoteBuild
 from .repo import Repo
 from .util import free_bytes
 
@@ -95,11 +95,11 @@ class BuildStore:
 
     def _sanity_check(self, path: Path) -> None:
         if path.stat().st_size < 1024:
-            raise ReleaseError("The downloaded file is far too small to be a Pumpkin binary.")
+            raise BadBuildError("The downloaded file is far too small to be a Pumpkin binary.")
         if self.verify_elf:
             with open(path, "rb") as fh:
                 if fh.read(4) != _ELF_MAGIC:
-                    raise ReleaseError("The downloaded file is not a Linux executable (bad ELF header).")
+                    raise BadBuildError("The downloaded file is not a Linux executable (bad ELF header).")
 
     # ------------------------------------------------------------------ removal
     def delete_files(self, build_id: str) -> None:

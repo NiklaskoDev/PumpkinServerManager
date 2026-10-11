@@ -121,9 +121,15 @@ async def run(binary: Path, keep: bool) -> int:
     (work / "build2").mkdir()
     second = work / "build2" / binary.name
     second.write_bytes(binary.read_bytes() + b"\0" * 64)  # same program, different digest: a genuine "new release"
-    broken = work / "build3" / binary.name
-    broken.parent.mkdir()
-    broken.write_bytes(b"this is not an executable\n" * 400)
+    # Two kinds of bad "release". Not an executable at all: on Linux the manager refuses it while downloading,
+    # before the running server is touched. And one that passes that download check (it has an ELF header) but
+    # cannot actually be started: that one must be rolled back.
+    not_exe = work / "build3" / binary.name
+    not_exe.parent.mkdir()
+    not_exe.write_bytes(b"this is not an executable\n" * 400)
+    unrunnable = work / "build4" / binary.name
+    unrunnable.parent.mkdir()
+    unrunnable.write_bytes(b"\x7fELF" + b"\0" * 4096)
 
     java = free_block(6)
     mgmt = free_block(20, start=java + 100)
@@ -262,10 +268,34 @@ async def run(binary: Path, keep: bool) -> int:
         check(any(b["kind"] == "pre-update" and b["verified"] for b in ctx.repo.list_backups(server.id)), "a verified pre-update backup exists")
         check(ctx.pm.runtime(server.id).state == "running", "server is running on the new build")
 
-        section("Update to a build that cannot start: must roll back")
-        source.add("real-3-broken", broken)
+        section("Update to a download that is not an executable at all")
+        source.add("real-3-not-executable", not_exe)
+        await ctx.updater.check()
+        junk = ctx.repo.get_build(ctx.repo.get_server(server.id).pending_build_id)
+        before_build = ctx.repo.get_server(server.id).build_id
+        pid_before = ctx.pm.runtime(server.id).pid
+        backups_before = len(ctx.repo.list_backups(server.id))
+        row = await wait_job(ctx, ctx.updater.submit_update(ctx.repo.get_server(server.id), junk, trigger="auto"), 240)
+        show_job(row)
+        update = ctx.repo.list_updates(server.id)[0]
+        if ctx.builds.verify_elf:
+            # Linux: the download is inspected and refused before anything is stopped or changed.
+            check(update["status"] == "failed" and "executable" in (update["message"] or ""), "refused while downloading", update["message"] or "")
+            check(ctx.pm.runtime(server.id).pid == pid_before, "the running server was not touched (same process)")
+            check(len(ctx.repo.list_backups(server.id)) == backups_before, "no pointless backup was made")
+            check(ctx.repo.get_server(server.id).pending_build_id is None and ctx.repo.get_kv(f"skip:{server.id}") == junk.id,
+                  "the unusable build is not offered or retried again")
+        else:
+            # No ELF check on this platform (a Windows development machine): it fails when starting and is rolled back.
+            check(update["status"] == "rolled_back", "update recorded as rolled back", update["message"] or "")
+        check(ctx.repo.get_server(server.id).build_id == before_build, "the previous build is still active")
+        check(ctx.pm.runtime(server.id).state == "running", "the server is still running")
+
+        section("Update to a build that passes the download check but cannot start: must roll back")
+        source.add("real-4-unrunnable", unrunnable)
         await ctx.updater.check()
         bad = ctx.repo.get_build(ctx.repo.get_server(server.id).pending_build_id)
+        check(bad is not None and bad.tag == "real-4-unrunnable", "the newer build is offered even though the earlier bad one is skipped")
         before_build = ctx.repo.get_server(server.id).build_id
         row = await wait_job(ctx, ctx.updater.submit_update(ctx.repo.get_server(server.id), bad, trigger="auto"), 240)
         show_job(row)

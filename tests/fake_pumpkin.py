@@ -25,7 +25,14 @@ from pathlib import Path
 
 from websockets.asyncio.server import serve
 
-BUILD = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8").strip()) if len(sys.argv) > 1 else {}
+
+def read_build_file(path: str) -> dict:
+    """The build file is JSON; it may start with an ELF magic number and end with padding (as real binaries do)."""
+    text = Path(path).read_bytes().removeprefix(b"\x7fELF").decode("utf-8", "replace")
+    return json.loads(text.strip().strip("\x00").strip())
+
+
+BUILD = read_build_file(sys.argv[1]) if len(sys.argv) > 1 else {}
 VERSION = str(BUILD.get("version", "1.0"))
 CFG = tomllib.loads(Path("pumpkin.toml").read_text(encoding="utf-8")) if Path("pumpkin.toml").exists() else {}
 NET = CFG.get("networking", {})

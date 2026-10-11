@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 from conftest import create_server, finish, wait_until
 
-from pumpkin_manager.updater import is_newer
+from pumpkin_manager.updater import AUTO_RETRY_MAX_MINUTES, is_newer, retry_delay_minutes
+from pumpkin_manager.util import iso, utcnow
 
 
 def world_data(ctx, server) -> dict:
@@ -237,3 +239,85 @@ async def test_shutting_down_mid_update_does_not_trigger_a_rollback(tmp_path, so
         assert any("interrupted by a restart" in a["message"] for a in again.repo.list_activity(30))
     finally:
         await again.shutdown()
+
+
+async def test_a_download_that_is_not_a_linux_executable_is_refused_before_the_server_is_touched(ctx, source):
+    """What happened on Unraid: on Linux the manager checks the ELF header, so a garbage 'release' is refused up front."""
+    server = await create_server(ctx, "Elf")
+    pid, old_build = ctx.pm.runtime(server.id).pid, server.build_id
+    ctx.builds.verify_elf = True  # the fake builds are JSON text, i.e. not ELF files
+    source.publish("stable", "0.2.0")
+    await ctx.updater.check()
+    pending = ctx.repo.get_build(ctx.repo.get_server(server.id).pending_build_id)
+
+    await finish(ctx, ctx.updater.submit_update(ctx.repo.get_server(server.id), pending, trigger="auto"))
+    update = ctx.repo.list_updates(server.id)[0]
+    assert update["status"] == "failed" and "not a Linux executable" in update["message"]
+    assert ctx.pm.runtime(server.id).pid == pid, "the running server was never stopped"
+    assert ctx.repo.get_server(server.id).build_id == old_build
+    assert not [b for b in ctx.repo.list_backups(server.id) if b["kind"] == "pre-update"], "nothing was about to change"
+    assert any("will not be tried again" in a["message"] for a in ctx.repo.list_activity(20))
+
+    # an unusable file stays unusable: it is not offered or retried, however long we wait ...
+    assert not ctx.repo.get_server(server.id).pending_build_id and ctx.repo.get_kv(f"skip:{server.id}") == pending.id
+    ctx.repo.set_kv(f"autoattempt:{server.id}", iso(utcnow() - timedelta(days=2)))
+    await ctx.updater.check()
+    assert not ctx.repo.get_server(server.id).pending_build_id
+    assert await ctx.updater.process_pending() == 0
+
+    # ... but a different, newer build is offered as usual
+    ctx.builds.verify_elf = False
+    source.publish("stable", "0.2.1")
+    await ctx.updater.check()
+    assert ctx.repo.get_server(server.id).pending_build_id not in (None, pending.id)
+
+
+def test_retry_delay_grows_and_is_capped():
+    assert [retry_delay_minutes(n) for n in range(8)] == [30, 30, 60, 120, 240, 480, 720, 720]
+    assert retry_delay_minutes(500) == AUTO_RETRY_MAX_MINUTES
+
+
+async def test_repeated_transient_failures_back_off_and_success_resets_the_delay(ctx, source):
+    server = await create_server(ctx, "Backoff")
+    source.publish("stable", "0.2.0")
+    await ctx.updater.check()
+    source.fail_download = True  # a transient problem: the same build may well work later
+
+    async def attempt(minutes_since_last_attempt: int) -> int:
+        ctx.repo.set_kv(f"autoattempt:{server.id}", iso(utcnow() - timedelta(minutes=minutes_since_last_attempt)))
+        started = await ctx.updater.process_pending()
+        await wait_until(lambda: not ctx.jobs.is_busy(server.id), 30, what="the update job")
+        return started
+
+    assert await ctx.updater.process_pending() == 1, "the first attempt starts right away"
+    await wait_until(lambda: not ctx.jobs.is_busy(server.id), 30, what="the update job")
+    assert ctx.repo.get_kv(f"autofails:{server.id}") == "1"
+    assert ctx.repo.get_server(server.id).pending_build_id, "a transient failure keeps the update pending"
+
+    assert await attempt(10) == 0, "too soon after a failure"
+    assert await attempt(31) == 1 and ctx.repo.get_kv(f"autofails:{server.id}") == "2"
+    assert await attempt(45) == 0, "after two failures it waits an hour"
+    assert await attempt(61) == 1 and ctx.repo.get_kv(f"autofails:{server.id}") == "3"
+    assert await attempt(61) == 0, "and now two hours"
+    assert any("next automatic attempt" in a["message"] for a in ctx.repo.list_activity(30))
+
+    source.fail_download = False  # the trouble is over
+    assert await attempt(121) == 1
+    assert ctx.repo.list_updates(server.id)[0]["status"] == "success"
+    assert ctx.repo.get_kv(f"autofails:{server.id}") == "0", "a success starts the delay over"
+
+
+async def test_rows_created_in_the_same_second_are_ordered_by_insertion(ctx):
+    """Timestamps have one-second resolution; the newest backup/update/job must still be found reliably."""
+    server = await create_server(ctx, "Ties", start=False)
+    stamp = "2026-10-11T12:00:00Z"
+    ids = [
+        ctx.repo.insert_backup(server_id=server.id, server_name="Ties", kind="manual", file_name=f"{server.id}/{i}.tar.gz", created_at=stamp, note=str(i))["id"]
+        for i in range(6)
+    ]
+    assert [b["note"] for b in ctx.repo.list_backups(server.id)] == ["5", "4", "3", "2", "1", "0"]
+    for i in range(6):
+        ctx.repo.insert_update(server_id=server.id, trigger="auto", status="failed", started_at=stamp, to_tag=str(i))
+    assert [u["to_tag"] for u in ctx.repo.list_updates(server.id)][:3] == ["5", "4", "3"]
+    assert ctx.repo.latest_update(server.id, ("failed",))["to_tag"] == "5"
+    assert len(ids) == 6

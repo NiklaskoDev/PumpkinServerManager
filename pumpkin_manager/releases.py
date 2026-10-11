@@ -42,6 +42,14 @@ class ReleaseError(UserError):
     """A problem talking to GitHub or with a release; the message is safe to show to users."""
 
 
+class BadBuildError(ReleaseError):
+    """The file itself is unusable (wrong format or checksum), so retrying the same build cannot help.
+
+    Transient trouble (network, disk space) stays a plain ``ReleaseError``; the updater keeps retrying those with
+    a growing delay but never retries a build that raised this.
+    """
+
+
 def asset_name_for_machine(machine: str | None = None) -> str:
     machine = (machine or platform.machine()).lower()
     if machine in {"x86_64", "amd64"}:
@@ -186,7 +194,7 @@ class GitHubReleaseSource:
         if build.size and received != build.size:
             raise ReleaseError(f"Download was incomplete ({received} of {build.size} bytes).")
         if digest_expected and hasher.hexdigest() != digest_expected:
-            raise ReleaseError("Checksum mismatch: the downloaded file does not match the SHA-256 published by GitHub.")
+            raise BadBuildError("Checksum mismatch: the downloaded file does not match the SHA-256 published by GitHub.")
 
     # ----------------------------------------------------------------- internals
     async def _stable_releases(self) -> list[dict[str, Any]]:

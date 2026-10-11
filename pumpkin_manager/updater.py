@@ -13,7 +13,7 @@ from .jobs import JobContext, JobService
 from .mcnet import MsmpClient, MsmpError, PingError, server_list_ping
 from .models import CHANNELS, AppSettings, BuildRecord, ServerRecord
 from .process import ProcessManager
-from .releases import ReleaseError, ReleaseSource
+from .releases import BadBuildError, ReleaseError, ReleaseSource
 from .repo import Repo
 from .reporter import Reporter
 from .servers import ServerError, ServerService
@@ -23,6 +23,12 @@ log = logging.getLogger(__name__)
 
 STABILITY_SECONDS = 15
 AUTO_RETRY_MINUTES = 30
+AUTO_RETRY_MAX_MINUTES = 12 * 60
+
+
+def retry_delay_minutes(failures: int) -> int:
+    """How long automatic updates wait after ``failures`` consecutive failed attempts: 30, 30, 60, 120 ... 720 min."""
+    return min(AUTO_RETRY_MINUTES * 2 ** max(failures - 1, 0), AUTO_RETRY_MAX_MINUTES)
 
 
 def is_newer(candidate: BuildRecord, current: BuildRecord | None) -> bool:
@@ -143,8 +149,9 @@ class UpdateService:
             if target is None or (current is not None and current.channel != target.channel):
                 continue  # switching channels is never done automatically
             attempt = self.repo.get_kv(f"autoattempt:{rec.id}")
-            if attempt and (now - parse_iso(attempt)).total_seconds() < AUTO_RETRY_MINUTES * 60:
-                continue
+            failures = int(self.repo.get_kv(f"autofails:{rec.id}") or 0)
+            if attempt and (now - parse_iso(attempt)).total_seconds() < retry_delay_minutes(failures) * 60:
+                continue  # a recent attempt failed: wait, with a delay that grows while the trouble persists
             rt = self.pm.runtime(rec.id)
             players = rt.players_online if rt.state == "running" else 0
             waited_hours = (now - parse_iso(rec.pending_since)).total_seconds() / 3600 if rec.pending_since else 0
@@ -238,6 +245,7 @@ class UpdateService:
             notify="update_applied", title=f"{rec.name} updated",
         )
         self.repo.set_kv(f"skip:{rec.id}", "")
+        self.repo.set_kv(f"autofails:{rec.id}", "0")
         self.prune_builds()
         self.servers.publish_state(rec.id)
 
@@ -294,11 +302,23 @@ class UpdateService:
                     await self.servers._do_start(self.servers.get(rec.id), ctx)
                 except Exception as restart_exc:
                     ctx.step(f"The previous version could not be restarted: {restart_exc}", "error")
+            retry_note = ""
+            if isinstance(exc, BadBuildError):
+                # The file itself is unusable, and will be tomorrow as well: stop offering exactly this build.
+                # A different (newer) build is offered again as usual.
+                self.repo.set_kv(f"skip:{rec.id}", target.id)
+                self.repo.update_server(rec.id, pending_build_id=None, pending_since=None)
+                retry_note = " This build will not be tried again automatically; a newer one will be."
+            else:
+                self.repo.set_kv(f"skip:{rec.id}", "")
+                failures = int(self.repo.get_kv(f"autofails:{rec.id}") or 0) + 1
+                self.repo.set_kv(f"autofails:{rec.id}", str(failures))
+                if rec.policy.update_mode == "auto":
+                    retry_note = f" The next automatic attempt is in about {retry_delay_minutes(failures)} minutes."
             self.reporter.record(
-                "error", "update", f"Update of '{rec.name}' to {target.label} was not applied: {reason}", rec.id,
+                "error", "update", f"Update of '{rec.name}' to {target.label} was not applied: {reason}{retry_note}", rec.id,
                 notify="update_failed", title=f"Update of {rec.name} failed",
             )
-            self.repo.set_kv(f"skip:{rec.id}", "")
             self.servers.publish_state(rec.id)
             return
 

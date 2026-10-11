@@ -205,6 +205,11 @@ after that players get an in-game warning first). Switching a server to another 
 6. If it fails to start or crashes: stop it, **restore the world from the backup taken in step 3**, switch back to the
    old binary and start that. The failed build is remembered and not retried; a newer build is.
 
+Two failure modes happen before anything is stopped, and the server keeps running through both: a download that is
+**unusable** (not a Linux executable, or the wrong checksum) is refused and that exact build is skipped from then on,
+while a **temporary** problem (network, disk space) is retried automatically with a growing delay: 30 minutes, then
+60, 120, ... up to 12 hours between attempts, starting over after the next success.
+
 Every step is visible in the job log, in *Activity* and (optionally) as a webhook message. Afterwards the **Version
 tab** keeps a history and a **Roll back** button (version only, or version *and* the pre-update world).
 
@@ -291,8 +296,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
 ```
 
 * `scripts/real_binary_check.py` drives the manager's own code against a real Pumpkin executable: create, start,
-  ping, console, hot backup, settings change, a real update, a deliberately broken update that must roll back,
-  three servers side by side (one with Bedrock) and graceful shutdown. It is part of the image, so you can validate
+  ping, console, hot backup, settings change, a real update, a download that is not an executable (refused up
+  front), a build that cannot start (rolled back), three servers side by side (one with Bedrock) and graceful
+  shutdown. It is part of the image, so you can validate
   the exact Linux build on your own server in about 30 seconds:
   `docker exec -it pumpkin-manager python /app/scripts/real_binary_check.py --download`
   (it downloads the official release to a temporary folder, tests it on loopback ports and cleans up; it does not

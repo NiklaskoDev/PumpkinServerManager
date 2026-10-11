@@ -202,9 +202,9 @@ class Repo:
     def list_backups(self, server_id: str | None = None) -> list[dict[str, Any]]:
         if server_id:
             return self.db.all(
-                "SELECT * FROM backups WHERE server_id=? ORDER BY created_at DESC, id", (server_id,)
+                "SELECT * FROM backups WHERE server_id=? ORDER BY created_at DESC, rowid DESC", (server_id,)
             )
-        return self.db.all("SELECT * FROM backups ORDER BY created_at DESC, id")
+        return self.db.all("SELECT * FROM backups ORDER BY created_at DESC, rowid DESC")
 
     def update_backup(self, backup_id: str, **fields: Any) -> None:
         bad = set(fields) - _BACKUP_COLUMNS
@@ -248,10 +248,10 @@ class Repo:
     def list_jobs(self, limit: int = 50, server_id: str | None = None) -> list[dict[str, Any]]:
         if server_id:
             rows = self.db.all(
-                "SELECT * FROM jobs WHERE server_id=? ORDER BY created_at DESC, id LIMIT ?", (server_id, limit)
+                "SELECT * FROM jobs WHERE server_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?", (server_id, limit)
             )
         else:
-            rows = self.db.all("SELECT * FROM jobs ORDER BY created_at DESC, id LIMIT ?", (limit,))
+            rows = self.db.all("SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,))
         for row in rows:
             row["steps"] = json.loads(row["steps"] or "[]")
         return rows
@@ -266,7 +266,7 @@ class Repo:
 
     def prune_jobs(self, keep: int = 300) -> None:
         self.db.execute(
-            "DELETE FROM jobs WHERE id NOT IN (SELECT id FROM jobs ORDER BY created_at DESC LIMIT ?)", (keep,)
+            "DELETE FROM jobs WHERE id NOT IN (SELECT id FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?)", (keep,)
         )
 
     # ------------------------------------------------------------------- updates
@@ -291,13 +291,13 @@ class Repo:
 
     def list_updates(self, server_id: str, limit: int = 20) -> list[dict[str, Any]]:
         return self.db.all(
-            "SELECT * FROM updates WHERE server_id=? ORDER BY started_at DESC, id LIMIT ?", (server_id, limit)
+            "SELECT * FROM updates WHERE server_id=? ORDER BY started_at DESC, rowid DESC LIMIT ?", (server_id, limit)
         )
 
     def latest_update(self, server_id: str, statuses: tuple[str, ...] = ("success",)) -> dict[str, Any] | None:
         marks = ",".join("?" for _ in statuses)
         return self.db.one(
-            f"SELECT * FROM updates WHERE server_id=? AND status IN ({marks}) ORDER BY started_at DESC LIMIT 1",
+            f"SELECT * FROM updates WHERE server_id=? AND status IN ({marks}) ORDER BY started_at DESC, rowid DESC LIMIT 1",
             (server_id, *statuses),
         )
 
