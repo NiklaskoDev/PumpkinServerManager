@@ -46,10 +46,10 @@ export function render({ id, getServer }) {
       return setTimeout(load, 900);
     }
     // The command only goes to the server's console, so check that the list really changed. The server writes its files a moment
-    // later, and looking up a Mojang account name can take a few seconds.
+    // later, and looking up a Mojang account name can take several seconds (we give up after about 12).
     const wanted = target.trim().toLowerCase();
     const listed = () => (data.lists[outcome.list] || []).some((e) => String(e[outcome.key] ?? "").toLowerCase() === wanted);
-    for (const delay of [700, 1300, 2000, 3000]) {
+    for (const delay of [700, 1300, 2000, 3000, 5000]) {
       await sleep(delay);
       if (disposed) return;
       await load();
