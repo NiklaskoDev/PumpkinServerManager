@@ -36,6 +36,8 @@ STATES = ("stopped", "starting", "running", "stopping", "crashed")
 class ProcessError(UserError):
     """Raised for start/stop problems; the message is safe to show in the UI."""
 
+    clean_exit = False  # the server ended by itself with exit code 0 while it was starting
+
 
 @dataclass
 class Runtime:
@@ -340,7 +342,9 @@ class ProcessManager:
         pause = 5.0 if rt.strict_ping else 0.4
         while True:
             if rt.exited.is_set():
-                raise ProcessError(self._describe_early_exit(rt))
+                error = ProcessError(self._describe_early_exit(rt))
+                error.clean_exit = rt.exit_code == 0
+                raise error
             if rt.ready.is_set():
                 return
             if port:

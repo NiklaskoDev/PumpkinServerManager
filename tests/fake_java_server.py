@@ -218,7 +218,10 @@ async def main() -> int:
     if BEHAVIOR.get("crash_on_start"):
         print("Exception in thread \"main\" java.lang.IllegalStateException: simulated crash", flush=True)
         return 1
-    if BEHAVIOR.get("exit_clean_on_start"):  # Better MC downloads its mods at the first start and then ends the server on purpose
+    once = Path("fake-first-start.done")
+    if BEHAVIOR.get("exit_clean_on_start") or (BEHAVIOR.get("exit_clean_once") and not once.exists()):
+        # Better MC downloads its mods at the first start and then ends the server on purpose
+        once.write_text("1")
         log("Installed 3 missing mods; the game has to be restarted", thread="missing-mods-download-watcher")
         return 0
     if BEHAVIOR.get("crash_if_present") and Path(BEHAVIOR["crash_if_present"]).exists():  # a mod that does not get along with the rest

@@ -377,15 +377,21 @@ class ServerService:
 
         ctx.step(f"Starting {label}")
         ctx.progress(0.6)
-        try:
-            await self.pm.start(
-                rec.id, argv, directory, env, ready_port=rec.java_port, ready_timeout=rec.policy.start_timeout,
-                ready_re=ready_re, timeout_hint=timeout_hint, strict_ping=rec.is_java,
-                clean_exit_hint=JAVA_CLEAN_EXIT_HINT if rec.is_java else "",
-            )
-        except ProcessError as exc:
-            self.reporter.record("error", "start", f"'{rec.name}' failed to start: {exc}", rec.id, notify="crashed", title=f"{rec.name} failed to start")
-            raise ServerError(str(exc)) from exc
+        for attempt in range(2 if rec.is_java else 1):  # a modpack may end its first start on purpose (JAVA_CLEAN_EXIT_HINT)
+            try:
+                await self.pm.start(
+                    rec.id, argv, directory, env, ready_port=rec.java_port, ready_timeout=rec.policy.start_timeout,
+                    ready_re=ready_re, timeout_hint=timeout_hint, strict_ping=rec.is_java,
+                    clean_exit_hint=JAVA_CLEAN_EXIT_HINT if rec.is_java else "",
+                )
+                break
+            except ProcessError as exc:
+                if attempt == 0 and rec.is_java and exc.clean_exit:
+                    ctx.step("The server ended by itself while starting (exit code 0), which some modpacks do after downloading extra "
+                             "files on their first start. Starting it once more", "warning")
+                    continue
+                self.reporter.record("error", "start", f"'{rec.name}' failed to start: {exc}", rec.id, notify="crashed", title=f"{rec.name} failed to start")
+                raise ServerError(str(exc)) from exc
         self.repo.update_server(rec.id, desired_running=1)
         ctx.step("The server is up and accepting connections")
         if not rec.is_java:

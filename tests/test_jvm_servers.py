@@ -285,14 +285,25 @@ async def test_a_server_that_opens_its_port_early_is_not_called_up_before_it_say
     assert sum("still starting" in line for line in lines) <= 2, "the console is not filled with readiness probes while the server loads"
 
 
-async def test_a_server_that_ends_by_itself_while_starting_is_explained_and_starts_on_the_second_try(jvm):
+async def test_a_pack_that_ends_its_first_start_on_purpose_is_started_once_more_by_itself(jvm):
     """Some packs (Better MC) download their mods at the first start and then close the server on purpose."""
     world, ctx = jvm
+    world.behavior["exit_clean_once"] = True
     rec = await create_java_server(ctx, "SelfClosing", start=False)
-    world.behavior["exit_clean_on_start"] = True
     row = await finish(ctx, ctx.servers.submit_start(rec))
+    assert row["status"] == "success", row["message"]
+    assert any("Starting it once more" in s["text"] for s in ctx.repo.get_job(row["id"])["steps"])
+    assert ctx.pm.runtime(rec.id).state == "running"
+
+
+async def test_a_server_that_keeps_ending_by_itself_is_tried_twice_and_then_explained(jvm):
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "NeverStays", start=False)
+    world.behavior["exit_clean_on_start"] = True
+    row = await finish(ctx, ctx.servers.submit_start(rec), timeout=60)
     assert row["status"] == "failed" and "exit code 0" in row["message"] and "starting the server again" in row["message"]
     assert "Installed 3 missing mods" in row["message"], "what the server said last is shown too"
+    assert any("Starting it once more" in s["text"] for s in ctx.repo.get_job(row["id"])["steps"]), "it did try a second time"
     world.behavior.pop("exit_clean_on_start")
     row = await finish(ctx, ctx.servers.submit_start(ctx.servers.get(rec.id)))
     assert row["status"] == "success", row["message"]
