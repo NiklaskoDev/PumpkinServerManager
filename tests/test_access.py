@@ -106,6 +106,74 @@ def test_the_three_roles_are_exactly_as_agreed():
     assert access.OWNER_PERMS == access.ALL_PERMS
 
 
+def request_for(host: str, *, forwarded_proto: str | None = None):
+    """A request as the dashboard sends it: the Host header is the address the administrator typed into the browser."""
+    from starlette.requests import Request
+
+    name, _, port = host.partition(":")
+    headers = [(b"host", host.encode())] + ([(b"x-forwarded-proto", forwarded_proto.encode())] if forwarded_proto else [])
+    return Request({"type": "http", "scheme": "http", "path": "/", "query_string": b"", "headers": headers, "server": (name, int(port or 80))})
+
+
+def sign_in_for(host: str, *, dashboard: str | None = None, env: str | None = None, forwarded_proto: str | None = None) -> dict:
+    from types import SimpleNamespace
+
+    from pumpkin_manager.api.users import sign_in_target
+
+    ctx = SimpleNamespace(app_settings=lambda: SimpleNamespace(public_address=dashboard), settings=SimpleNamespace(public_address=env))
+    return sign_in_target(request_for(host, forwarded_proto=forwarded_proto), ctx)
+
+
+def test_the_sign_in_address_uses_the_public_address_you_configured():
+    lan = "192.168.0.233:8420"
+    assert sign_in_for(lan) == {"sign_in_url": "http://192.168.0.233:8420", "sign_in_unencrypted": False}, "nothing configured: as before"
+    # the address in the screenshot that prompted this: the server cards already show the DynDNS name, so must the sign-in link
+    named = sign_in_for(lan, dashboard="niklasko.ddns.net")
+    assert named == {"sign_in_url": "http://niklasko.ddns.net:8420", "sign_in_unencrypted": True}
+    assert sign_in_for(lan, env="env.example.org")["sign_in_url"] == "http://env.example.org:8420", "the PUBLIC_ADDRESS variable counts too"
+    assert sign_in_for(lan, dashboard="dash.example.org", env="env.example.org")["sign_in_url"] == "http://dash.example.org:8420"
+    # a reverse proxy: https, and the port people use is none at all
+    proxied = sign_in_for("manager.example.com", dashboard="niklasko.ddns.net", forwarded_proto="https")
+    assert proxied == {"sign_in_url": "https://niklasko.ddns.net", "sign_in_unencrypted": False}
+
+
+def test_what_people_type_as_public_address_is_cleaned_up():
+    from pumpkin_manager.api.users import bare_host, is_private_host
+
+    assert bare_host("play.example.com") == "play.example.com"
+    assert bare_host("  Play.Example.com  ") == "Play.Example.com"
+    assert bare_host("https://play.example.com:25565/path?x=1") == "play.example.com"
+    assert bare_host("play.example.com:25565") == "play.example.com" and bare_host("203.0.113.7:25565") == "203.0.113.7"
+    assert bare_host("::1") == "[::1]" and bare_host("[2001:db8::1]:25565") == "[2001:db8::1]"
+    assert bare_host("") is None and bare_host(None) is None and bare_host("https://") is None
+    assert sign_in_for("10.0.0.5:8420", dashboard="[2001:db8::1]:25565")["sign_in_url"] == "http://[2001:db8::1]:8420"
+
+    for private in ("localhost", "127.0.0.1", "192.168.0.233", "10.1.2.3", "172.16.0.9", "169.254.1.1", "[::1]", "tower", "nas.local", "box.lan"):
+        assert is_private_host(private), private
+    for public in ("niklasko.ddns.net", "play.example.com", "1.1.1.1", "8.8.8.8", "[2606:4700:4700::1111]"):  # not the documentation ranges, which count as private
+        assert not is_private_host(public), public
+
+
+async def test_the_dialog_gets_its_sign_in_address_from_the_server(live):
+    admin, _ = live
+    await admin.login()
+    port = admin.base.rsplit(":", 1)[1]
+
+    async def create(name: str, **kwargs):
+        return (await admin.call("POST", "/api/users", json={"username": name, "servers": {}}, **kwargs)).json()
+
+    first = await create("addr_one")
+    assert first["sign_in_url"] == f"http://127.0.0.1:{port}" and first["sign_in_unencrypted"] is False
+    assert (await admin.call("PUT", "/api/settings", json={"public_address": "niklasko.ddns.net"})).status_code == 200
+    second = await create("addr_two")
+    assert second["sign_in_url"] == f"http://niklasko.ddns.net:{port}" and second["sign_in_unencrypted"] is True
+
+    reset = (await admin.call("POST", f"/api/users/{second['user']['id']}/reset-password")).json()
+    assert reset["sign_in_url"] == second["sign_in_url"], "a reset password comes with the same address"
+    proxied = await create("addr_three", headers={"X-Forwarded-Proto": "https", "Host": "manager.example.com"})
+    assert proxied["sign_in_url"] == "https://niklasko.ddns.net" and proxied["sign_in_unencrypted"] is False
+
+
 def test_the_dashboard_uses_the_same_permission_and_role_names_as_the_server():
     from pathlib import Path
 

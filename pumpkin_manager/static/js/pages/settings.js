@@ -56,7 +56,7 @@ export async function render() {
 
   const defaults = h("div", { class: "card stack" }, h("h2", {}, "Defaults"),
     switchControl({ label: "Enable Pumpkin's telemetry heartbeat for new servers", hint: "Pumpkin can send an anonymous heartbeat to market.pumpkinmc.org. Off unless you enable it here or per server.", checked: s.telemetry_default, onChange: (v) => { draft.telemetry_default = v; } }),
-    field("Public address shown to players", h("input", { class: "input", value: s.public_address || "", placeholder: "defaults to the address you are using now", oninput: (e) => { draft.public_address = e.target.value; } }), "A host name or IP, for example play.example.com."),
+    field("Public address shown to players", h("input", { class: "input", value: s.public_address || "", placeholder: "defaults to the address you are using now", oninput: (e) => { draft.public_address = e.target.value; } }), "A host name or IP, for example play.example.com. Also used in the sign-in details for friends' accounts."),
     h("div", {}, h("button", { class: "btn primary sm", onclick: () => save({ telemetry_default: draft.telemetry_default, public_address: draft.public_address ?? s.public_address }) }, icon("save", "sm"), "Save")));
 
   const account = passwordCard();

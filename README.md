@@ -167,7 +167,7 @@ Everything has a sensible default; the template sets the ones you usually want.
 | `MGMT_PORT_RANGE` | `29000-29999` | Loopback-only ports for the management API. Must not overlap `PORT_RANGE`. |
 | `WEB_PORT` / `WEB_HOST` | `8420` / `0.0.0.0` | Where the dashboard listens. |
 | `GITHUB_TOKEN` | - | Optional. Only needed if GitHub's anonymous rate limit (60 requests/hour) is hit. No scopes required. |
-| `PUBLIC_ADDRESS` | - | Host name shown to players (for example a DynDNS name). Defaults to the address in your browser. |
+| `PUBLIC_ADDRESS` | - | Host name shown to players (for example a DynDNS name) and used in the sign-in address handed out with new friend accounts. Defaults to the address in your browser. Can also be set under *Settings*, which takes precedence. |
 | `UPDATE_CHECK_MINUTES` | `360` | Initial check interval; changeable in the dashboard. |
 | `SESSION_HOURS` | `168` | Sign-in lifetime. |
 | `MAX_UPLOAD_MB` | `4096` | Largest file the file manager accepts. |
@@ -261,7 +261,7 @@ their username). *New password* in the accounts list gives an account a fresh te
 everywhere; deleting an account ends its sessions at once. A friend's password can also be reset from the container with
 `python -m pumpkin_manager reset-password --user <name>`, which makes it temporary as well.
 
-Friends sign in at the same address you use. Friends outside your home network need a way to reach the dashboard: use a
+The sign-in address shown with a new temporary password is the address you are using, with the host replaced by your public address (`PUBLIC_ADDRESS` or *Settings → Public address*), so friends get a name that works from outside. Friends outside your home network need a way to reach the dashboard: use a
 VPN or an HTTPS reverse proxy as described under [Security](#security), not a plain port forward of the dashboard port.
 
 What an account may do is enforced by the server on every request, and the live updates pushed to the browser are

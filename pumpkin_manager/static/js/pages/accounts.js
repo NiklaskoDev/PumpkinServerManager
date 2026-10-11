@@ -27,8 +27,10 @@ function accessPicker(current = {}) {
 }
 
 // The password is only ever shown here, once: the manager keeps a hash and cannot show it again.
-function showTemporaryPassword({ username, password, created }) {
-  const details = `Sign in at ${location.origin}\nUsername: ${username}\nTemporary password: ${password}`;
+// `signInUrl` comes from the server: the address you are using, with the host replaced by the configured public address.
+function showTemporaryPassword({ username, password, created, signInUrl, unencrypted }) {
+  const address = signInUrl || location.origin;
+  const details = `Sign in at ${address}\nUsername: ${username}\nTemporary password: ${password}`;
   const copy = (text, done) => async () => { if (await copyText(text)) toast(done, "success", null, 1800); };
   const dlg = modal({
     title: created ? `Account created for ${username}` : `New temporary password for ${username}`,
@@ -36,8 +38,10 @@ function showTemporaryPassword({ username, password, created }) {
     body: h("div", { class: "stack" },
       h("div", { class: "notice warning" }, icon("alert", "sm"),
         h("div", {}, `Hand this password over now. It is shown only once and cannot be looked up later (if it gets lost, reset the password). ${username} chooses their own password when signing in for the first time.`)),
+      unencrypted ? h("div", { class: "notice warning" }, icon("alert", "sm"),
+        h("div", {}, "This address uses plain http, so the password and the sign-in are not encrypted on the way. That is fine on your own network or through a VPN; for access over the internet put the dashboard behind an HTTPS reverse proxy (see the README).")) : null,
       h("div", { class: "stack-sm" }, h("div", { class: "muted small" }, "Temporary password"), h("div", { class: "secret" }, password)),
-      h("dl", { class: "kv" }, h("dt", {}, "Username"), h("dd", { class: "mono" }, username), h("dt", {}, "Sign in at"), h("dd", { class: "mono" }, location.origin))),
+      h("dl", { class: "kv" }, h("dt", {}, "Username"), h("dd", { class: "mono" }, username), h("dt", {}, "Sign in at"), h("dd", { class: "mono" }, address))),
     footer: [
       h("button", { class: "btn", onclick: copy(password, "Password copied") }, icon("copy", "sm"), "Copy password"),
       h("button", { class: "btn", onclick: copy(details, "Sign-in details copied") }, icon("copy", "sm"), "Copy sign-in details"),
@@ -74,7 +78,7 @@ function openEditor(user, done) {
         const result = await post("/api/users", { username: name.value.trim(), servers: picker.value() });
         dlg.close();
         await done();
-        showTemporaryPassword({ username: result.user.username, password: result.temporary_password, created: true });
+        showTemporaryPassword({ username: result.user.username, password: result.temporary_password, created: true, signInUrl: result.sign_in_url, unencrypted: result.sign_in_unencrypted });
       }
     } catch (err) {
       error.textContent = err.message;
@@ -104,7 +108,7 @@ export async function render() {
     try {
       const result = await post(`/api/users/${user.id}/reset-password`);
       await reload();
-      showTemporaryPassword({ username: user.username, password: result.temporary_password, created: false });
+      showTemporaryPassword({ username: user.username, password: result.temporary_password, created: false, signInUrl: result.sign_in_url, unencrypted: result.sign_in_unencrypted });
     } catch (err) { notifyError(err); }
   }
 
