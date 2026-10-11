@@ -420,27 +420,58 @@ class UpdateService:
         self.servers.publish_state(rec.id)
 
     # ------------------------------------------------------------------ cleanup
-    def prune_builds(self) -> list[str]:
-        keep: set[str] = set()
-        for rec in self.repo.list_servers():
-            keep.update(b for b in (rec.build_id, rec.previous_build_id, rec.pending_build_id) if b)
-        return self.builds.prune(keep, self._app_settings().keep_old_builds)
-
-    # ------------------------------------------------------------------ overview
-    def overview(self) -> dict[str, Any]:
-        used_by: dict[str, list[str]] = {}
+    def _build_users(self) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """Servers per build id: those that run it or can roll back to it, and those waiting to update to it."""
+        using: dict[str, list[str]] = {}
+        waiting: dict[str, list[str]] = {}
         for rec in self.repo.list_servers():
             for build_id in (rec.build_id, rec.previous_build_id):
                 if build_id:
-                    used_by.setdefault(build_id, []).append(rec.id)
+                    using.setdefault(build_id, []).append(rec.id)
+            if rec.pending_build_id:
+                waiting.setdefault(rec.pending_build_id, []).append(rec.id)
+        return using, waiting
+
+    def prune_builds(self, *, keep_spares: bool = True) -> list[str]:
+        """Remove downloaded builds that no server needs. Returns the ids that were removed.
+
+        What a server runs, can roll back to or is about to update to is never touched. Right after an update the
+        newest ``keep_old_builds`` builds of each channel also stay as spares; the Clean up button asks for
+        ``keep_spares=False`` and removes those as well.
+        """
+        using, waiting = self._build_users()
+        spares = self._app_settings().keep_old_builds if keep_spares else 0
+        return self.builds.prune(set(using) | set(waiting), spares)
+
+    def ensure_builds_not_in_flight(self) -> None:
+        """Refuse to remove builds while a server is being created or updated.
+
+        Such a job may have fetched a build a moment ago without any server recording it yet, so it would look unused.
+        """
+        if self.jobs.is_running("create", "update", "rollback"):
+            raise ServerError("A server is being created or updated right now. Try again when it has finished.", 409)
+
+    # ------------------------------------------------------------------ overview
+    def _channel_entry(self, channel: str) -> dict[str, Any] | None:
+        known = self.latest.get(channel)
+        if known is None:
+            return None
+        build = self.repo.get_build(known.id) or known  # the copy kept from the last check does not know about downloads since
+        entry = build.public()
+        entry["downloaded"] = self.builds.is_available(build)
+        return entry
+
+    def overview(self) -> dict[str, Any]:
+        using, waiting = self._build_users()
         builds = []
         for build in self.repo.list_builds():
             entry = build.public()
-            entry["used_by"] = used_by.get(build.id, [])
+            entry["used_by"] = using.get(build.id, [])
+            entry["wanted_by"] = waiting.get(build.id, [])
             entry["available"] = self.builds.is_available(build)
             builds.append(entry)
         return {
-            "channels": {ch: (self.latest[ch].public() if ch in self.latest else None) for ch in CHANNELS},
+            "channels": {ch: self._channel_entry(ch) for ch in CHANNELS},
             "last_check": self.last_check,
             "errors": self.last_errors,
             "builds": builds,

@@ -78,6 +78,7 @@ class JobService:
         self.repo = repo
         self.events = events
         self._busy: dict[str, tuple[str, str]] = {}  # server id -> (job id, kind)
+        self._running: dict[str, str] = {}  # job id -> kind, also for jobs that are not tied to a server (yet)
         self._tasks: set[asyncio.Task] = set()
         self.on_finish: Callable[[dict[str, Any]], None] | None = None
 
@@ -92,6 +93,10 @@ class JobService:
     def active_count(self) -> int:
         return len(self._tasks)
 
+    def is_running(self, *kinds: str) -> bool:
+        """Is a job of one of these kinds running right now, whatever server it belongs to?"""
+        return any(kind in kinds for kind in self._running.values())
+
     # ---------------------------------------------------------------- submitting
     def submit(self, kind: str, title: str, server_id: str | None, fn: JobFn) -> dict[str, Any]:
         """Start ``fn`` in the background. Raises ``Busy`` if the server already runs an operation."""
@@ -101,6 +106,7 @@ class JobService:
         if server_id is not None:
             self._busy[server_id] = (job["id"], kind)
         self._publish(job)
+        self._running[job["id"]] = kind
         task = asyncio.create_task(self._run(job, fn), name=f"job-{kind}-{job['id']}")
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -122,6 +128,7 @@ class JobService:
             status, message = "failed", f"Unexpected error: {exc}"
             ctx.step(message, "error")
         finally:
+            self._running.pop(job["id"], None)  # before the row says "finished", so whoever sees that can rely on it
             if ctx.server_id is not None and self._busy.get(ctx.server_id, (None,))[0] == job["id"]:
                 self._busy.pop(ctx.server_id, None)
             fields: dict[str, Any] = {"status": status, "finished_at": iso(), "progress": 1.0 if status == "success" else None}

@@ -214,6 +214,12 @@ while a **temporary** problem (network, disk space) is retried automatically wit
 Every step is visible in the job log, in *Activity* and (optionally) as a webhook message. Afterwards the **Version
 tab** keeps a history and a **Roll back** button (version only, or version *and* the pre-update world).
 
+**Disk space.** Downloaded binaries are shared by all servers (`/data/binaries`). A build that a server runs, can roll
+back to or is about to update to is never removed. After every update the manager deletes older builds nobody needs,
+but keeps the newest build of each channel as a spare (*Settings → Builds to keep as spares*, one by default).
+*Versions → Clean up unused* deletes every build that no server needs, spares included. A deleted build is downloaded
+again when it is needed, except a rolling-channel build that GitHub has already replaced.
+
 What this does *not* protect against: a bug in a new version that only shows up hours later, or world damage that
 you notice after playing for a while. That is what the pre-update backup and the Roll back button are for.
 

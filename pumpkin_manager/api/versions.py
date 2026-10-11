@@ -115,14 +115,18 @@ async def delete_build(request: Request, build_id: str, owner: Principal = Depen
     for rec in ctx.repo.list_servers():
         if build_id in (rec.build_id, rec.previous_build_id, rec.pending_build_id):
             raise ServerError(f"'{rec.name}' still uses this version, so it cannot be deleted.", 409)
+    ctx.updater.ensure_builds_not_in_flight()
     await asyncio.to_thread(ctx.builds.delete_files, build_id)
     return {"ok": True}
 
 
 @router.post("/versions/prune")
 async def prune(request: Request, owner: Principal = Depends(require_owner)) -> dict:
-    removed = await asyncio.to_thread(get_ctx(request).updater.prune_builds)
-    return {"removed": removed}
+    """The Clean up button: remove every downloaded build that no server needs, spares included."""
+    ctx = get_ctx(request)
+    ctx.updater.ensure_builds_not_in_flight()
+    removed = await asyncio.to_thread(ctx.updater.prune_builds, keep_spares=False)
+    return {"removed": removed, "freed_bytes": sum(b.size for b in map(ctx.repo.get_build, removed) if b)}
 
 
 # ----------------------------------------------------------- per-server updates

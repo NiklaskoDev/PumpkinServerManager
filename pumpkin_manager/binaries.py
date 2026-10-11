@@ -107,9 +107,13 @@ class BuildStore:
         self.repo.mark_not_downloaded(build_id)
 
     def prune(self, keep_ids: set[str], keep_newest_per_channel: int) -> list[str]:
-        """Delete cached binaries nobody needs. Returns the ids that were removed."""
+        """Delete cached binaries nobody needs. Returns the ids that were removed.
+
+        The newest ``keep_newest_per_channel`` builds of each channel stay as spares. A build counts as cached when
+        its record says so or when its file is on disk, which is what the Versions page lists.
+        """
         removed: list[str] = []
-        builds = [b for b in self.repo.list_builds() if b.downloaded]
+        builds = [b for b in self.repo.list_builds() if b.downloaded or self.is_available(b)]
         newest_by_channel: dict[str, list[str]] = {}
         for build in builds:  # list_builds() is ordered newest first
             newest_by_channel.setdefault(build.channel, []).append(build.id)
