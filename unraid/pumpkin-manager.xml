@@ -9,19 +9,19 @@
 -->
 <Container version="2">
   <Name>PumpkinManager</Name>
-  <Repository>ghcr.io/YOUR_GITHUB_USER/pumpkin-manager:latest</Repository>
-  <Registry>https://github.com/YOUR_GITHUB_USER/pumpkin-manager/pkgs/container/pumpkin-manager</Registry>
+  <Repository>ghcr.io/NiklaskoDev/pumpkin-manager:latest</Repository>
+  <Registry>https://github.com/NiklaskoDev/pumpkin-manager/pkgs/container/pumpkin-manager</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/YOUR_GITHUB_USER/pumpkin-manager/issues</Support>
-  <Project>https://github.com/YOUR_GITHUB_USER/pumpkin-manager</Project>
+  <Support>https://github.com/NiklaskoDev/pumpkin-manager/issues</Support>
+  <Project>https://github.com/NiklaskoDev/pumpkin-manager</Project>
   <Overview>Web dashboard that creates, runs, backs up and automatically updates Pumpkin Minecraft servers (Pumpkin is a fast Minecraft server written in Rust: https://pumpkinmc.org). One container manages as many servers as you like: create one in the dashboard and it is downloaded, configured and started for you. Pumpkin updates are checked automatically; before any update is applied the server is stopped and a verified backup is made, and the manager rolls back on its own if the new version does not start. The first time it starts, the administrator password is printed in the container log unless you set one below.</Overview>
   <Category>GameServers: Tools:</Category>
   <WebUI>http://[IP]:[PORT:8420]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/YOUR_GITHUB_USER/pumpkin-manager/main/unraid/pumpkin-manager.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/YOUR_GITHUB_USER/pumpkin-manager/main/pumpkin_manager/static/favicon.svg</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/NiklaskoDev/pumpkin-manager/main/unraid/pumpkin-manager.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/NiklaskoDev/pumpkin-manager/main/pumpkin_manager/static/favicon.svg</Icon>
   <ExtraParams>--stop-timeout 120</ExtraParams>
   <PostArgs/>
   <CPUset/>
