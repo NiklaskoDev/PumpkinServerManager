@@ -8,7 +8,7 @@
 services:
   pumpkin-manager:
     # Use the published image ...
-    image: ghcr.io/your-github-user/pumpkin-manager:latest
+    image: ghcr.io/niklaskodev/pumpkin-manager:latest
     # ... or build it from this folder (docker compose up -d --build)
     build: .
     container_name: pumpkin-manager

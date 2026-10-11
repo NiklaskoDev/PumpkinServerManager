@@ -112,20 +112,44 @@ def test_extraction_respects_the_disk_budget(tmp_path):
         extract_archive(tmp_path / "a.tar.gz", tmp_path / "out", 1000)
 
 
-def test_files_changing_during_backup_keep_the_archive_valid(tmp_path):
+def test_a_file_that_shrinks_while_it_is_archived_keeps_the_archive_valid(tmp_path, monkeypatch):
+    """A tar member must have exactly the size announced in its header, or everything after it is garbage."""
+    from pumpkin_manager import backups as backups_module
+
     src = tmp_path / "src"
     make_tree(src)
     big = src / "world" / "region" / "r.0.0.mca"
-    shrink_state = {"done": False}
+    original = big.read_bytes()
 
-    def progress(done: int) -> None:  # called mid-run from the writer thread
-        if not shrink_state["done"]:
-            shrink_state["done"] = True
-            big.write_bytes(b"short")
+    class ShrinksRightAfterItsSizeWasRecorded(backups_module._FixedSizeReader):
+        def __init__(self, fh, size):
+            super().__init__(fh, size)
+            if size == len(original):  # the tar header already says 50 000 bytes; now the game truncates the file
+                with open(big, "r+b") as other:
+                    other.truncate(5)
 
-    # a file that shrinks while being read is zero-padded so the tar stream stays well-formed
-    result = write_archive(src, tmp_path / "a.tar.gz", {}, [], progress)
-    verify_archive(tmp_path / "a.tar.gz", result["sha256"])
+    monkeypatch.setattr(backups_module, "_FixedSizeReader", ShrinksRightAfterItsSizeWasRecorded)
+    result = write_archive(src, tmp_path / "a.tar.gz", {}, [], lambda n: None)
+    verify_archive(tmp_path / "a.tar.gz", result["sha256"])  # still a perfectly readable archive
+    assert result["changed"] == ["world/region/r.0.0.mca"], "the file is reported as having changed"
+
+    out = tmp_path / "out"
+    extract_archive(tmp_path / "a.tar.gz", out, 10**9)
+    restored = (out / "world" / "region" / "r.0.0.mca").read_bytes()
+    assert len(restored) == len(original), "padded to the announced size"
+    assert restored[:5] == original[:5] and set(restored[5:]) == {0}
+    assert (out / "pumpkin.toml").read_text() == "seed = '1'\n", "files after the changed one are intact"
+
+
+def test_fixed_size_reader_pads_and_truncates():
+    import io
+
+    from pumpkin_manager.backups import _FixedSizeReader
+
+    short = _FixedSizeReader(io.BytesIO(b"abc"), 6)
+    assert short.read(100) == b"abc\0\0\0" and short.short and short.read(10) == b""
+    long = _FixedSizeReader(io.BytesIO(b"abcdefgh"), 4)
+    assert long.read() == b"abcd" and not long.short
 
 
 async def test_hot_backup_quiesces_the_server_and_resumes_saving(ctx):

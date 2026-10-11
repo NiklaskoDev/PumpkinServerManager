@@ -33,32 +33,64 @@ Pumpkin versions on a schedule and **never applies an update without first makin
 
 ## Install on Unraid
 
-The container image has to come from somewhere Unraid can pull it. Pick **A** (recommended) or **B**.
+Unraid needs the container image from somewhere. Both ways below end with the same template step. **A** works
+immediately from the files in this repository; **B** sets up automatic builds on GitHub.
 
-### A. Publish the image from GitHub (automatic builds)
+### A. Build the image on the Unraid server (fastest, nothing to set up)
 
-1. Create a GitHub repository and push this folder to its `main` branch.
-   The workflow in `.github/workflows/ci.yml` runs the tests, smoke-tests the image and publishes a multi-arch
-   image (amd64 + arm64) to `ghcr.io/<your-user>/pumpkin-manager:latest`.
-2. GitHub → your profile → **Packages** → `pumpkin-manager` → *Package settings* → make it **public**
-   (or run `docker login ghcr.io` on the Unraid terminal with a personal access token that has `read:packages`).
-3. Edit `unraid/pumpkin-manager.xml` and replace every `YOUR_GITHUB_USER` with your GitHub user name.
-4. Copy the file to your Unraid flash drive:
-   `/boot/config/plugins/dockerMan/templates-user/my-pumpkin-manager.xml`
-   (the flash share is `\\tower\flash\config\plugins\dockerMan\templates-user\`).
-5. Unraid → **Docker** → **Add Container** → *Template*: choose **PumpkinManager**.
-
-### B. Build the image on the Unraid server (no registry)
+Open the Unraid terminal (top-right `>_` icon) and run:
 
 ```bash
-# copy this project folder to the server first (SMB share, scp, or git clone), then on the Unraid terminal:
-cd /mnt/user/appdata/pumpkin-manager-src
+mkdir -p /mnt/user/appdata/pumpkin-manager-src && cd /mnt/user/appdata/pumpkin-manager-src
+rm -rf PumpkinServerManager-main
+wget -qO src.zip https://github.com/NiklaskoDev/PumpkinServerManager/archive/refs/heads/main.zip
+unzip -q src.zip && cd PumpkinServerManager-main
 docker build -t pumpkin-manager:local .
 ```
 
-Use the same template as above but set **Repository** to `pumpkin-manager:local`. Unraid will not show update
-notices for a locally built image: rebuild it when you change the manager itself (Pumpkin updates are handled
-inside the dashboard and do not need a new image).
+This takes a minute or two. Use the repository name `pumpkin-manager:local` in the template (see below). Unraid
+cannot check a locally built image for updates; run the commands again when this project changes. (Pumpkin updates
+are handled inside the dashboard and never need a new image.)
+
+### B. Let GitHub build and publish the image (automatic)
+
+1. **Get every file into the repository, including the hidden ones.** Dragging a folder into GitHub's web uploader
+   *silently skips* names that start with a dot, which loses `.github/workflows/ci.yml` (the workflow that builds the
+   image), `.gitignore`, `.dockerignore` and `.gitattributes`. Use git instead:
+
+   ```bash
+   # new, empty repository:
+   git init -b main && git add -A && git commit -m "Pumpkin Server Manager"
+   git remote add origin https://github.com/<you>/<repository>.git && git push -u origin main
+
+   # repository that already has files from a web upload (keeps its history, adds what is missing):
+   git init -b main && git remote add origin https://github.com/<you>/<repository>.git
+   git fetch origin && git reset origin/main
+   git add -A && git commit -m "Add the hidden files (CI workflow and friends)" && git push -u origin main
+   ```
+2. Open the repository's **Actions** tab. The *CI* run builds the image, starts it, signs in over HTTP and then
+   publishes a multi-arch image (amd64 + arm64) to `ghcr.io/<you>/pumpkin-manager:latest`. The first run takes
+   about ten minutes. (The unit tests run alongside; a red test job is worth a look but does not block the image.)
+3. **Make the package public, once.** New packages start *private*, and Unraid then fails with
+   `Head "https://ghcr.io/v2/.../manifests/latest": denied`.
+   GitHub → your profile → **Packages** → `pumpkin-manager` → *Package settings* → *Danger Zone* →
+   **Change visibility** → Public. (Alternatively keep it private and run `docker login ghcr.io` on the Unraid
+   terminal with a personal access token that has `read:packages`.)
+
+### Add the container in Unraid
+
+1. Put the template on the flash drive (Unraid terminal):
+   ```bash
+   wget -qO /boot/config/plugins/dockerMan/templates-user/my-PumpkinManager.xml \
+     https://raw.githubusercontent.com/NiklaskoDev/PumpkinServerManager/main/unraid/pumpkin-manager.xml
+   ```
+   (or copy `unraid/pumpkin-manager.xml` there by hand; from Windows the folder is
+   `\\tower\flash\config\plugins\dockerMan\templates-user\`).
+2. **Docker** → **Add Container** → *Template*: pick **my-PumpkinManager** from the *User templates* group. This is
+   what fills in the ports, folders and variables: creating the container by typing only a repository name gives you a
+   container with no ports and no persistent storage.
+3. Using route A? Change **Repository** to `pumpkin-manager:local`. Using route B, leave it as is.
+4. Review the settings below and click **Apply**.
 
 ### Settings to review in the template
 
@@ -79,7 +111,7 @@ port of each server from your router to the Unraid IP.
 >   -p 8420:8420 -p 25565-25575:25565-25575/tcp -p 19132-19142:19132-19142/udp \
 >   -e PUID=99 -e PGID=100 -e TZ=Europe/Berlin -e BACKUP_DIR=/backups -e ADMIN_PASSWORD='choose-a-password' \
 >   -v /mnt/user/appdata/pumpkin-manager:/data -v /mnt/user/backups/pumpkin-manager:/backups \
->   ghcr.io/<your-user>/pumpkin-manager:latest
+>   ghcr.io/niklaskodev/pumpkin-manager:latest
 > ```
 
 ## Docker Compose
@@ -229,6 +261,7 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 
 | Symptom | Fix |
 |---|---|
+| `docker: ... ghcr.io/v2/.../manifests/latest: denied` | GHCR answers *denied* both when the image does not exist yet and when it is private. Check the repository's **Actions** tab for a green *CI* run (no run at all usually means `.github/workflows/ci.yml` never reached GitHub, see *Install* route B), then make the package public. Or skip GHCR: use route A. |
 | *"Port 25565 is already in use by another program"* | Another container (or the host) uses it. Choose another port in the server's settings, or remove the other service. |
 | Friends cannot connect | Forward the server's **TCP** port on your router to the Unraid IP. The card on the dashboard shows the exact port and warns when it is not published by the container. |
 | *"No free port left in 25565-25575"* | Widen `PORT_RANGE` **and** the template's port mapping (they must match). |

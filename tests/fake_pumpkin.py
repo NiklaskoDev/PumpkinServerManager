@@ -224,8 +224,11 @@ async def main() -> int:
         await serve(msmp_handler, mhost, int(mport), process_request=msmp_auth)
         log(f"Management server is listening on {MGMT['address']}")
     threading.Thread(target=stdin_reader, daemon=True).start()
-    if hasattr(signal, "SIGTERM") and os.name != "nt" and not BUILD.get("ignore_sigterm"):
-        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+    if hasattr(signal, "SIGTERM") and os.name != "nt":
+        if BUILD.get("ignore_sigterm"):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)  # really ignore it, so only SIGKILL can end this process
+        else:
+            loop.add_signal_handler(signal.SIGTERM, stop_event.set)
 
     if not BUILD.get("no_ready_line"):
         log("Started server; took 12ms")

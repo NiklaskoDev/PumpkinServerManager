@@ -2,26 +2,28 @@
 <!--
   Unraid template for Pumpkin Server Manager.
 
-  Before using it, replace YOUR_GITHUB_USER (below) with the account that publishes the image, or change
-  <Repository> to an image you built locally (see README). Install by copying this file to
-  /boot/config/plugins/dockerMan/templates-user/ on the Unraid flash drive, then Docker -> Add Container ->
-  choose "PumpkinManager" from the Template drop-down.
+  Set up for the GitHub repository NiklaskoDev/PumpkinServerManager. The image is published by the workflow in
+  .github/workflows/ci.yml to ghcr.io/niklaskodev/pumpkin-manager (image name and repository name are different
+  things). To use an image you built on the Unraid server instead, change <Repository> to pumpkin-manager:local.
+
+  Install: copy this file to /boot/config/plugins/dockerMan/templates-user/ on the Unraid flash drive, then
+  Docker -> Add Container -> choose "PumpkinManager" from the Template drop-down.
 -->
 <Container version="2">
   <Name>PumpkinManager</Name>
   <Repository>ghcr.io/niklaskodev/pumpkin-manager:latest</Repository>
-  <Registry>https://github.com/niklaskodev/pumpkin-manager/pkgs/container/pumpkin-manager</Registry>
+  <Registry>https://github.com/NiklaskoDev/PumpkinServerManager/pkgs/container/pumpkin-manager</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/niklaskodev/pumpkin-manager/issues</Support>
-  <Project>https://github.com/niklaskodev/pumpkin-manager</Project>
+  <Support>https://github.com/NiklaskoDev/PumpkinServerManager/issues</Support>
+  <Project>https://github.com/NiklaskoDev/PumpkinServerManager</Project>
   <Overview>Web dashboard that creates, runs, backs up and automatically updates Pumpkin Minecraft servers (Pumpkin is a fast Minecraft server written in Rust: https://pumpkinmc.org). One container manages as many servers as you like: create one in the dashboard and it is downloaded, configured and started for you. Pumpkin updates are checked automatically; before any update is applied the server is stopped and a verified backup is made, and the manager rolls back on its own if the new version does not start. The first time it starts, the administrator password is printed in the container log unless you set one below.</Overview>
   <Category>GameServers: Tools:</Category>
   <WebUI>http://[IP]:[PORT:8420]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/niklaskodev/pumpkin-manager/main/unraid/pumpkin-manager.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/niklaskodev/pumpkin-manager/main/pumpkin_manager/static/favicon.svg</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/NiklaskoDev/PumpkinServerManager/main/unraid/pumpkin-manager.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/NiklaskoDev/PumpkinServerManager/main/pumpkin_manager/static/favicon.svg</Icon>
   <ExtraParams>--stop-timeout 120</ExtraParams>
   <PostArgs/>
   <CPUset/>

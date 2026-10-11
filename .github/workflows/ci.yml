@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest
+
+  image:
+    name: Build and smoke-test the image
+    runs-on: ubuntu-latest
+    # Deliberately independent of the unit tests (see the publish job).
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (amd64)
+        run: docker build -t pumpkin-manager:ci .
+      - name: Start the container and wait for the dashboard
+        run: |
+          docker run -d --name pm -p 8420:8420 -e ADMIN_PASSWORD=ci-password-123 pumpkin-manager:ci
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:8420/api/health && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8420/api/health
+      - name: Log in through the API
+        run: |
+          curl -fsS -c jar -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"ci-password-123"}' http://127.0.0.1:8420/api/auth/login
+          curl -fsS -b jar http://127.0.0.1:8420/api/system | head -c 300
+      - name: Container log
+        if: always()
+        run: docker logs pm
+
+  publish:
+    name: Publish multi-arch image
+    runs-on: ubuntu-latest
+    # Waits for the image smoke test only. The unit tests above run in parallel and report on their own: a test
+    # that misbehaves on Linux must stay visible (red cross on the commit) without blocking a deployable image.
+    needs: image
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lower-case the image name (registries require it)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pumpkin-manager" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: What to do next
+        run: |
+          {
+            echo "### Published \`${IMAGE}:latest\`"
+            echo ""
+            echo "New packages start **private**, and Unraid then fails with *denied* when it pulls the image."
+            echo "Make it public once: GitHub -> your profile -> **Packages** -> \`pumpkin-manager\` -> **Package settings**"
+            echo "-> *Danger Zone* -> **Change visibility** -> Public."
+          } >> "$GITHUB_STEP_SUMMARY"
