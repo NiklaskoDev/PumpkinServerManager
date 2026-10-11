@@ -8,6 +8,10 @@ stops it.
     python scripts/real_java_check.py --accept-eula                       # Fabric (the default)
     python scripts/real_java_check.py --accept-eula --loader all          # Fabric, NeoForge, Forge and Quilt
     python scripts/real_java_check.py --accept-eula --loader neoforge --memory 3072
+    python scripts/real_java_check.py --accept-eula --pack cobblemon-fabric   # a real Modrinth modpack (name or link; repeatable)
+
+A real modpack is looked up and installed the way the dashboard does it; its mods are downloaded for real (a few hundred MB) and
+it gets 4096 MiB unless --pack-memory says otherwise. With --pack the generated packs are skipped unless --loader asks for them.
 
 Run it inside the container (Unraid: container icon -> Console) to test the real Linux/Alpine setup, or on a dev machine.
 
@@ -49,6 +53,11 @@ from pumpkin_manager.util import strip_ansi  # noqa: E402
 LOADERS = ("fabric", "neoforge", "forge", "quilt")
 DEFAULT_MINECRAFT = {"fabric": None, "neoforge": "1.21.1", "forge": "1.20.1", "quilt": "1.21.1"}  # None: the newest release
 MODS = {"fabric": ("fabric-api", "lithium")}
+SETTINGS = {"online-mode": False, "view-distance": 4, "simulation-distance": 4, "max-players": 5, "motd": "real java check"}
+
+
+def dir_megabytes(path: Path) -> float:
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file()) / 1048576
 
 
 # --------------------------------------------------------------------------------- what is out there right now
@@ -133,17 +142,43 @@ async def check_loader(ctx: AppContext, client: httpx.AsyncClient, loader: str, 
     check(True, "versions chosen", f"Minecraft {minecraft}, {loader} {loader_version}, mods: {', '.join(mods) or 'none'}")
     upload = await ctx.servers.jvm.accept_upload(chunks(pack))
     check(upload["pack"]["loader"]["kind"] == loader, "the manager reads the pack", f"{upload['pack']['mods']} mods, {upload['pack']['loader']['label']}")
-
-    section(f"{loader}: create the server (Java, mods, loader, first start)")
-    started = time.monotonic()
-    job = ctx.servers.submit_create({
+    body = {
         "name": f"Real {loader}", "engine": "java", "eula": True, "memory_mb": memory, "start": True,
-        "modpack": {"source": "upload", "upload": upload["upload"]},
-        "settings": {"online-mode": False, "view-distance": 4, "simulation-distance": 4, "max-players": 5, "motd": "real java check"},
-    })
-    row = await wait_job(ctx, job, timeout=1800)
+        "modpack": {"source": "upload", "upload": upload["upload"]}, "settings": SETTINGS,
+    }
+    await check_server(ctx, loader, body, mods=mods, generated=True)
+
+
+async def check_pack(ctx: AppContext, reference: str, memory: int) -> None:
+    """A real modpack from Modrinth, installed the way the dashboard does it: nothing about it is known in advance."""
+    label = reference.rstrip("/").rsplit("/", 1)[-1][:24]
+    section(f"{label}: look the modpack up on Modrinth")
+    try:
+        details = await ctx.servers.jvm.pack_details(reference)
+    except Exception as exc:  # noqa: BLE001
+        check(False, "Modrinth knows the modpack", repr(exc))
+        return
+    newest = details["versions"][0] if details["versions"] else None
+    if not check(newest is not None, "the pack has a version that can be installed", f"{details['title']}, {details['downloads']} downloads"):
+        return
+    check(True, "newest version", f"{newest['number']} ({newest['type']}) for Minecraft {', '.join(newest['minecraft'][-3:])}, {', '.join(newest['loaders'])}, "
+          f"pack file {newest['size'] / 1048576:.1f} MiB")
+    body = {
+        "name": f"Real {label}"[:40], "engine": "java", "eula": True, "memory_mb": memory, "start": True,
+        "modpack": {"source": "modrinth", "project": reference}, "settings": SETTINGS, "policy": {"start_timeout": 1800},
+    }
+    await check_server(ctx, label, body, mods=[], generated=False)
+
+
+async def check_server(ctx: AppContext, label: str, body: dict[str, Any], *, mods: list[str], generated: bool) -> None:
+    """Create a server from ``body`` and put it through what the dashboard offers: start, talk, back up, restore, stop.
+
+    ``generated``: the pack is the small one this script built, so its configuration and settings are known and checked."""
+    section(f"{label}: create the server (Java, mods, loader, first start)")
+    started = time.monotonic()
+    row = await wait_job(ctx, ctx.servers.submit_create(body), timeout=3600)
     show_job(row)
-    server = next((s for s in ctx.repo.list_servers() if s.name == f"Real {loader}"), None)
+    server = next((s for s in ctx.repo.list_servers() if s.name == body["name"]), None)
     if not check(row["status"] == "success" and server is not None, "server created and started", (row["message"] or "") + f" ({time.monotonic() - started:.0f}s)"):
         if server:
             print("\n".join(console_tail(ctx, server.id, limit=60)))
@@ -156,14 +191,22 @@ async def check_loader(ctx: AppContext, client: httpx.AsyncClient, loader: str, 
     check(rt.state == "running", "the manager reports the server as running")
     check(said(ctx, server.id, "Done ("), "the server printed its 'Done (...)!' line")
     check(ctx.runtimes.get(server.spec["java"]) is not None, f"Java {server.spec['java']} was downloaded and works", str(ctx.runtimes.get(server.spec["java"]).release))
-    check(all((directory / "mods" / name).is_file() for name in mods), "the mods are in mods/", ", ".join(mods) or "(none)")
-    check((directory / "config" / "real-check.txt").is_file(), "the pack's configuration was applied")
+    lock = ctx.servers.jvm.lock_of(server) or {}
+    files = sorted(lock.get("files", {}))
+    check(all((directory / name).is_file() for name in files) and all((directory / "mods" / name).is_file() for name in mods),
+          "every file of the pack is in the server folder", f"{len(files)} files in the lock, {sum(f.startswith('mods/') for f in files)} of them mods")
     props = (directory / "server.properties").read_text(encoding="utf-8")
-    check(f"server-port={server.java_port}" in props and "allow-flight=true" in props and "online-mode=false" in props,
-          "server.properties has the manager's port, the pack's setting and the chosen settings")
+    check(f"server-port={server.java_port}" in props and "online-mode=false" in props and "enable-rcon=false" in props,
+          "server.properties has the manager's port, RCON off and the chosen settings")
+    if generated:
+        check((directory / "config" / "real-check.txt").is_file(), "the pack's configuration was applied")
+        check("allow-flight=true" in props, "the pack's own server.properties setting is there")
     check((directory / "eula.txt").read_text(encoding="utf-8").count("eula=true") == 1, "eula.txt was written")
+    loader_name = (server.spec.get("loader") or {}).get("kind", "?")
+    print(f"        {loader_name} {server.spec['loader']['version']}, Minecraft {server.spec['minecraft']}, Java {server.spec['java']}, "
+          f"{dir_megabytes(directory):.0f} MB on disk after the first start")
 
-    section(f"{loader}: talk to the running server")
+    section(f"{label}: talk to the running server")
     info = None
     try:
         info = await server_list_ping("127.0.0.1", server.java_port, timeout=10)
@@ -179,34 +222,41 @@ async def check_loader(ctx: AppContext, client: httpx.AsyncClient, loader: str, 
     await eventually(lambda: bool(ctx.servers.read_player_lists(server)["whitelist"]), 20)
     check(any(e.get("name") for e in ctx.servers.read_player_lists(server)["whitelist"]), "whitelist add works and the list shows in the server folder")
 
-    section(f"{loader}: hot backup and restore")
-    row = await wait_job(ctx, ctx.backups.submit_backup(server, "manual"), timeout=600)
+    section(f"{label}: hot backup and restore")
+    marker = directory / "real-check-marker.txt"
+    marker.write_text("before the backup\n", encoding="utf-8")
+    row = await wait_job(ctx, ctx.backups.submit_backup(server, "manual"), timeout=1800)
     show_job(row)
     backup = ctx.repo.list_backups(server.id)[0] if ctx.repo.list_backups(server.id) else None
     check(row["status"] == "success" and backup is not None and bool(backup["verified"]), "the hot backup was made and verified", row["message"] or "")
     check(backup is not None and bool(backup["consistent"]), "the server confirmed that the world was saved (consistent backup)")
-    (directory / "config" / "real-check.txt").write_text("damaged\n", encoding="utf-8")
-    row = await wait_job(ctx, ctx.backups.submit_restore(ctx.servers.get(server.id), backup["id"], True, lambda r: ctx.servers.ensure_config(r)), timeout=900)
-    check(row["status"] == "success" and (directory / "config" / "real-check.txt").read_text(encoding="utf-8") == "written by the pack\n",
-          "restoring the backup brings the files back", row["message"] or "")
-    check(ctx.pm.runtime(server.id).state == "running", "the server runs again after the restore")
+    if backup is not None:
+        marker.write_text("damaged\n", encoding="utf-8")
+        if generated:
+            (directory / "config" / "real-check.txt").write_text("damaged\n", encoding="utf-8")
+        row = await wait_job(ctx, ctx.backups.submit_restore(ctx.servers.get(server.id), backup["id"], True, lambda r: ctx.servers.ensure_config(r)), timeout=1800)
+        restored = marker.is_file() and marker.read_text(encoding="utf-8") == "before the backup\n"
+        if generated:
+            restored = restored and (directory / "config" / "real-check.txt").read_text(encoding="utf-8") == "written by the pack\n"
+        check(row["status"] == "success" and restored, "restoring the backup brings the files back", row["message"] or "")
+        check(ctx.pm.runtime(server.id).state == "running", "the server runs again after the restore")
 
-    section(f"{loader}: stop")
+    section(f"{label}: stop")
     row = await wait_job(ctx, ctx.servers.submit_stop(ctx.servers.get(server.id)), timeout=300)
     check(row["status"] == "success" and ctx.pm.runtime(server.id).state == "stopped", "the server stops gracefully", f"exit code {ctx.pm.runtime(server.id).exit_code}")
     check(ctx.pm.runtime(server.id).exit_code == 0, "its exit code is 0")
     check((directory / "world").is_dir() or any(p.is_dir() for p in directory.glob("*/region")), "a world was saved")
 
 
-async def run(loaders: list[str], minecraft: str | None, memory: int, keep: bool) -> int:
+async def run(loaders: list[str], packs: list[str], minecraft: str | None, memory: int | None, pack_memory: int | None, keep: bool) -> int:
     work = Path(tempfile.mkdtemp(prefix="java-real-check-"))
     print(f"Working folder: {work}")
     started = time.monotonic()
-    java = free_block(4)
-    mgmt = free_block(20, start=java + 100)
+    java = free_block(16)
+    mgmt = free_block(40, start=java + 100)
     settings = Settings(
-        data_dir=work / "data", backup_dir=work / "backups", web_host="127.0.0.1", web_port=0, port_range=(java, java + 3),
-        mgmt_port_range=(mgmt, mgmt + 19), admin_password="real-java-check", timezone="UTC", shutdown_timeout=120,
+        data_dir=work / "data", backup_dir=work / "backups", web_host="127.0.0.1", web_port=0, port_range=(java, java + 15),
+        mgmt_port_range=(mgmt, mgmt + 39), admin_password="real-java-check", timezone="UTC", shutdown_timeout=240,
     )
     ctx = AppContext(settings, verify_elf=False, background=False, stability_seconds=8)
     await ctx.startup()
@@ -214,16 +264,25 @@ async def run(loaders: list[str], minecraft: str | None, memory: int, keep: bool
     try:
         for loader in loaders:
             try:
-                await check_loader(ctx, client, loader, minecraft or DEFAULT_MINECRAFT[loader], memory)
+                await check_loader(ctx, client, loader, minecraft or DEFAULT_MINECRAFT[loader], memory or 2048)
             except Exception as exc:  # noqa: BLE001 - report everything, then go on with the next loader
                 import traceback
 
                 traceback.print_exc()
                 check(False, f"{loader}: the check ran to completion", repr(exc))
+        for reference in packs:
+            try:
+                await check_pack(ctx, reference, pack_memory or memory or 4096)
+            except Exception as exc:  # noqa: BLE001
+                import traceback
+
+                traceback.print_exc()
+                check(False, f"{reference}: the check ran to completion", repr(exc))
     finally:
         await client.aclose()
+        servers = ctx.repo.list_servers()  # before the shutdown closes the database
         await ctx.shutdown()
-        for server in ctx.repo.list_servers():
+        for server in servers:
             check(ctx.pm.runtime(server.id).proc is None, f"no process left running ({server.name})")
     return report(work, keep, started)
 
@@ -231,17 +290,21 @@ async def run(loaders: list[str], minecraft: str | None, memory: int, keep: bool
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--accept-eula", action="store_true", help="accept the Minecraft EULA for the throw-away servers (required)")
-    parser.add_argument("--loader", default="fabric", choices=[*LOADERS, "all"], help="which mod loader to test (default: fabric)")
+    parser.add_argument("--loader", choices=[*LOADERS, "all", "none"], help="which mod loader to test with a small generated pack (default: fabric, or none when --pack is given)")
+    parser.add_argument("--pack", action="append", default=[], metavar="SLUG_OR_LINK",
+                        help="also install a real Modrinth modpack, e.g. cobblemon-fabric or its modrinth.com link (repeat for several)")
     parser.add_argument("--minecraft", help="Minecraft version (default: the newest release for Fabric, a well supported one for the others)")
-    parser.add_argument("--memory", type=int, default=2048, help="memory per server in MiB (default 2048)")
+    parser.add_argument("--memory", type=int, help="memory per server in MiB (default 2048 for the generated packs, 4096 for real ones)")
+    parser.add_argument("--pack-memory", type=int, help="memory for the real modpacks in MiB (default: --memory, or 4096)")
     parser.add_argument("--keep", action="store_true", help="do not delete the temporary folder")
     args = parser.parse_args()
     if not args.accept_eula:
         print("This check starts real Minecraft servers. Add --accept-eula to confirm that you accept the Minecraft EULA\n"
               "(https://aka.ms/MinecraftEULA) for them.", file=sys.stderr)
         return 2
-    loaders = list(LOADERS) if args.loader == "all" else [args.loader]
-    return asyncio.run(run(loaders, args.minecraft, args.memory, args.keep))
+    choice = args.loader or ("none" if args.pack else "fabric")
+    loaders = list(LOADERS) if choice == "all" else ([] if choice == "none" else [choice])
+    return asyncio.run(run(loaders, args.pack, args.minecraft, args.memory, args.pack_memory, args.keep))
 
 
 if __name__ == "__main__":

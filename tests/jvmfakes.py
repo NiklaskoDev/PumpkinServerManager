@@ -215,13 +215,17 @@ class FakeInternet:
         ])
         self.blob(f"https://meta.fabricmc.net/v2/versions/loader/{minecraft}/{loader}/{installer}/server/jar", _zip_bytes({"fabric": b"launcher"}))
 
-    def quilt(self, installer: str = "0.15.1") -> None:
+    def quilt(self, installer: str = "0.15.1", *, wrong_checksum: bool = False) -> None:
+        """Quilt's installer. Like the real service, the metadata lists a hash that does not match the file (a real run caught
+        that); the checksum Maven publishes next to the file is the one that can be trusted."""
         jar = _zip_bytes({"quilt": b"installer"})
         url = f"https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/{installer}/quilt-installer-{installer}.jar"
         self.json("https://meta.quiltmc.org/v3/versions/installer", [
-            {"version": installer, "url": url, "file_size": len(jar), "hashes": {"sha256": hashlib.sha256(jar).hexdigest()}},
+            {"version": installer, "url": url, "file_size": len(jar), "hashes": {"sha256": "f" * 64}},
         ])
         self.blob(url, jar)
+        digest = "0" * 64 if wrong_checksum else hashlib.sha256(jar).hexdigest()
+        self.route(url + ".sha256", lambda request: httpx.Response(200, text=digest))
 
     def maven_installer(self, kind: str, minecraft: str, version: str, *, publish_checksum: bool = True, wrong_checksum: bool = False,
                         suffixed: bool = False) -> bytes:

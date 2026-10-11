@@ -132,6 +132,15 @@ async def test_quilt_is_installed_with_its_installer_into_the_server_folder(tmp_
     assert "--download-server" in argv and f"--install-dir={tmp_path}" in argv
 
 
+async def test_a_quilt_installer_that_does_not_match_the_repositorys_checksum_is_never_run(tmp_path):
+    net = FakeInternet()
+    net.quilt("0.15.1", wrong_checksum=True)
+    installer, fake, said = installer_for(net)
+    with pytest.raises(BadDownloadError, match="SHA256"):
+        await installer.install(LoaderSpec("quilt", "0.26.0", "1.21.1"), tmp_path, JAVA, said.append)
+    assert fake.calls == [] and not list(tmp_path.glob("quilt-installer-*.jar"))
+
+
 def test_the_launch_command_is_found_from_what_is_on_disk(tmp_path):
     assert find_launch(tmp_path, "neoforge") is None
     args = tmp_path / "libraries" / "net" / "neoforged" / "neoforge" / "21.1.77"

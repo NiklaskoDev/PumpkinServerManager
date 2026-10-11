@@ -39,6 +39,9 @@ MANIFEST_NAME = ".pumpkin-manager/manifest.json"
 KINDS = ("manual", "scheduled", "pre-update", "pre-restore", "pre-delete", "uploaded", "imported")
 COLD_KINDS = {"pre-update", "pre-restore", "pre-delete"}
 PROGRESS_STEP_BYTES = 8 * 1024 * 1024
+# Never part of a backup, whatever the server's own exclusions say: Minecraft recreates session.lock at every start, and Java
+# holds it with a mandatory lock on Windows, so a running server's copy cannot even be read there.
+ALWAYS_EXCLUDED = ("session.lock",)
 # What a Java server prints when it has done what the backup asked of it (vanilla and modded alike).
 _SAVE_OFF_RE = re.compile(r"Automatic saving is now disabled", re.IGNORECASE)
 _SAVED_RE = re.compile(r"Saved the (game|world)", re.IGNORECASE)
@@ -418,7 +421,7 @@ class BackupService:
         ctx.step(f"Creating archive ({human_bytes(total)} of data)")
         try:
             try:
-                result = await asyncio.to_thread(write_archive, src, partial, manifest, rec.policy.backup_exclude, report)
+                result = await asyncio.to_thread(write_archive, src, partial, manifest, [*rec.policy.backup_exclude, *ALWAYS_EXCLUDED], report)
             finally:
                 if saved_off:
                     await self._resume_saving(rec, ctx)

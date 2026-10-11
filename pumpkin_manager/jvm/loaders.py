@@ -29,6 +29,7 @@ FABRIC_META = "https://meta.fabricmc.net/v2"
 QUILT_META = "https://meta.quiltmc.org/v3"
 FORGE_MAVEN = "https://maven.minecraftforge.net/net/minecraftforge/forge"
 NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged"
+QUILT_DOWNLOAD_HOSTS = frozenset({"maven.quiltmc.org"})  # where Quilt's metadata sends installers; nothing else is followed
 
 LOADERS = {"fabric": "Fabric", "quilt": "Quilt", "forge": "Forge", "neoforge": "NeoForge"}
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
@@ -165,8 +166,10 @@ class LoaderInstaller:
             raise LoaderError("Quilt's download service did not name an installer version.")
         newest = installers[0]
         jar = server_dir / f"quilt-installer-{newest['version']}.jar"
+        # Quilt's metadata lists a size and hashes for the installer, but the real service's SHA-256 for 0.15.1 does not match the
+        # file (nor its Maven repository), so the checksum is the one the repository publishes next to the file, like for Forge.
         await download(
-            self._client, newest["url"], jar, size=newest.get("file_size"), sha256=(newest.get("hashes") or {}).get("sha256"),
+            self._client, newest["url"], jar, sha256=await self._checksum(newest["url"]), allowed_hosts=QUILT_DOWNLOAD_HOSTS,
             what="the Quilt installer", delay=self._delay,
         )
         argv = [

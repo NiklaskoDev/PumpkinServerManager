@@ -49,6 +49,7 @@ class Runtime:
     stopping_requested: bool = False
     ready_re: re.Pattern[str] = READY_RE  # the console line that says the server is up
     timeout_hint: str = PUMPKIN_START_HINT  # what to suggest when it never comes up
+    strict_ping: bool = False  # a server-list reply only counts as "up" when it names a version (Forge answers early with none)
     log: deque = field(default_factory=lambda: deque(maxlen=BACKLOG_LINES))
     seq: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -122,6 +123,7 @@ class ProcessManager:
         ready_timeout: float,
         ready_re: re.Pattern[str] | None = None,
         timeout_hint: str | None = None,
+        strict_ping: bool = False,
     ) -> None:
         rt = self.runtime(server_id)
         if rt.is_active:
@@ -130,6 +132,7 @@ class ProcessManager:
         self._reset_for_start(rt)
         rt.ready_re = ready_re or READY_RE
         rt.timeout_hint = PUMPKIN_START_HINT if timeout_hint is None else timeout_hint
+        rt.strict_ping = strict_ping
         self._open_logfile(rt)
         self._sys(rt, f"Starting: {' '.join(argv)}")
         creation: dict[str, Any] = {}
@@ -316,9 +319,22 @@ class ProcessManager:
             except Exception:
                 log.exception("on_exit handler failed for %s", rt.server_id)
 
+    @staticmethod
+    async def _pause(rt: Runtime, seconds: float) -> None:
+        """Sleep, but wake up as soon as the console says the server is up or the process ends."""
+        waiting = [asyncio.ensure_future(rt.ready.wait()), asyncio.ensure_future(rt.exited.wait())]
+        try:
+            await asyncio.wait(waiting, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in waiting:
+                task.cancel()
+
     async def _wait_ready(self, rt: Runtime, port: int | None, timeout: float) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        # A Java server announces on its console when it is up. Pinging it meanwhile only fills that console (Forge logs every
+        # ping it answers before the world is loaded), so it is asked rarely, and the console line ends the wait at once.
+        pause = 5.0 if rt.strict_ping else 0.4
         while True:
             if rt.exited.is_set():
                 raise ProcessError(self._describe_early_exit(rt))
@@ -326,8 +342,9 @@ class ProcessManager:
                 return
             if port:
                 try:
-                    await server_list_ping("127.0.0.1", port, timeout=1.5)
-                    return
+                    info = await server_list_ping("127.0.0.1", port, timeout=1.5)
+                    if info["version"] or not rt.strict_ping:
+                        return
                 except PingError:
                     pass
             if loop.time() > deadline:
@@ -335,7 +352,7 @@ class ProcessManager:
                     f"The server did not become ready within {int(timeout)} seconds. Check the console output"
                     f"{'; ' + rt.timeout_hint if rt.timeout_hint else '.'}"
                 )
-            await asyncio.sleep(0.4)
+            await self._pause(rt, pause)
 
     def _describe_early_exit(self, rt: Runtime) -> str:
         tail = [strip_ansi(line["m"]) for line in list(rt.log)[-6:] if line["s"] == "out"]

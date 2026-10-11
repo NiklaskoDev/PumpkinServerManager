@@ -228,6 +228,18 @@ async def test_a_server_that_crashes_while_starting_reports_what_it_said(jvm):
     assert row["status"] == "failed" and "simulated crash" in row["message"] and ctx.pm.runtime(rec.id).state == "crashed"
 
 
+async def test_a_server_that_opens_its_port_early_is_not_called_up_before_it_says_done(jvm):
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "EarlyPort", start=False)
+    world.behavior["early_empty_status"] = 2.0  # Forge listens long before the world is loaded and answers pings with an empty status
+    row = await finish(ctx, ctx.servers.submit_start(rec))
+    assert row["status"] == "success", row["message"]
+    lines = [line["m"] for line in ctx.pm.backlog(rec.id, 200)]
+    assert any("Done (" in line for line in lines), "the start must wait for the 'Done' line, not for the first answer on the port"
+    assert ctx.pm.runtime(rec.id).state == "running"
+    assert sum("still starting" in line for line in lines) <= 2, "the console is not filled with readiness probes while the server loads"
+
+
 async def test_a_server_that_never_says_done_is_stopped_with_a_hint_about_slow_modpacks(jvm):
     world, ctx = jvm
     rec = await create_java_server(ctx, "Slow", start=False, policy={"start_timeout": 15})  # 15 seconds is the shortest allowed
@@ -280,6 +292,8 @@ async def test_backups_skip_logs_and_crash_reports_but_keep_mods_and_the_world(j
     (directory / "logs" / "latest.log").write_text("noise")
     (directory / "crash-reports").mkdir(exist_ok=True)
     (directory / "crash-reports" / "crash.txt").write_text("noise")
+    (directory / "world").mkdir(exist_ok=True)
+    (directory / "world" / "session.lock").write_text("held by Java")  # on Windows a running server's copy cannot even be read
     row = await finish(ctx, ctx.backups.submit_backup(rec, "manual"))
     assert row["status"] == "success", row["message"]
     backup = ctx.repo.list_backups(rec.id)[0]
@@ -290,6 +304,7 @@ async def test_backups_skip_logs_and_crash_reports_but_keep_mods_and_the_world(j
         names = tar.getnames()
     assert any(n.endswith("mods/lithium.jar") for n in names) and any(n.endswith("world/level.dat") for n in names)
     assert not any("latest.log" in n or "crash.txt" in n for n in names)
+    assert not any(n.endswith("session.lock") for n in names), "the lock file is recreated at every start and never belongs in a backup"
 
 
 async def test_modpack_servers_are_not_offered_pumpkin_updates(jvm):

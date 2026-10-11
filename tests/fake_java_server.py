@@ -86,7 +86,12 @@ def varint(value: int) -> bytes:
             return bytes(out)
 
 
+loading = False  # Forge listens long before the world is loaded and answers pings with an empty status until then
+
+
 def status_json() -> str:
+    if loading:
+        return json.dumps({"version": {"name": "", "protocol": 0}, "players": {"max": 0, "online": 0}, "description": {"text": ""}})
     return json.dumps({
         "version": {"name": str(BEHAVIOR.get("minecraft", "1.21.1")), "protocol": 767},
         "players": {"max": int(PROPS.get("max-players", "20")), "online": len(players), "sample": [{"name": p, "id": "0"} for p in players]},
@@ -103,6 +108,8 @@ async def slp_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
             if packet_id == 0 and len(packet) > 1:
                 continue
             if packet_id == 0:
+                if loading:
+                    log("Disconnecting Player (server is still starting)", thread="Netty Server IO #1")  # Forge says so for every ping
                 body = status_json().encode()
                 payload = varint(0) + varint(len(body)) + body
                 writer.write(varint(len(payload)) + payload)
@@ -199,7 +206,7 @@ def eula_accepted() -> bool:
 
 
 async def main() -> int:
-    global stop_event, loop
+    global stop_event, loop, loading
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     Path("fake-java.json").write_text(json.dumps({"argv": ARGV, "java_home": os.environ.get("JAVA_HOME"), "path": os.environ.get("PATH", ""), "cwd": os.getcwd()}))
@@ -227,6 +234,11 @@ async def main() -> int:
         KEEP_ALIVE.append(await asyncio.start_server(slp_client, "0.0.0.0", port))
     threading.Thread(target=stdin_reader, daemon=True).start()
     log(f"Starting Minecraft server on *:{port}")
+    if BEHAVIOR.get("early_empty_status"):
+        loading = True
+        log('Preparing level "world"')
+        await asyncio.sleep(float(BEHAVIOR["early_empty_status"]))
+        loading = False
     if not BEHAVIOR.get("no_done_line"):
         log('Done (1.234s)! For help, type "help"')
     await stop_event.wait()

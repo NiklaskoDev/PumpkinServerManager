@@ -376,7 +376,7 @@ class ServerService:
         try:
             await self.pm.start(
                 rec.id, argv, directory, env, ready_port=rec.java_port, ready_timeout=rec.policy.start_timeout,
-                ready_re=ready_re, timeout_hint=timeout_hint,
+                ready_re=ready_re, timeout_hint=timeout_hint, strict_ping=rec.is_java,
             )
         except ProcessError as exc:
             self.reporter.record("error", "start", f"'{rec.name}' failed to start: {exc}", rec.id, notify="crashed", title=f"{rec.name} failed to start")
