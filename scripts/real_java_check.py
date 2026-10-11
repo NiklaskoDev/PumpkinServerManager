@@ -269,13 +269,13 @@ async def check_server(
     for _ in range(15):  # for a moment after "Done" some servers close the first status requests (Vanilla Perfected on 26.3) or
         try:             # still answer with Forge's empty status (version "", 0/0 players, no motd; Create+ on Forge 1.19.2)
             info = await server_list_ping("127.0.0.1", server.java_port, timeout=10)
-            if info["version"]:
+            if info["version"] and info["max"]:  # Forge fills the status in pieces: the version and motd first, the player limit a moment later
                 break
-            failure = RuntimeError("the status is still empty")
+            failure = RuntimeError("the status is still incomplete")
         except Exception as exc:  # noqa: BLE001
             failure = exc
         await asyncio.sleep(2)
-    if info is None or not info["version"]:
+    if info is None or not (info["version"] and info["max"]):
         check(False, "the server answers the server-list ping", repr(failure))
         info = None
     if info:
