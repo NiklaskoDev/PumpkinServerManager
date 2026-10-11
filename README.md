@@ -261,6 +261,9 @@ their username). *New password* in the accounts list gives an account a fresh te
 everywhere; deleting an account ends its sessions at once. A friend's password can also be reset from the container with
 `python -m pumpkin_manager reset-password --user <name>`, which makes it temporary as well.
 
+Friends sign in at the same address you use. Friends outside your home network need a way to reach the dashboard: use a
+VPN or an HTTPS reverse proxy as described under [Security](#security), not a plain port forward of the dashboard port.
+
 What an account may do is enforced by the server on every request, and the live updates pushed to the browser are
 filtered the same way, so a friend's browser never even receives events about other servers. A server the account has
 no role on answers exactly like one that does not exist. Role changes take effect on the next request.
