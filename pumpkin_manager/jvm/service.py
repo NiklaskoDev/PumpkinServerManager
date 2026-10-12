@@ -29,13 +29,25 @@ from ..jobs import JobContext
 from ..models import ServerPolicy, ServerRecord
 from ..pumpkin_config import ConfigError
 from ..servers import ServerError
-from ..util import atomic_write_text, iso
+from ..util import atomic_write_text, human_bytes, iso
+from . import missingmods
 from . import properties as props
+from .curseforge import (
+    RELEASE_TYPES,
+    CurseForgeClient,
+    SearchUnavailable,
+    is_curseforge_pack,
+    page_link,
+    read_manifest,
+    summarize_file,
+    summary_of_upload,
+    version_name,
+)
 from .loaders import LoaderInstaller, find_launch, launch_arguments
 from .modrinth import ModrinthClient, parse_project_reference, summarize_version
 from .mojang import MojangMeta, available_java
 from .mrpack import LOCK_DIR, LOCK_NAME, PackError, PackIndex, PackInstaller, override_mods, read_pack
-from .net import DownloadError
+from .net import DownloadError, ProgressCallback
 from .runtime import JavaRuntimes
 
 if TYPE_CHECKING:
@@ -66,8 +78,28 @@ def client_only_info(index: PackIndex) -> dict[str, Any]:
     return {"client_only": sorted(index.client_only)[:400], "client_only_count": len(index.client_only)}
 
 
+def manual_info(index: PackIndex) -> dict[str, Any]:
+    """The mods that have to be added by hand (their authors do not allow downloading them automatically), for the dashboard."""
+    return {"manual": [{"path": f.path, "name": f.name, "page": f.page} for f in index.manual][:300], "manual_count": len(index.manual)}
+
+
+@dataclass
+class OpenedPack:
+    """A modpack that is ready to install: what it holds, what the server will remember about it, and the files to delete after."""
+
+    index: PackIndex
+    path: Path  # the pack zip (the manifest and the configuration folders)
+    info: dict[str, Any]
+    temp: list[Path]
+
+    def cleanup(self) -> None:
+        for path in self.temp:
+            path.unlink(missing_ok=True)
+
+
 def default_jvm_flags(java_major: int) -> list[str]:
-    flags = ["-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"]
+    # No screen: mods that ask for a window get an error they can handle instead of looking for a display (the container has none).
+    flags = ["-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-Djava.awt.headless=true"]
     if java_major <= 8:
         flags.append("-XX:+UseG1GC")  # Java 8 still defaults to the throughput collector
     return flags
@@ -85,12 +117,13 @@ class JavaLaunch:
 class JavaServerService:
     def __init__(
         self, svc: ServerService, runtimes: JavaRuntimes, mojang: MojangMeta, modrinth: ModrinthClient, loaders: LoaderInstaller,
-        packs: PackInstaller, uploads_dir: Path,
+        packs: PackInstaller, uploads_dir: Path, curseforge: CurseForgeClient,
     ):
         self.svc = svc
         self.runtimes = runtimes
         self.mojang = mojang
         self.modrinth = modrinth
+        self.curseforge = curseforge
         self.loaders = loaders
         self.packs = packs
         self.uploads_dir = uploads_dir
@@ -148,6 +181,7 @@ class JavaServerService:
             "version_number": pack.get("version_number"), "pending": pack.get("pending"), "can_roll_back": bool(spec.get("previous")),
             "client_only": pack.get("client_only", []), "client_only_count": pack.get("client_only_count", 0),
             "leave_out_client_only": spec.get("leave_out_client_only", True), "minecraft": spec.get("minecraft"),
+            "server_pack": bool(pack.get("server_pack")), "manual": self._missing_manual(rec, pack),
             "loader": {"kind": loader.get("kind"), "version": loader.get("version"), "label": f"{label} {loader.get('version', '')}".strip()},
         }
         installed = self.runtimes.get(int(spec.get("java") or 0))
@@ -156,6 +190,14 @@ class JavaServerService:
             "runtime": installed.release if installed else None,
         }
         return modpack, java
+
+    def _missing_manual(self, rec: ServerRecord, pack: dict[str, Any]) -> list[dict[str, Any]]:
+        """The mods that have to be added by hand and are not in the server's mods folder yet."""
+        wanted = pack.get("manual") or []
+        if not wanted:
+            return []
+        directory = self.svc.server_dir(rec.id)
+        return [m for m in wanted if not (directory / str(m.get("path", "-"))).is_file()]
 
     # ------------------------------------------------------------------ create
     async def create(self, spec: dict[str, Any], ctx: JobContext) -> ServerRecord:
@@ -179,18 +221,23 @@ class JavaServerService:
 
         modpack = spec.get("modpack") or {}
         staging = svc.settings.servers_dir / f".create-{uuid.uuid4().hex}"
-        pack_path: Path | None = None
-        downloaded = False
+        opened: OpenedPack | None = None
         try:
             ctx.step("Looking up the modpack")
-            pack_path, pack_info, downloaded = await self._obtain_pack(modpack, ctx)
-            index = read_pack(pack_path)
             leave_out = spec.get("leave_out_client_only") is not False
-            if leave_out:
-                await self.leave_out_client_only(index, ctx, pack_path)
-            pack_info = {**pack_info, **client_only_info(index)}
+            opened = await self.open_pack(modpack, ctx, leave_out=leave_out)
+            index, pack_path, pack_info = opened.index, opened.path, opened.info
             overview = index.summary_public()
             ctx.step(f"{index.name} {index.version_id}: Minecraft {index.minecraft}, {index.loader.label}, {mods_text(overview['mods'])}")
+            for reason, count in index.archive_notes.items():
+                ctx.step(f"Not taken over from the pack's server files: {count} file{'' if count == 1 else 's'} ({reason})")
+            if index.manual:
+                few = len(index.manual) == 1
+                ctx.warn(
+                    f"{mods_text(len(index.manual))} cannot be downloaded automatically: "
+                    f"{'its author does not allow it' if few else 'their authors do not allow it'}. {'It is' if few else 'They are'} listed "
+                    f"in the Modpack tab with a link{'' if few else ' to each'}; add {'it' if few else 'them'} to the mods folder yourself."
+                )
 
             major = available_java(await self.mojang.java_major(index.minecraft))
             ctx.step(f"Minecraft {index.minecraft} needs Java {major}")
@@ -232,28 +279,34 @@ class JavaServerService:
                     raise
         finally:
             shutil.rmtree(staging, ignore_errors=True)
-            if pack_path is not None and downloaded:
-                pack_path.unlink(missing_ok=True)
+            if opened is not None:
+                opened.cleanup()
         if modpack.get("source") == "upload":
             self._forget_upload(modpack.get("upload"))
         ctx.claim(rec.id)
         ctx.step(f"Server '{name}' created on port {java_port}")
         svc.reporter.record("success", "server", f"Server '{name}' created ({index.name}, port {java_port})", rec.id)
         svc.publish_state(rec.id)
-        if spec.get("start", True):
+        if spec.get("start", True) and index.manual:
+            ctx.step("The server is not started yet: add the mods listed in the Modpack tab first, then start it")
+        elif spec.get("start", True):
             ctx.step("Starting the server for the first time (the world is generated now, which takes a while)")
             await svc._do_start(rec, ctx)
         return rec
 
     async def leave_out_client_only(self, index: PackIndex, ctx: JobContext, pack_path: Path | None = None) -> None:
-        """Drop the mods Modrinth says do not work on a server, although the pack lists them for it.
+        """Drop the mods that only work on a client, although the pack lists them for the server.
 
         Packs exported from a client launcher mark nearly every file "required" on the server, client-only mods (minimaps, shaders,
-        menus, ...) included, and many of those stop a server from starting. The mod's own project knows better. Mods that the
-        pack ships inside its override folders are looked up too, and a mod that another mod needs stays, whatever its own
-        project says about servers (a client-only library that a server mod depends on is still needed there)."""
-        candidates = [f for f in index.server_files if any(urlsplit(u).hostname == "cdn.modrinth.com" for u in f.urls)]
-        shipped = await asyncio.to_thread(override_mods, pack_path) if pack_path is not None else {}
+        menus, ...) included, and many of those stop a server from starting. Modrinth knows for every mod whether it can run on a
+        server (looked up by the file's checksum, also for packs from CurseForge, whose files are mostly on both), and CurseForge
+        tags files for clients. Mods that the pack ships inside its override folders are looked up too, and a mod that another
+        mod needs stays, whatever its own project says about servers (a client-only library that a server mod depends on is
+        still needed there). A pack's own server files are left as they are: the author already chose them."""
+        if index.archive is not None:
+            return
+        candidates = [f for f in index.server_files if f.sha1]
+        shipped = await asyncio.to_thread(override_mods, pack_path, index.override_prefixes) if pack_path is not None else {}
         hashes = [f.sha1 for f in candidates] + list(shipped.values())
         if not hashes:
             return
@@ -261,26 +314,45 @@ class JavaServerService:
         try:
             support = await self.modrinth.server_support(hashes)
         except DownloadError as exc:
-            raise self._error(f"Could not ask Modrinth which mods are client-only: {exc}") from exc
-        client_only = {sha1 for sha1 in hashes if support.get(sha1, {}).get("side") == "unsupported"}
-        needed = {need for sha1 in hashes if sha1 not in client_only for need in support.get(sha1, {}).get("requires", [])}
+            if index.source == "modrinth":
+                raise self._error(f"Could not ask Modrinth which mods are client-only: {exc}") from exc
+            ctx.warn(f"Modrinth could not be asked which mods are client-only ({exc}); only CurseForge's own tags are used")
+            support = {}
+        # One entry per file: the names the sources know it by, the ones it needs, and whether it is meant for clients only.
+        facts: dict[str, tuple[set[str], set[str], bool]] = {}
+
+        def describe(key: str, sha1: str, project: str = "", requires: tuple[str, ...] = (), hint: bool = False) -> None:
+            known = support.get(sha1) or {}
+            idents = {project} if project else set()
+            needs = set(requires)
+            if known:
+                idents.add("mr:" + known["project"])
+                needs |= {"mr:" + r for r in known["requires"]}
+            facts[key] = (idents, needs, hint or known.get("side") == "unsupported")
+
+        for f in candidates:
+            describe(f.path, f.sha1, f.project, f.requires, f.client_hint)
+        for path, sha1 in shipped.items():
+            describe("override:" + path, sha1)
+        client_only = {key for key, (_, _, client) in facts.items() if client}
+        needed = {need for key, (_, needs, client) in facts.items() if not client for need in needs}
         kept: set[str] = set()
         grew = True
         while grew:  # something that stays can need a client-only library, which can need another one
             grew = False
-            for sha1 in client_only - kept:
-                if support[sha1]["project"] in needed:
-                    kept.add(sha1)
-                    needed.update(support[sha1]["requires"])
+            for key in client_only - kept:
+                if facts[key][0] & needed:
+                    kept.add(key)
+                    needed |= facts[key][1]
                     grew = True
         out = client_only - kept
-        paths = [f.path for f in candidates if f.sha1 in out]
-        shipped_paths = [path for path, sha1 in shipped.items() if sha1 in out]
+        paths = [f.path for f in candidates if f.path in out]
+        shipped_paths = [path for path in shipped if "override:" + path in out]
         index.leave_out(paths)
         index.leave_out_overrides(shipped_paths)
         count = len(paths) + len(shipped_paths)
         if count:
-            ctx.step(f"Leaving out {mods_text(count)} that Modrinth says {'does' if count == 1 else 'do'} not work on a server")
+            ctx.step(f"Leaving out {mods_text(count)} that only work{'s' if count == 1 else ''} on a client")
         if kept:
             ctx.step(f"Keeping {mods_text(len(kept))} that only work{'s' if len(kept) == 1 else ''} on a client, because other mods in the pack need {'it' if len(kept) == 1 else 'them'}")
 
@@ -290,45 +362,205 @@ class JavaServerService:
 
         return callback
 
-    async def _obtain_pack(self, modpack: dict[str, Any], ctx: JobContext) -> tuple[Path, dict[str, Any], bool]:
-        """The .mrpack to install: (file, what the server remembers about it, whether the file is ours to delete)."""
+    # ------------------------------------------------------------------ opening a pack
+    async def open_pack(self, modpack: dict[str, Any], ctx: JobContext, *, leave_out: bool = True) -> OpenedPack:
+        """Fetch and read the modpack a new server is made from (Modrinth, CurseForge or an uploaded file)."""
         source = modpack.get("source")
-        if source == "upload":
+        if source == "curseforge":
+            try:
+                project = await self.curseforge.project(str(modpack.get("project", "")))
+                files = await self.curseforge.files(project["id"])
+            except DownloadError as exc:
+                raise self._error(str(exc)) from exc
+            if not files:
+                raise self._error(f"'{project.get('name')}' has no versions that can be installed.")
+            wanted = modpack.get("version")
+            if wanted:
+                file = next((f for f in files if str(f["id"]) == str(wanted)), None)
+                if file is None:
+                    raise self._error("That version of the modpack does not exist (any more).")
+            else:
+                file = next((f for f in files if f.get("releaseType") == 1), files[0])
+            opened = await self._download_curseforge(project, file, ctx, want_server_pack=modpack.get("server_pack") is not False)
+        elif source == "upload":
             path = self._upload_path(modpack.get("upload"))
-            index = read_pack(path)
-            return path, {"source": "upload", "title": index.name, "version_number": index.version_id}, False
-        if source != "modrinth":
-            raise self._error("Choose a modpack: search Modrinth, paste a link, or upload a .mrpack file.")
+            if is_curseforge_pack(path):
+                manifest = read_manifest(path)
+                info = {"source": "upload", "title": manifest.name, "version_number": manifest.version, "format": "curseforge"}
+                try:
+                    index = await self.curseforge.build_index(manifest, info, server_pack=None, say=ctx.step)
+                except DownloadError as exc:
+                    raise self._error(str(exc)) from exc
+                opened = OpenedPack(index, path, info, [])
+            else:
+                index = read_pack(path)
+                opened = OpenedPack(index, path, {"source": "upload", "title": index.name, "version_number": index.version_id}, [])
+        elif source == "modrinth":
+            opened = await self._download_modrinth(modpack, ctx)
+        else:
+            raise self._error("Choose a modpack: search Modrinth or CurseForge, paste a link, or upload a pack file.")
         try:
-            reference = parse_project_reference(str(modpack.get("project", "")))
-            project = await self.modrinth.project(reference)
-            versions = await self.modrinth.versions(project["id"])
+            await self._wanted_mods(opened, ctx)
+            if leave_out:
+                await self.leave_out_client_only(opened.index, ctx, opened.path)
+        except BaseException:
+            opened.cleanup()
+            raise
+        opened.info = {**opened.info, **client_only_info(opened.index), **manual_info(opened.index)}
+        return opened
+
+    async def _wanted_mods(self, opened: OpenedPack, ctx: JobContext) -> None:
+        """Packs that ship the Missing Mods Checker (Better MC): install the mods its list asks for, and keep that list off the server,
+        where the mod would try to open a window and end the server (see ``missingmods``)."""
+        index = opened.index
+        if index.archive is not None:  # the author's server files hold the mods
+            return
+        try:
+            wanted = await asyncio.to_thread(missingmods.read_wanted, opened.path, index.override_prefixes)
+            if wanted is None:
+                return
+            index.skip_overrides.add(missingmods.CONFIG)
+            present = {path.lower() for path in await asyncio.to_thread(override_mods, opened.path, index.override_prefixes)}
+            await missingmods.add_wanted(index, wanted, present, self.curseforge, ctx.step, ctx.warn)
+        except PackError as exc:
+            index.skip_overrides.add(missingmods.CONFIG)
+            ctx.warn(f"{exc} The list is ignored, so mods that the Missing Mods Checker would have asked for may be missing.")
+
+    async def pack_versions(self, source: str, project: str, title: str = "") -> list[dict[str, Any]]:
+        """The versions of a modpack, newest first, in the shape the dashboard shows them."""
+        if source == "curseforge":
+            return [summarize_file(f, title) for f in await self.curseforge.files(project)]
+        return [summarize_version(v) for v in await self.modrinth.versions(project)]
+
+    async def open_version(
+        self, rec: ServerRecord, version_id: str, ctx: JobContext, announce: Callable[[str], None] | None = None
+    ) -> OpenedPack:
+        """Fetch and read another version of the modpack a server was made from (for an update). ``announce`` hears the version's
+        name as soon as it is known, before the download starts."""
+        pack = rec.spec.get("pack") or {}
+        if pack.get("source") == "curseforge":
+            try:
+                project = await self.curseforge.project(str(pack.get("project")))
+                file = await self.curseforge.file(project["id"], version_id)
+            except DownloadError as exc:
+                raise self._error(str(exc)) from exc
+            if file.get("isServerPack") or file.get("modId") != project["id"]:
+                raise self._error("That version belongs to another modpack.")
+            if announce:
+                announce(version_name(str(project.get("name") or ""), file.get("displayName")) or version_id)
+            from_server_pack = bool(pack.get("server_pack"))
+            opened = await self._download_curseforge(project, file, ctx, want_server_pack=from_server_pack, require_server_pack=from_server_pack)
+        else:
+            try:
+                version = await self.modrinth.version(version_id)
+            except DownloadError as exc:
+                raise self._error(str(exc)) from exc
+            if version.get("project_id") != pack.get("project"):
+                raise self._error("That version belongs to another modpack.")
+            if announce:
+                announce(str(version.get("version_number") or version_id))
+            opened = await self._download_modrinth({"project": pack.get("project"), "version": version_id}, ctx, version=version)
+        try:
+            await self._wanted_mods(opened, ctx)
+            if rec.spec.get("leave_out_client_only", True):
+                await self.leave_out_client_only(opened.index, ctx, opened.path)
+        except BaseException:
+            opened.cleanup()
+            raise
+        opened.info = {**opened.info, **client_only_info(opened.index), **manual_info(opened.index)}
+        return opened
+
+    async def _download_modrinth(self, modpack: dict[str, Any], ctx: JobContext, version: dict[str, Any] | None = None) -> OpenedPack:
+        try:
+            project: dict[str, Any] = {}
+            if version is None:
+                reference = parse_project_reference(str(modpack.get("project", "")))
+                project = await self.modrinth.project(reference)
+                versions = await self.modrinth.versions(project["id"])
+                if not versions:
+                    raise self._error(f"'{project['title']}' has no versions that can be installed.")
+                wanted = modpack.get("version")
+                if wanted:
+                    version = next((v for v in versions if v["id"] == wanted), None)
+                    if version is None:
+                        raise self._error("That version of the modpack does not exist (any more).")
+                else:
+                    version = next((v for v in versions if v.get("version_type") == "release"), versions[0])
+            else:
+                project = await self.modrinth.project(version["project_id"])
         except DownloadError as exc:
             raise self._error(str(exc)) from exc
-        if not versions:
-            raise self._error(f"'{project['title']}' has no versions that can be installed.")
-        wanted = modpack.get("version")
-        if wanted:
-            version = next((v for v in versions if v["id"] == wanted), None)
-            if version is None:
-                raise self._error("That version of the modpack does not exist (any more).")
-        else:
-            version = next((v for v in versions if v.get("version_type") == "release"), versions[0])
         ctx.step(f"Downloading {project['title']} {version.get('version_number')}")
         path = self.uploads_dir / f"{uuid.uuid4().hex}.mrpack"
         try:
             await self.modrinth.download_pack(
                 version, path, lambda done, total: ctx.progress(0.2 + 0.05 * (done / total if total else 0), "Downloading the modpack file")
             )
+            index = read_pack(path)
         except DownloadError as exc:
             path.unlink(missing_ok=True)
             raise self._error(str(exc)) from exc
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
         info = {
             "source": "modrinth", "project": project["id"], "slug": project.get("slug"), "title": project["title"],
             "icon": project.get("icon_url"), "version_id": version["id"], "version_number": version.get("version_number"),
             "published": version.get("date_published"), "version_type": version.get("version_type", "release"),
         }
-        return path, info, True
+        return OpenedPack(index, path, info, [path])
+
+    async def _download_curseforge(
+        self, project: dict[str, Any], file: dict[str, Any], ctx: JobContext, *, want_server_pack: bool, require_server_pack: bool = False,
+    ) -> OpenedPack:
+        """Download one version of a CurseForge modpack (and the author's server pack for it, when wanted and there is one)."""
+        cf = self.curseforge
+        title = f"{project.get('name')} {file.get('displayName') or ''}".strip()
+        temp: list[Path] = []
+
+        def shown(what: str) -> ProgressCallback:
+            return lambda done, total: ctx.progress(0.2 + 0.05 * (done / total if total else 0), f"Downloading {what} ({done // 1048576} of {total // 1048576} MiB)")
+
+        try:
+            ctx.step(f"Downloading {title}")
+            pack_path = self.uploads_dir / f"{uuid.uuid4().hex}.zip"
+            temp.append(pack_path)
+            await cf.download(file, pack_path, what=title, progress=shown("the modpack file"))
+            manifest = read_manifest(pack_path)
+            server_path: Path | None = None
+            server_id = file.get("serverPackFileId")
+            if want_server_pack and server_id:
+                server_file = await cf.file(project["id"], server_id)
+                if not server_file.get("downloadUrl"):
+                    if require_server_pack:
+                        raise self._error("The author does not allow this version's server files to be downloaded automatically.")
+                else:
+                    ctx.step(f"Downloading the pack's own server files ({human_bytes(server_file.get('fileLength') or 0)})")
+                    server_path = self.uploads_dir / f"{uuid.uuid4().hex}.zip"
+                    temp.append(server_path)
+                    await cf.download(server_file, server_path, what="the server files", progress=shown("the server files"))
+            elif require_server_pack:
+                raise self._error("This version has no server files of its own, but the server was installed from such files.")
+            info = {
+                "source": "curseforge", "project": str(project["id"]), "slug": project.get("slug"), "title": project.get("name"),
+                "icon": (project.get("logo") or {}).get("thumbnailUrl"), "version_id": str(file["id"]),
+                "version_number": version_name(str(project.get("name") or ""), file.get("displayName")) or manifest.version,
+                "published": file.get("fileDate"),
+                "version_type": RELEASE_TYPES.get(file.get("releaseType"), "release"),
+            }
+            index = await cf.build_index(manifest, info, server_pack=server_path, say=ctx.step)
+            if require_server_pack and index.archive is None:
+                raise self._error("This version's server files hold no mods, but the server was installed from server files with mods.")
+            info["server_pack"] = index.archive is not None
+            return OpenedPack(index, pack_path, info, temp)
+        except DownloadError as exc:
+            for path in temp:
+                path.unlink(missing_ok=True)
+            raise self._error(str(exc)) from exc
+        except BaseException:
+            for path in temp:
+                path.unlink(missing_ok=True)
+            raise
 
     # ----------------------------------------------------------------- uploads
     def _upload_path(self, upload_id: Any) -> Path:
@@ -355,7 +587,8 @@ class JavaServerService:
                     if size > MAX_UPLOAD_BYTES:
                         raise self._error("That file is too large for a modpack (limit 1 GiB).")
                     await asyncio.to_thread(out.write, chunk)
-            return {"upload": upload_id, "pack": read_pack(path).summary_public()}
+            summary = summary_of_upload(path) if is_curseforge_pack(path) else read_pack(path).summary_public()
+            return {"upload": upload_id, "pack": summary}
         except BaseException:
             path.unlink(missing_ok=True)
             raise
@@ -374,7 +607,7 @@ class JavaServerService:
         if url in self._icons:
             return self._icons[url]
         try:
-            icon = await self.modrinth.fetch_image(url)
+            icon = await (self.curseforge if (urlsplit(url).hostname or "") == "media.forgecdn.net" else self.modrinth).fetch_image(url)
         except DownloadError as exc:
             raise self._error(str(exc)) from exc
         if len(self._icons) >= 300:
@@ -382,13 +615,44 @@ class JavaServerService:
         self._icons[url] = icon
         return icon
 
-    async def search_packs(self, query: str, offset: int = 0) -> dict[str, Any]:
+    def sources(self) -> dict[str, Any]:
+        """Where modpacks can come from, and whether each source is ready to use."""
+        return {"modrinth": {"enabled": True}, "curseforge": {"enabled": self.curseforge.enabled, "search": self.curseforge.search_allowed}}
+
+    async def search_packs(self, query: str, offset: int = 0, source: str = "modrinth") -> dict[str, Any]:
+        if source == "curseforge":
+            try:
+                return {**await self.curseforge.search(query, offset=offset), "search": True}
+            except SearchUnavailable as exc:
+                # The key may not search: show what CurseForge itself lists, and let the person add a pack by its project number.
+                try:
+                    hits = await self.curseforge.featured()
+                except DownloadError as inner:
+                    raise self._error(str(inner)) from inner
+                needle = query.strip().lower()
+                shown = [h for h in hits if needle in (h["title"] or "").lower()] if needle else hits
+                return {"hits": shown, "total": len(shown), "search": False, "note": str(exc)}
+            except DownloadError as exc:
+                raise self._error(str(exc)) from exc
         try:
             return await self.modrinth.search(query, offset=offset)
         except DownloadError as exc:
             raise self._error(str(exc)) from exc
 
-    async def pack_details(self, reference: str) -> dict[str, Any]:
+    async def pack_details(self, reference: str, source: str = "modrinth") -> dict[str, Any]:
+        if source == "curseforge" or "curseforge.com" in reference.lower() or reference.strip().isdigit():
+            try:
+                project = await self.curseforge.project(reference)
+                files = await self.curseforge.files(project["id"])
+            except DownloadError as exc:
+                raise self._error(str(exc)) from exc
+            logo = project.get("logo") or {}
+            return {
+                "id": str(project["id"]), "slug": project.get("slug"), "title": project.get("name"), "description": project.get("summary"),
+                "icon_url": logo.get("thumbnailUrl") or logo.get("url"), "downloads": project.get("downloadCount", 0),
+                "versions": [summarize_file(f, str(project.get("name") or "")) for f in files], "source": "curseforge",
+                "page": page_link(project.get("slug"), str(project["id"])),
+            }
         try:
             project = await self.modrinth.project(reference)
             versions = await self.modrinth.versions(project["id"])
@@ -397,7 +661,7 @@ class JavaServerService:
         return {
             "id": project["id"], "slug": project.get("slug"), "title": project["title"], "description": project.get("description"),
             "icon_url": project.get("icon_url"), "downloads": project.get("downloads", 0),
-            "versions": [summarize_version(v) for v in versions],
+            "versions": [summarize_version(v) for v in versions], "source": "modrinth",
         }
 
     # ------------------------------------------------------------------- config

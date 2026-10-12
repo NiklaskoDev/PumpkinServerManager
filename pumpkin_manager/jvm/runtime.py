@@ -23,7 +23,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from ..util import dir_size, free_bytes, iso
+from ..util import dir_size, free_bytes, iso, plain_environment
 from .net import BadDownloadError, DownloadError, ProgressCallback, download, get_json, new_client
 
 log = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ async def run_java_version(java: Path) -> str:
     """Start the freshly installed Java once: a runtime that cannot run (missing system libraries) is found out now."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            str(java), "-version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            str(java), "-version", env=plain_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
         out, _ = await asyncio.wait_for(proc.communicate(), 60)
     except (OSError, TimeoutError) as exc:

@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -28,7 +29,7 @@ from ..errors import UserError
 from ..util import atomic_write_text, dir_size, free_bytes
 from .loaders import LoaderError, LoaderSpec
 from .modrinth import ALLOWED_DOWNLOAD_HOSTS
-from .net import BadDownloadError, DownloadError, download, require_https
+from .net import BadDownloadError, DownloadError, HeadersFor, download, require_https
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +44,9 @@ MAX_OVERRIDE_BYTES = 4 * 1024**3
 MAX_OVERRIDE_ENTRIES = 100_000
 MAX_OVERRIDE_MODS = 2000  # mod jars inside the override folders that are looked up on Modrinth
 MAX_OVERRIDE_MOD_BYTES = 1024**3
+STAGING_DIR = "curseforge-staging"
+# Where the files of CurseForge packs are hosted (the address in an API answer first goes through edge.forgecdn.net).
+CURSEFORGE_DOWNLOAD_HOSTS = frozenset({"edge.forgecdn.net", "mediafilez.forgecdn.net", "media.forgecdn.net"})
 LOADER_DEPENDENCIES = {"fabric-loader": "fabric", "quilt-loader": "quilt", "forge": "forge", "neoforge": "neoforge"}
 _HEX = {"sha1": re.compile(r"^[0-9a-f]{40}$"), "sha512": re.compile(r"^[0-9a-f]{128}$")}
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -62,10 +66,22 @@ class PackDownloadError(PackError):
 class PackFile:
     path: str
     sha1: str
-    sha512: str
+    sha512: str  # empty for files CurseForge describes: they are identified by their SHA-1
     size: int
     urls: list[str]
     server: str  # required | optional | unsupported
+    # What only the files of a CurseForge pack carry:
+    project: str = ""  # "cf:<project id>": what other files call this one when they require it
+    requires: tuple[str, ...] = ()  # the same kind of ids, of the projects this file needs
+    client_hint: bool = False  # CurseForge tags this file as meant for clients only
+    name: str = ""  # something to show a person
+    page: str = ""  # where to get the file by hand, when the author does not allow automatic downloads
+    manual: bool = False
+
+    @property
+    def key(self) -> str:
+        """What identifies the file's content: its SHA-512, or ``sha1:<hex>`` where that is all the source tells."""
+        return self.sha512 or f"sha1:{self.sha1}"
 
 
 @dataclass
@@ -78,10 +94,20 @@ class PackIndex:
     files: list[PackFile] = field(default_factory=list)
     client_only: list[str] = field(default_factory=list)  # left out because Modrinth says the mod does not work on a server
     skip_overrides: set[str] = field(default_factory=set)  # mods the pack ships inside overrides/ that are left out for the same reason
+    source: str = "modrinth"  # modrinth | curseforge
+    stage: str = field(default_factory=lambda: uuid.uuid4().hex)  # names this install's share of the CurseForge staging area
+    override_prefixes: tuple[str, ...] = ("overrides/", "server-overrides/")  # the folders of the pack zip that hold configuration
+    archive: Any = None  # an archive.ServerPack: the pack's own server files, with the mods and configuration, used instead
+    archive_notes: dict[str, int] = field(default_factory=dict)  # what the server files held that was not taken over, and why
 
     @property
     def server_files(self) -> list[PackFile]:
         return [f for f in self.files if f.server != "unsupported"]
+
+    @property
+    def manual(self) -> list[PackFile]:
+        """Files that have to be added by hand because their authors do not allow downloading them automatically."""
+        return [f for f in self.server_files if f.manual] if self.archive is None else []
 
     def leave_out(self, paths: Iterable[str]) -> None:
         """Treat these files as client-only, as if the pack had said so: they are not downloaded or installed."""
@@ -103,7 +129,9 @@ class PackIndex:
         return {
             "name": self.name, "version": self.version_id, "summary": self.summary, "minecraft": self.minecraft,
             "loader": {"kind": self.loader.kind, "version": self.loader.version, "label": self.loader.label},
-            "mods": len(files), "download_bytes": sum(f.size for f in files),
+            "mods": self.archive.mod_count if self.archive is not None else len(files),
+            "download_bytes": 0 if self.archive is not None else sum(f.size for f in files if not f.manual), "manual": len(self.manual),
+            "source": self.source,
         }
 
 
@@ -191,7 +219,7 @@ def read_pack(pack: Path) -> PackIndex:
     )
 
 
-def override_mods(pack: Path) -> dict[str, str]:
+def override_mods(pack: Path, prefixes: tuple[str, ...] = ("overrides/", "server-overrides/")) -> dict[str, str]:
     """The mods a pack ships inside its ``overrides/`` folders instead of listing them: {path in the server folder: SHA-1}.
 
     Pack makers do this a lot (the most downloaded server pack on Modrinth carries sixteen), so what Modrinth knows about a mod
@@ -202,7 +230,7 @@ def override_mods(pack: Path) -> dict[str, str]:
             infos = zf.infolist()
             if len(infos) > MAX_OVERRIDE_ENTRIES:
                 return {}
-            for prefix in ("overrides/", "server-overrides/"):
+            for prefix in prefixes:
                 for info in infos:
                     name = info.filename
                     if not name.startswith(prefix) or info.is_dir() or not name.lower().endswith(".jar"):
@@ -230,13 +258,22 @@ class ModCache:
         self.base = base
         base.mkdir(parents=True, exist_ok=True)
         shutil.rmtree(base / ".partial", ignore_errors=True)
+        self.forget_staged()  # leftovers of an install that was interrupted
 
-    def path(self, sha512: str) -> Path:
-        return self.base / sha512[:2] / sha512
+    def path(self, key: str, stage: str = "") -> Path:
+        if key.startswith("sha1:"):  # a file CurseForge described; kept apart because it is only held while it is installed
+            digest = key[5:]
+            return self.base / STAGING_DIR / (stage or "unstaged") / digest[:2] / digest
+        return self.base / key[:2] / key
 
-    def has(self, file: PackFile) -> bool:
+    def has(self, file: PackFile, stage: str = "") -> bool:
         # A file only gets its name here after its checksums matched; the size a pack declares is not part of the proof.
-        return self.path(file.sha512).is_file()
+        return self.path(file.key, stage).is_file()
+
+    def forget_staged(self, stage: str | None = None) -> None:
+        """Delete what was downloaded from CurseForge (for one install, or all of it). CurseForge's terms ask for no cache of what
+        its API hands out, so those files are only held for the minutes an install or update needs them: a server keeps its own."""
+        shutil.rmtree(self.base / STAGING_DIR / stage if stage else self.base / STAGING_DIR, ignore_errors=True)
 
     def disk_usage(self) -> int:
         return dir_size(self.base)
@@ -261,10 +298,19 @@ def _sha256_of(path: Path) -> str:
     return _digest_of(path, "sha256")
 
 
+def _digest_matches(path: Path, recorded: str) -> bool:
+    """Whether a file still is what the lock recorded: a bare SHA-512, or ``sha1:<hex>`` / ``sha256:<hex>``."""
+    algorithm, colon, value = recorded.partition(":")
+    if not colon:
+        algorithm, value = "sha512", recorded
+    return _digest_of(path, algorithm) == value
+
+
 class PackInstaller:
     def __init__(self, client: httpx.AsyncClient, cache: ModCache, *, retry_delay: float = 2.0, concurrency: int = 6,
-                 free_space: Callable[[Path], int] = free_bytes):
+                 free_space: Callable[[Path], int] = free_bytes, headers_for: HeadersFor | None = None):
         self._client = client
+        self._headers_for = headers_for  # what to send to CurseForge's download servers (its API key); nobody else gets anything
         self.cache = cache
         self._delay = retry_delay
         self._concurrency = concurrency
@@ -273,32 +319,55 @@ class PackInstaller:
     # ------------------------------------------------------------------- install
     async def prefetch(self, index: PackIndex, progress: Progress) -> list[PackFile]:
         """Download what the pack needs into the cache without putting anything in a server. Returns the files to install."""
-        wanted = index.server_files
-        unique = {f.sha512: f for f in wanted}  # two paths with the same content are downloaded once
-        missing = [f for f in unique.values() if not self.cache.has(f)]
+        if index.archive is not None:
+            return []  # the server files hold the mods
+        wanted = [f for f in index.server_files if not f.manual]
+        unique = {f.key: f for f in wanted}  # two paths with the same content are downloaded once
+        missing = [f for f in unique.values() if not self.cache.has(f, index.stage)]
         needed = sum(f.size for f in missing) + sum(f.size for f in wanted) + 256 * 1024 * 1024
         if self._free_space(self.cache.base) < needed:
             raise PackError(f"There is not enough free disk space for this modpack (about {needed // (1024 * 1024)} MiB are needed).")
-        await self._fetch_all(missing, progress, total=len(unique), already=len(unique) - len(missing))
+        await self._fetch_all(missing, progress, total=len(unique), already=len(unique) - len(missing), stage=index.stage)
         return wanted
+
+    def _check_space(self, size: int, where: Path) -> None:
+        needed = size + 256 * 1024 * 1024
+        if self._free_space(where) < needed:
+            raise PackError(f"There is not enough free disk space for this modpack (about {needed // (1024 * 1024)} MiB are needed).")
 
     @staticmethod
     def _lock_of(index: PackIndex, files: dict[str, str], overrides: dict[str, str]) -> dict[str, Any]:
-        return {
+        lock: dict[str, Any] = {
             "name": index.name, "version_id": index.version_id, "minecraft": index.minecraft,
             "loader": {"kind": index.loader.kind, "version": index.loader.version}, "files": files, "overrides": overrides,
-            "client_only": sorted(index.client_only),
+            "client_only": sorted(index.client_only), "mode": "archive" if index.archive is not None else "files", "source": index.source,
         }
+        if index.manual:
+            lock["manual"] = [{"path": f.path, "name": f.name, "page": f.page} for f in index.manual]
+        return lock
 
     async def install(self, index: PackIndex, pack: Path, server_dir: Path, progress: Progress) -> dict[str, Any]:
         """Put the pack's mods and overrides into ``server_dir``. Returns the lock: what was installed, for later updates."""
-        wanted = await self.prefetch(index, progress)
-        placed: dict[str, str] = {}
-        for pack_file in wanted:
-            await asyncio.to_thread(self._place, pack_file, server_dir)
-            placed[pack_file.path] = pack_file.sha512
+        from . import archive
+
+        if index.archive is not None:
+            self._check_space(index.archive.total_bytes, server_dir)
+            mods, others = await asyncio.to_thread(archive.install, index.archive, server_dir, progress)
+            lock = self._lock_of(index, mods, others)
+            atomic_write_text(server_dir / LOCK_DIR / LOCK_NAME, json.dumps(lock, indent=1))
+            return lock
+        try:
+            wanted = await self.prefetch(index, progress)
+            placed: dict[str, str] = {}
+            for pack_file in wanted:
+                await asyncio.to_thread(self._place, pack_file, server_dir, index.stage)
+                placed[pack_file.path] = pack_file.key
+        finally:
+            self.cache.forget_staged(index.stage)
         progress(0.95, "Applying the modpack's own configuration")
-        overrides, _ = await asyncio.to_thread(self._apply_overrides, pack, server_dir, skip=index.skip_overrides)
+        overrides, _ = await asyncio.to_thread(
+            self._apply_overrides, pack, server_dir, skip=index.skip_overrides, prefixes=index.override_prefixes
+        )
         lock = self._lock_of(index, placed, overrides)
         atomic_write_text(server_dir / LOCK_DIR / LOCK_NAME, json.dumps(lock, indent=1))
         return lock
@@ -312,44 +381,68 @@ class PackInstaller:
         there. Whatever somebody changed by hand stays; for a configuration file the pack's new version is saved next to it
         with the ending ``.pack-new``. Returns (the new lock, what happened: added / updated / removed / kept files).
         """
-        wanted = await self.prefetch(index, progress)
-        old_files: dict[str, str] = old_lock.get("files", {})
-        report: dict[str, list[str]] = {"added": [], "updated": [], "removed": [], "kept_mods": [], "kept_configs": []}
-        wanted_paths = {f.path for f in wanted}
-        for path, recorded in old_files.items():
-            if path in wanted_paths:
-                continue
-            target = server_dir / path
-            if not target.is_file():
-                continue
-            if await asyncio.to_thread(_sha512_of, target) != recorded:
-                report["kept_mods"].append(path)  # somebody replaced it by hand
-                continue
-            target.unlink()
-            report["removed"].append(path)
-        placed: dict[str, str] = {}
-        for pack_file in wanted:
-            path = pack_file.path
-            target = server_dir / path
-            placed[path] = pack_file.sha512
-            if path in old_files and old_files[path] == pack_file.sha512 and target.is_file():
-                continue  # the same file as before
-            if path in old_files and target.is_file() and await asyncio.to_thread(_sha512_of, target) != old_files[path]:
-                report["kept_mods"].append(path)
-                continue
-            await asyncio.to_thread(self._place, pack_file, server_dir)
-            report["updated" if path in old_files else "added"].append(path)
+        from . import archive
+
+        was_archive = old_lock.get("mode") == "archive"
+        if was_archive != (index.archive is not None):
+            raise PackError(
+                "This version does not come the way the server was installed (one has the pack's own server files, the other only "
+                "a list of mods), so it cannot be applied as an update. Create the server again from that version instead."
+            )
+        if index.archive is not None:
+            self._check_space(index.archive.total_bytes, server_dir)
+            mods, others, report = await asyncio.to_thread(
+                archive.update, index.archive, server_dir, old_lock, frozenset({"server.properties"}), progress
+            )
+            lock = self._lock_of(index, mods, others)
+            atomic_write_text(server_dir / LOCK_DIR / LOCK_NAME, json.dumps(lock, indent=1))
+            return lock, report
+        try:
+            wanted = await self.prefetch(index, progress)
+            old_files: dict[str, str] = old_lock.get("files", {})
+            report = {"added": [], "updated": [], "removed": [], "kept_mods": [], "kept_configs": []}
+            wanted_paths = {f.path for f in wanted}
+            for path, recorded in old_files.items():
+                if path in wanted_paths:
+                    continue
+                target = server_dir / path
+                if not target.is_file():
+                    continue
+                if not await asyncio.to_thread(_digest_matches, target, recorded):
+                    report["kept_mods"].append(path)  # somebody replaced it by hand
+                    continue
+                target.unlink()
+                report["removed"].append(path)
+            placed: dict[str, str] = {}
+            for pack_file in wanted:
+                path = pack_file.path
+                target = server_dir / path
+                placed[path] = pack_file.key
+                if path in old_files and old_files[path] == pack_file.key and target.is_file():
+                    continue  # the same file as before
+                if path in old_files and target.is_file() and not await asyncio.to_thread(_digest_matches, target, old_files[path]):
+                    report["kept_mods"].append(path)
+                    continue
+                await asyncio.to_thread(self._place, pack_file, server_dir, index.stage)
+                report["updated" if path in old_files else "added"].append(path)
+        finally:
+            self.cache.forget_staged(index.stage)
         progress(0.95, "Applying the modpack's own configuration")
         overrides, kept = await asyncio.to_thread(
             self._apply_overrides, pack, server_dir, protect=old_lock.get("overrides", {}), never_replace=frozenset({"server.properties"}),
-            skip=index.skip_overrides,
+            skip=index.skip_overrides, prefixes=index.override_prefixes,
         )
         report["kept_configs"] = kept
+        for rel in index.skip_overrides:  # files the pack ships that the server must not have: an earlier install may have put them there
+            recorded = old_lock.get("overrides", {}).get(rel)
+            target = server_dir / rel
+            if recorded and target.is_file() and await asyncio.to_thread(_sha256_of, target) == recorded:
+                target.unlink()  # still what the pack put there, nobody changed it
         lock = self._lock_of(index, placed, overrides)
         atomic_write_text(server_dir / LOCK_DIR / LOCK_NAME, json.dumps(lock, indent=1))
         return lock, report
 
-    async def _fetch_all(self, files: list[PackFile], progress: Progress, *, total: int, already: int) -> None:
+    async def _fetch_all(self, files: list[PackFile], progress: Progress, *, total: int, already: int, stage: str = "") -> None:
         done = already
         semaphore = asyncio.Semaphore(self._concurrency)
         lock = asyncio.Lock()
@@ -357,7 +450,7 @@ class PackInstaller:
         async def one(pack_file: PackFile) -> None:
             nonlocal done
             async with semaphore:
-                await self._fetch(pack_file)
+                await self._fetch(pack_file, stage)
             async with lock:
                 done += 1
                 progress(0.9 * done / max(total, 1), f"Downloading mods ({done} of {total})")
@@ -372,8 +465,8 @@ class PackInstaller:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-    async def _fetch(self, pack_file: PackFile) -> None:
-        target = self.cache.path(pack_file.sha512)
+    async def _fetch(self, pack_file: PackFile, stage: str = "") -> None:
+        target = self.cache.path(pack_file.key, stage)
         target.parent.mkdir(parents=True, exist_ok=True)
         part = self.cache.base / ".partial" / uuid.uuid4().hex
         part.parent.mkdir(parents=True, exist_ok=True)
@@ -383,10 +476,12 @@ class PackInstaller:
         declared = pack_file.size
         ceiling = MAX_FILE_BYTES if declared <= 0 else min(MAX_FILE_BYTES, max(2 * declared, 16 * 1024**2))
         for url in pack_file.urls:
+            from_curseforge = (urlsplit(url).hostname or "").lower() in CURSEFORGE_DOWNLOAD_HOSTS
             try:
                 await download(
-                    self._client, url, part, sha1=pack_file.sha1, sha512=pack_file.sha512, max_size=ceiling,
-                    allowed_hosts=ALLOWED_DOWNLOAD_HOSTS, what=pack_file.path.rsplit("/", 1)[-1], attempts=3, delay=self._delay,
+                    self._client, url, part, sha1=pack_file.sha1, sha512=pack_file.sha512 or None, max_size=ceiling,
+                    allowed_hosts=CURSEFORGE_DOWNLOAD_HOSTS if from_curseforge else ALLOWED_DOWNLOAD_HOSTS, what=pack_file.path.rsplit("/", 1)[-1],
+                    attempts=3, delay=self._delay, headers_for=self._headers_for if from_curseforge else None,
                 )
             except DownloadError as exc:
                 last = exc
@@ -396,8 +491,8 @@ class PackInstaller:
         failure = PackError if isinstance(last, BadDownloadError) else PackDownloadError  # a wrong checksum will be wrong tomorrow too
         raise failure(f"{pack_file.path} could not be downloaded: {last}") from last
 
-    def _place(self, pack_file: PackFile, server_dir: Path) -> None:
-        source = self.cache.path(pack_file.sha512)
+    def _place(self, pack_file: PackFile, server_dir: Path, stage: str = "") -> None:
+        source = self.cache.path(pack_file.key, stage)
         dest = server_dir / pack_file.path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.unlink(missing_ok=True)
@@ -409,7 +504,7 @@ class PackInstaller:
     # ----------------------------------------------------------------- overrides
     def _apply_overrides(
         self, pack: Path, server_dir: Path, protect: dict[str, str] | None = None, never_replace: frozenset[str] = frozenset(),
-        skip: Iterable[str] = (),
+        skip: Iterable[str] = (), prefixes: tuple[str, ...] = ("overrides/", "server-overrides/"),
     ) -> tuple[dict[str, str], list[str]]:
         """Copy ``overrides/`` and then ``server-overrides/`` (which win) into the server folder.
 
@@ -428,7 +523,7 @@ class PackInstaller:
                 infos = zf.infolist()
                 if len(infos) > MAX_OVERRIDE_ENTRIES:
                     raise PackError("The modpack contains an unreasonable number of files.")
-                for prefix in ("overrides/", "server-overrides/"):
+                for prefix in prefixes:
                     for info in infos:
                         if not info.filename.startswith(prefix) or info.is_dir():
                             continue

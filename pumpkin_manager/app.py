@@ -27,6 +27,7 @@ from .db import Database
 from .errors import UserError
 from .events import EventBus
 from .jobs import JobService
+from .jvm.curseforge import CurseForgeClient
 from .jvm.loaders import LoaderInstaller, Runner, run_process
 from .jvm.modrinth import ModrinthClient
 from .jvm.mojang import MojangMeta
@@ -134,11 +135,13 @@ class AppContext:
         self.mojang = MojangMeta(self.java_http, self.repo)
         self.runtimes = JavaRuntimes(self.settings.java_dir, source, verifier=run_java_version if verify_java else None)
         self.modrinth = ModrinthClient(self.java_http)
+        self.curseforge = CurseForgeClient(self.java_http, self._curseforge_key)
         self.loader_installer = LoaderInstaller(self.java_http, java_runner or run_process)
         self.mod_cache = ModCache(self.settings.cache_dir / "mods")
-        self.packs = PackInstaller(self.java_http, self.mod_cache)
+        self.packs = PackInstaller(self.java_http, self.mod_cache, headers_for=self.curseforge.download_headers)
         self.servers.jvm = JavaServerService(
-            self.servers, self.runtimes, self.mojang, self.modrinth, self.loader_installer, self.packs, self.settings.cache_dir / "uploads"
+            self.servers, self.runtimes, self.mojang, self.modrinth, self.loader_installer, self.packs, self.settings.cache_dir / "uploads",
+            self.curseforge,
         )
 
     # ----------------------------------------------------------------- settings
@@ -152,6 +155,9 @@ class AppContext:
 
     def _github_token(self) -> str | None:
         return self._app_settings.github_token or self.settings.github_token
+
+    def _curseforge_key(self) -> str | None:
+        return self._app_settings.curseforge_api_key or self.settings.curseforge_api_key
 
     def _on_job_finished(self, job: dict[str, Any]) -> None:
         if job.get("server_id"):
@@ -241,6 +247,7 @@ class AppContext:
                 "errors": self.updater.last_errors,
             },
             "github_token": bool(self._github_token()),
+            "curseforge_key": bool(self._curseforge_key()),
         }
 
 

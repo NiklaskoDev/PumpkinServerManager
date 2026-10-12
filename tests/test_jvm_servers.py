@@ -108,7 +108,7 @@ async def test_a_modpack_file_can_be_uploaded_instead(jvm):
     row = await finish(ctx, ctx.servers.submit_create({"name": "Uploaded", "engine": "java", "eula": True, "modpack": {"source": "upload", "upload": upload["upload"]}, "start": False}))
     assert row["status"] == "success", row["message"]
     rec = next(s for s in ctx.repo.list_servers() if s.name == "Uploaded")
-    assert {k: v for k, v in rec.spec["pack"].items() if k not in ("client_only", "client_only_count")} == {
+    assert {k: v for k, v in rec.spec["pack"].items() if k not in ("client_only", "client_only_count", "manual", "manual_count")} == {
         "source": "upload", "title": "Cool Pack", "version_number": "1.0.0",
     }
     assert list((ctx.settings.cache_dir / "uploads").iterdir()) == [], "a used upload is removed"
@@ -321,6 +321,25 @@ async def test_a_server_that_crashes_while_starting_reports_what_it_said(jvm):
     world.behavior["crash_on_start"] = True
     row = await finish(ctx, ctx.servers.submit_start(rec))
     assert row["status"] == "failed" and "simulated crash" in row["message"] and ctx.pm.runtime(rec.id).state == "crashed"
+
+
+async def test_a_server_that_ends_during_startup_says_why_and_not_just_what_it_printed_last(jvm):
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "Trace", start=False)
+    world.behavior["trace_crash"] = True
+    row = await finish(ctx, ctx.servers.submit_start(rec))
+    assert row["status"] == "failed" and "exited during startup (exit code 1)" in row["message"]
+    assert "FileNotFoundException: https://repo.example/lib-1.1.jar" in row["message"], "the root cause of the stack trace"
+    assert "ExitTrappedException" not in row["message"] and "HttpURLConnection" not in row["message"] and "Runtime.exit" not in row["message"]
+
+
+async def test_the_known_old_forge_on_new_java_failure_is_explained(jvm):
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "OldForge", start=False)
+    world.behavior["old_forge_on_new_java"] = True
+    row = await finish(ctx, ctx.servers.submit_start(rec))
+    assert row["status"] == "failed" and "ManifestEntryVerifier" in row["message"]
+    assert "old Forge builds for Minecraft 1.16.5" in row["message"] and "36.2.26 or newer" in row["message"]
 
 
 async def test_a_server_that_opens_its_port_early_is_not_called_up_before_it_says_done(jvm):

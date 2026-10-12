@@ -15,6 +15,7 @@ from pydantic import BaseModel, ValidationError
 
 from .. import __version__
 from ..access import ACTIVITY, CONSOLE_VIEW, Principal
+from ..jvm.net import DownloadError
 from ..models import AppSettings
 from ..security import SESSION_COOKIE
 from .deps import NOT_ALLOWED, get_ctx, require_owner, require_principal, visible_job
@@ -50,6 +51,7 @@ class SettingsPatch(BaseModel):
     update_check_minutes: int | None = None
     default_channel: str | None = None
     github_token: str | None = None
+    curseforge_api_key: str | None = None
     webhook_url: str | None = None
     webhook_events: list[str] | None = None
     telemetry_default: bool | None = None
@@ -57,15 +59,18 @@ class SettingsPatch(BaseModel):
     keep_old_builds: int | None = None
 
 
-def _settings_view(s: AppSettings) -> dict[str, Any]:
+def _settings_view(s: AppSettings, *, curseforge_from_environment: bool = False) -> dict[str, Any]:
     data = s.model_dump()
     data["has_github_token"] = bool(data.pop("github_token"))
+    data["has_curseforge_key"] = bool(data.pop("curseforge_api_key")) or curseforge_from_environment  # the key itself is never sent out
+    data["curseforge_key_from_environment"] = curseforge_from_environment and not s.curseforge_api_key
     return data
 
 
 @router.get("/settings", dependencies=owner_only)
 async def get_settings(request: Request) -> dict:
-    return _settings_view(get_ctx(request).app_settings())
+    ctx = get_ctx(request)
+    return _settings_view(ctx.app_settings(), curseforge_from_environment=bool(ctx.settings.curseforge_api_key))
 
 
 @router.put("/settings", dependencies=owner_only)
@@ -76,6 +81,14 @@ async def put_settings(body: SettingsPatch, request: Request) -> dict:
     if "github_token" in changes:
         token = (changes["github_token"] or "").strip()
         changes["github_token"] = token or None
+    if "curseforge_api_key" in changes:
+        key = (changes["curseforge_api_key"] or "").strip()
+        changes["curseforge_api_key"] = key or None
+        if key:  # a wrong key (an upload token, a typo) is the usual mistake: say so now, not when a pack fails to install
+            try:
+                await ctx.servers.jvm.curseforge.check_key(key)
+            except DownloadError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
     merged = {**current, **changes}
     try:
         new = AppSettings.model_validate(merged)
@@ -83,7 +96,7 @@ async def put_settings(body: SettingsPatch, request: Request) -> dict:
         first = exc.errors()[0]
         raise HTTPException(status_code=422, detail=f"{'.'.join(str(p) for p in first['loc'])}: {first['msg']}") from exc
     ctx.save_app_settings(new)
-    return _settings_view(new)
+    return _settings_view(new, curseforge_from_environment=bool(ctx.settings.curseforge_api_key))
 
 
 class WebhookTest(BaseModel):

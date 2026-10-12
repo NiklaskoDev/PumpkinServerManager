@@ -30,7 +30,7 @@ from .process import ProcessError, ProcessManager
 from .releases import ReleaseError, ReleaseSource, RemoteBuild
 from .repo import Repo
 from .reporter import Reporter
-from .util import SERVER_ID_RE, atomic_write_text, dir_size, iso, slugify
+from .util import SERVER_ID_RE, atomic_write_text, dir_size, iso, plain_environment, slugify
 
 log = logging.getLogger(__name__)
 
@@ -47,11 +47,6 @@ PLAYER_LIST_FILES = (
 # Pumpkin ignores ``default_difficulty``: every new world starts on Normal and only the /difficulty command changes it.
 NEW_WORLD_DIFFICULTY = "Normal"
 _SECRET_ALPHABET = string.ascii_letters + string.digits
-_CHILD_ENV_KEEP = {"PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR"}
-_CHILD_ENV_KEEP_WINDOWS = {
-    "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "TEMP", "TMP", "WINDIR", "PROGRAMDATA", "ALLUSERSPROFILE",
-    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "COMMONPROGRAMFILES",
-}
 
 CommandBuilder = Callable[[ServerRecord, BuildRecord], list[str]]
 
@@ -339,8 +334,7 @@ class ServerService:
                 ctx.warn(f"pumpkin.toml has questionable values: {exc}")
 
     def child_env(self, rec: ServerRecord) -> dict[str, str]:
-        keep = _CHILD_ENV_KEEP | (_CHILD_ENV_KEEP_WINDOWS if os.name == "nt" else set()) | set(self.settings.extra_env_passthrough)
-        env = {k: v for k, v in os.environ.items() if k in keep}
+        env = plain_environment(self.settings.extra_env_passthrough)
         env.update(HOME=str(self.server_dir(rec.id)), RUST_BACKTRACE="1", TZ=self.settings.timezone)
         return env
 

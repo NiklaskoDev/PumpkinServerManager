@@ -28,6 +28,23 @@ READY_RE = re.compile(r"server is now running", re.IGNORECASE)
 PUMPKIN_START_HINT = "if Pumpkin rejected pumpkin.toml it silently falls back to default settings."
 FAILURE_EXIT_GRACE = 20.0  # seconds a server gets to end by itself after it said it could not start
 _FORMAT_CODES = re.compile("§.")  # Minecraft's formatting codes, which mod loaders put into their error messages
+# A line of a Java stack trace ("at net.minecraft.Foo.bar(Foo.java:12)", "... 11 more"), whatever the logger put in front of it.
+_STACK_FRAME = re.compile(r"\bat [\w$.<>/]+\((?:[\w$.]+(?::\d+)?|Native Method|Unknown Source)\)|\.\.\. \d+ more")
+# What Forge 1.12 adds when a mod stops the launch: it says nothing about why.
+_EXIT_NOISE = ("ExitTrappedException", "FMLSecurityManager")
+# Failures with a known cause that people can act on: what the server printed -> what to tell them.
+_KNOWN_PROBLEMS = (
+    (re.compile(r"HeadlessException"), (
+        "A mod tried to open a window, and a server has no screen. The lines before the error name the mod. Better MC's Missing Mods "
+        "Checker is one: it asks for mods that are not in the pack (the Modpack tab lists the ones to add yourself; its list is "
+        "config/missing_mods_checker.json, which can be deleted once they are in the mods folder)."
+    )),
+    (re.compile(r"ManifestEntryVerifier"), (
+        "This is a known problem of old Forge builds for Minecraft 1.16.5 (36.2.25 and older): their launcher does not work with the Java "
+        "security update of January 2022 (Java 8u321 or 11.0.14 and newer), which is what is available today. Use a version of the "
+        "modpack that is built on Forge 36.2.26 or newer."
+    )),
+)
 MAX_LINE = 8000
 MAX_LOG_FILE_BYTES = 20 * 1024 * 1024
 BACKLOG_LINES = 3000
@@ -379,10 +396,27 @@ class ProcessManager:
     def _describe_early_exit(self, rt: Runtime) -> str:
         if rt.failed.is_set():
             return f"The server reported that it could not start.{self._failure_excerpt(rt)}"
-        tail = [strip_ansi(line["m"]) for line in list(rt.log)[-6:] if line["s"] == "out"]
-        detail = f" Last output: {' | '.join(tail)}" if tail else ""
+        tail = self._exit_excerpt(rt)
+        detail = f" Last output: {' | '.join(tail)}"[:1500] if tail else ""
+        recent = "\n".join(strip_ansi(entry["m"]) for entry in list(rt.log)[-400:] if entry["s"] == "out")
+        explained = " ".join(hint for pattern, hint in _KNOWN_PROBLEMS if pattern.search(recent))
+        detail += f" {explained}" if explained else ""
         hint = f" {rt.clean_exit_hint}" if rt.exit_code == 0 and rt.clean_exit_hint else ""
         return f"The server process exited during startup (exit code {rt.exit_code}).{hint}{detail}"
+
+    @staticmethod
+    def _exit_excerpt(rt: Runtime) -> list[str]:
+        """What a server said last before it ended during startup. A Java stack trace buries its cause under frames and wrappers, so
+        the 'Caused by' lines are shown when there are any (the last ones name the root cause), else the last lines that are not frames."""
+        lines = [_FORMAT_CODES.sub("", strip_ansi(entry["m"])).rstrip() for entry in list(rt.log)[-400:] if entry["s"] == "out"]
+        causes = []
+        for line in lines:
+            at = line.find("Caused by:")
+            if at >= 0 and not any(noise in line for noise in _EXIT_NOISE):
+                causes.append(line[at:].strip())
+        if causes:
+            return causes[-3:]
+        return [line.strip() for line in lines if line.strip() and not _STACK_FRAME.search(line)][-6:]
 
     @staticmethod
     def _failure_excerpt(rt: Runtime) -> str:

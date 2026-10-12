@@ -215,6 +215,35 @@ async def main() -> int:
     if not eula_accepted():
         log("You need to agree to the EULA in order to run the server. Go to eula.txt for more info.", thread="main")
         return 0
+    if BEHAVIOR.get("missing_mods_checker") and Path("config/missing_mods_checker.json").exists():
+        # Better MC's Missing Mods Checker finds its list, wants to show a window for the missing mods, and a server has no screen
+        for text in (
+            "[23:47:29] [main/ERROR]: Error thrown while opening! Exiting",
+            "java.awt.HeadlessException:",
+            "No X11 DISPLAY variable was set,",
+            "or no headful library support was found,",
+            "but this program performed an operation which requires it.",
+            "\tat java.awt.GraphicsEnvironment.checkHeadless(Unknown Source) ~[?:?]",
+            "\tat toni.missingmodschecker.MissingModsWindow.<init>(MissingModsWindow.java:55) ~[missingmodschecker.jar:?]",
+        ):
+            print(text, flush=True)
+        return 1
+    if BEHAVIOR.get("old_forge_on_new_java"):  # Forge 1.16.5 before 36.2.23 on a Java released since January 2022
+        print("Exception in thread \"main\" java.lang.NoSuchMethodError: sun.security.util.ManifestEntryVerifier.<init>(Ljava/util/jar/Manifest;)V", flush=True)
+        return 1
+    if BEHAVIOR.get("trace_crash"):  # a Forge 1.12 coremod fails: the cause is in the middle of a long stack trace, and Forge adds noise after it
+        for text in (
+            "[12:00:01] [main/INFO] [STDERR]: [org.example.LibLoader:init:68]: java.lang.RuntimeException: could not load a library",
+            "[12:00:01] [main/INFO] [STDERR]: [org.example.LibLoader:init:68]: \tat org.example.LibLoader.init(LibLoader.java:68)",
+            "[12:00:01] [main/INFO] [STDERR]: [org.example.LibLoader:init:68]: Caused by: java.io.FileNotFoundException: https://repo.example/lib-1.1.jar",
+            "[12:00:01] [main/INFO] [STDERR]: [org.example.LibLoader:init:68]: \tat sun.net.www.protocol.http.HttpURLConnection.getInputStream0(HttpURLConnection.java:1925)",
+            "[12:00:01] [main/INFO] [STDERR]: [org.example.LibLoader:init:68]: \t... 11 more",
+            "A problem occurred running the Server launcher.",
+            "[12:00:02] [main/INFO] [STDERR]: [net.minecraftforge.Wrapper:run:75]: Caused by: net.minecraftforge.fml.relauncher.FMLSecurityManager$ExitTrappedException",
+            "[12:00:02] [main/INFO] [STDERR]: [net.minecraftforge.Wrapper:run:75]: \tat java.lang.Runtime.exit(Runtime.java:101)",
+        ):
+            print(text, flush=True)
+        return 1
     if BEHAVIOR.get("crash_on_start"):
         print("Exception in thread \"main\" java.lang.IllegalStateException: simulated crash", flush=True)
         return 1

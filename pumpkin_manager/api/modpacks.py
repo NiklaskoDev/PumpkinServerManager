@@ -29,30 +29,41 @@ def _java(rec: ServerRecord) -> ServerRecord:
     return rec
 
 
+@router.get("/modpacks/sources")
+async def sources(request: Request, owner: Principal = Depends(require_owner)) -> dict:
+    """Where modpacks can come from, and whether each source is ready (CurseForge needs an API key)."""
+    return get_ctx(request).servers.jvm.sources()
+
+
 @router.get("/modpacks/search")
 async def search(
-    request: Request, q: str = Query("", max_length=100), offset: int = Query(0, ge=0, le=10_000), owner: Principal = Depends(require_owner)
+    request: Request, q: str = Query("", max_length=100), offset: int = Query(0, ge=0, le=10_000),
+    source: str = Query("modrinth", pattern="^(modrinth|curseforge)$"), owner: Principal = Depends(require_owner),
 ) -> dict:
-    """Modpacks on Modrinth that can run on a server (most downloaded first when no search text is given)."""
-    return await get_ctx(request).servers.jvm.search_packs(q, offset)
+    """Modpacks that can run on a server, most downloaded first when no search text is given. For CurseForge a key that may not
+    search gets the packs CurseForge lists itself instead, with ``search: false`` and a note."""
+    return await get_ctx(request).servers.jvm.search_packs(q, offset, source)
 
 
 @router.get("/modpacks/project")
-async def project(request: Request, ref: str = Query(min_length=2, max_length=300), owner: Principal = Depends(require_owner)) -> dict:
-    """One modpack and its versions. ``ref`` is a Modrinth link, a project id or the short name."""
-    return await get_ctx(request).servers.jvm.pack_details(ref)
+async def project(
+    request: Request, ref: str = Query(min_length=2, max_length=300), source: str = Query("modrinth", pattern="^(modrinth|curseforge)$"),
+    owner: Principal = Depends(require_owner),
+) -> dict:
+    """One modpack and its versions. ``ref`` is a Modrinth link, id or short name, or a CurseForge project number or link."""
+    return await get_ctx(request).servers.jvm.pack_details(ref, source)
 
 
 @router.get("/modpacks/icon")
 async def pack_icon(request: Request, url: str = Query(min_length=10, max_length=500), principal: Principal = Depends(require_principal)) -> Response:
-    """A modpack's icon, fetched from Modrinth's image host for the dashboard (whose content policy allows no other site)."""
+    """A modpack's icon, fetched from Modrinth's or CurseForge's image host for the dashboard (whose content policy allows no other site)."""
     data, kind = await get_ctx(request).servers.jvm.pack_icon(url)
     return Response(content=data, media_type=kind, headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.put("/modpacks/upload")
 async def upload(request: Request, owner: Principal = Depends(require_owner)) -> dict:
-    """Upload a .mrpack file (the request body). Returns an upload id for creating a server from it, and what the pack contains."""
+    """Upload a .mrpack (Modrinth) or CurseForge modpack zip (the request body). Returns an upload id for creating a server from it."""
     ctx = get_ctx(request)
     declared = int(request.headers.get("content-length") or 0)
     if declared > 1024 * 1024 * 1024:
@@ -79,7 +90,7 @@ async def modpack_versions(request: Request, rec: ServerRecord = Depends(server_
 
 @router.post("/servers/{server_id}/modpack/check")
 async def check_modpack(request: Request, rec: ServerRecord = Depends(server_perm(VERSIONS))) -> dict:
-    """Ask Modrinth right now whether the modpack has a newer version."""
+    """Ask Modrinth or CurseForge right now whether the modpack has a newer version."""
     ctx = get_ctx(request)
     result = await asyncio.wait_for(ctx.pack_updates.check(_java(rec)), timeout=60)
     if result["errors"]:

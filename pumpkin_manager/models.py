@@ -68,7 +68,8 @@ class AppSettings(BaseModel):
     update_check_enabled: bool = True
     update_check_minutes: int = Field(360, ge=5, le=60 * 24 * 7)
     default_channel: Channel = "stable"
-    github_token: str | None = None
+    github_token: str | None = Field(None, repr=False)
+    curseforge_api_key: str | None = Field(None, repr=False)
     webhook_url: str | None = None
     webhook_events: list[str] = Field(
         default_factory=lambda: ["update_applied", "update_failed", "update_available", "backup_failed", "crashed"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import tarfile
 import zipfile
 from collections.abc import Callable
@@ -152,7 +153,10 @@ class FakeInternet:
 
     def __init__(self) -> None:
         self.routes: dict[tuple[str, str], Callable[[httpx.Request], httpx.Response]] = {}
+        self.patterns: list[tuple[str, re.Pattern[str], Callable[[httpx.Request], httpx.Response]]] = []
         self.requests: list[str] = []
+        self.keys_sent_to: set[str] = set()  # the hosts that were sent an x-api-key
+        self.curseforge: FakeCurseForge | None = None
         self.offline = False
         self.java_downloads = 0
         self.mod_downloads: dict[str, int] = {}
@@ -173,10 +177,17 @@ class FakeInternet:
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(str(request.url))
+        if "x-api-key" in request.headers:
+            self.keys_sent_to.add(request.url.host)
         if self.offline:
             raise httpx.ConnectError("simulated outage", request=request)
         handler = self.routes.get((request.url.host, request.url.path))
+        if handler is None:
+            handler = next((h for host, pattern, h in self.patterns if host == request.url.host and pattern.fullmatch(request.url.path)), None)
         return handler(request) if handler else httpx.Response(404, json={"error": "not found"})
+
+    def route_pattern(self, host: str, pattern: str, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self.patterns.append((host, re.compile(pattern), handler))
 
     def route(self, url: str, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         parts = urlsplit(url)
@@ -364,3 +375,174 @@ class FakeModrinth:
                 "versions": project.project()["game_versions"], "categories": project.project()["loaders"],
             })
         return httpx.Response(200, json={"hits": hits, "total_hits": len(hits), "offset": 0, "limit": 20})
+
+
+class FakeCurseForge:
+    """CurseForge: its API (which wants a key), its projects and files, and the CDN that serves them. Like the real one, the
+    list of a project's files leaves out the server packs that belong to its files; a file is found by its number."""
+
+    HOST = "api.curseforge.com"
+
+    def __init__(self, net: FakeInternet, *, key: str = "cf-test-key", search: bool = True) -> None:
+        self.net, self.key, self.search_enabled = net, key, search
+        self.mods: dict[int, dict[str, Any]] = {}
+        self.files: dict[int, dict[str, Any]] = {}
+        self.blobs: dict[int, bytes] = {}  # what each file holds
+        self.api_calls: list[str] = []
+        net.curseforge = self
+        net.route_pattern(self.HOST, r"/v1/games/432", self._game)
+        net.route_pattern(self.HOST, r"/v1/mods/search", self._search)
+        net.route_pattern(self.HOST, r"/v1/mods/featured", self._featured)
+        net.route_pattern(self.HOST, r"/v1/mods/files", self._files_bulk)
+        net.route_pattern(self.HOST, r"/v1/mods/(\d+)/files/(\d+)", self._file)
+        net.route_pattern(self.HOST, r"/v1/mods/(\d+)/files", self._files_of)
+        net.route_pattern(self.HOST, r"/v1/mods/(\d+)", self._mod)
+        net.route_pattern(self.HOST, r"/v1/mods", self._mods_bulk)
+
+    # ------------------------------------------------------------------- building the world
+    def add_project(self, project_id: int, name: str, *, class_id: int = 6, slug: str | None = None, allow_distribution: bool = True) -> dict[str, Any]:
+        slug = slug or name.lower().replace(" ", "-")
+        kind = "modpacks" if class_id == 4471 else "mc-mods"
+        logo = f"https://media.forgecdn.net/avatars/thumbnails/{project_id}/256/256/logo.png"
+        self.net.blob(logo, PNG_HEADER + b"1" * 32, "image/png")
+        mod = {
+            "id": project_id, "gameId": 432, "name": name, "slug": slug, "classId": class_id, "summary": f"{name}, for tests",
+            "links": {"websiteUrl": f"https://www.curseforge.com/minecraft/{kind}/{slug}"}, "downloadCount": 1000 + project_id,
+            "logo": {"thumbnailUrl": logo, "url": logo}, "latestFilesIndexes": [], "allowModDistribution": allow_distribution,
+        }
+        self.mods[project_id] = mod
+        return mod
+
+    def _register(
+        self, mod_id: int, file_id: int, filename: str, content: bytes, *, display: str | None = None, release: int = 1,
+        game_versions: tuple[str, ...] = ("1.21.1", "NeoForge"), downloadable: bool = True, requires: tuple[int, ...] = (),
+        server_pack_of: int | None = None, date: str | None = None,
+    ) -> dict[str, Any]:
+        url = f"https://edge.forgecdn.net/files/{file_id // 1000}/{file_id % 1000}/{filename}"
+        file = {
+            "id": file_id, "gameId": 432, "modId": mod_id, "isAvailable": True, "displayName": display or filename, "fileName": filename,
+            "releaseType": release, "fileStatus": 4,
+            "hashes": [{"value": hashlib.sha1(content).hexdigest(), "algo": 1}, {"value": hashlib.md5(content).hexdigest(), "algo": 2}],
+            "fileDate": date or f"2026-09-{(file_id % 27) + 1:02d}T12:00:00.000Z", "fileLength": len(content),
+            "downloadUrl": url if downloadable else None, "gameVersions": list(game_versions),
+            "dependencies": [{"modId": m, "relationType": 3} for m in requires], "isServerPack": server_pack_of is not None,
+            "serverPackFileId": None, "parentProjectFileId": server_pack_of,
+        }
+        self.files[file_id] = file
+        self.blobs[file_id] = content
+        if downloadable:
+            self.net.blob(url, content)
+        return file
+
+    def add_mod(
+        self, project_id: int, file_id: int, mod: FakeMod, *, name: str | None = None, client_only: bool = False, downloadable: bool = True,
+        requires: tuple[int, ...] = (), class_id: int = 6,
+    ) -> dict[str, Any]:
+        """A mod project with one file whose content is ``mod``'s. Returns the file as the API shows it."""
+        project = self.add_project(project_id, name or mod.filename.removesuffix(".jar"), class_id=class_id, allow_distribution=downloadable)
+        tags = ("1.21.1", "NeoForge", "Client") if client_only else ("1.21.1", "NeoForge")
+        return self._register(project["id"], file_id, mod.filename, mod.content, game_versions=tags, downloadable=downloadable, requires=requires)
+
+    def add_pack_version(
+        self, project_id: int, file_id: int, number: str, *, mods: tuple[tuple[int, int], ...] = (), minecraft: str = "1.21.1",
+        loader: str = "neoforge-21.1.77", overrides: dict[str, bytes] | None = None, server_pack: dict[str, bytes] | None = None,
+        wrapper: str | None = None, release: int = 1, date: str | None = None, server_pack_downloadable: bool = True,
+    ) -> dict[str, Any]:
+        """A version of a modpack: the zip a launcher would download (manifest and overrides) and, when ``server_pack`` is given, the
+        author's server pack (a zip of those files, inside ``wrapper`` when that is given)."""
+        pack = self.mods[project_id]
+        manifest = {
+            "minecraft": {"version": minecraft, "modLoaders": [{"id": loader, "primary": True}]}, "manifestType": "minecraftModpack",
+            "manifestVersion": 1, "name": pack["name"], "version": number, "author": "tests", "overrides": "overrides",
+            "files": [{"projectID": p, "fileID": f, "required": True} for p, f in mods],
+        }
+        entries = {"manifest.json": json.dumps(manifest).encode(), **{f"overrides/{k}": v for k, v in (overrides or {}).items()}}
+        file = self._register(
+            project_id, file_id, f"{pack['slug']}-{number}.zip", _zip_bytes(entries), display=f"{pack['name']} {number}",
+            game_versions=(minecraft, loader.split("-")[0].capitalize() if loader.split("-")[0] != "neoforge" else "NeoForge"),
+            release=release, date=date,
+        )
+        if server_pack is not None:
+            prefix = f"{wrapper.rstrip('/')}/" if wrapper else ""
+            content = _zip_bytes({prefix + name: data for name, data in server_pack.items()})
+            server = self._register(
+                project_id, file_id + 1, f"Server-Files-{number}.zip", content, display=f"Server-Files-{number}", release=release,
+                downloadable=server_pack_downloadable, server_pack_of=file_id, date=date,
+            )
+            file["serverPackFileId"] = server["id"]
+        pack["latestFilesIndexes"] = [{"gameVersion": minecraft, "fileId": file_id, "filename": file["fileName"], "releaseType": release,
+                                        "modLoader": {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}[loader.split("-")[0]]}]
+        return file
+
+    # ------------------------------------------------------------------------------ the API
+    def _auth(self, request: httpx.Request) -> httpx.Response | None:
+        self.api_calls.append(f"{request.method} {request.url.path}")
+        if request.headers.get("x-api-key") != self.key:
+            return httpx.Response(403, text="Forbidden: API Key missing or invalid")
+        return None
+
+    @staticmethod
+    def _page(items: list[dict[str, Any]], request: httpx.Request) -> httpx.Response:
+        query = parse_qs(request.url.query.decode())
+        index, size = int((query.get("index") or ["0"])[0]), int((query.get("pageSize") or ["50"])[0])
+        shown = items[index:index + size]
+        return httpx.Response(200, json={"data": shown, "pagination": {"index": index, "pageSize": size, "resultCount": len(shown), "totalCount": len(items)}})
+
+    def _game(self, request: httpx.Request) -> httpx.Response:
+        return self._auth(request) or httpx.Response(200, json={"data": {"id": 432, "name": "Minecraft", "slug": "minecraft"}})
+
+    def _search(self, request: httpx.Request) -> httpx.Response:
+        denied = self._auth(request)
+        if denied:
+            return denied
+        if not self.search_enabled:
+            return httpx.Response(403, text="Forbidden: API Key missing or invalid")  # a key without the right to search looks like this
+        query = parse_qs(request.url.query.decode())
+        text = (query.get("searchFilter") or [""])[0].lower()
+        slug = (query.get("slug") or [""])[0]
+        found = [m for m in self.mods.values() if m["classId"] == int((query.get("classId") or ["4471"])[0]) and text in m["name"].lower() and (not slug or m["slug"] == slug)]
+        return self._page(sorted(found, key=lambda m: -m["downloadCount"]), request)
+
+    def _featured(self, request: httpx.Request) -> httpx.Response:
+        denied = self._auth(request)
+        if denied:
+            return denied
+        packs = [m for m in self.mods.values() if m["classId"] == 4471]
+        return httpx.Response(200, json={"data": {"featured": packs[:2], "popular": packs, "recentlyUpdated": packs[-1:]}})
+
+    def _mod(self, request: httpx.Request) -> httpx.Response:
+        denied = self._auth(request)
+        if denied:
+            return denied
+        mod = self.mods.get(int(request.url.path.rsplit("/", 1)[1]))
+        return httpx.Response(200, json={"data": mod}) if mod else httpx.Response(404, json={})
+
+    def _files_of(self, request: httpx.Request) -> httpx.Response:
+        denied = self._auth(request)
+        if denied:
+            return denied
+        mod_id = int(request.url.path.split("/")[3])
+        listed = [f for f in self.files.values() if f["modId"] == mod_id and not f["isServerPack"]]
+        return self._page(sorted(listed, key=lambda f: f["fileDate"], reverse=True), request)
+
+    def _file(self, request: httpx.Request) -> httpx.Response:
+        denied = self._auth(request)
+        if denied:
+            return denied
+        parts = request.url.path.split("/")
+        file = self.files.get(int(parts[5]))
+        return httpx.Response(200, json={"data": file}) if file and file["modId"] == int(parts[3]) else httpx.Response(404, json={})
+
+    def _files_bulk(self, request: httpx.Request) -> httpx.Response:
+        denied = self._auth(request)
+        if denied:
+            return denied
+        wanted = json.loads(request.content)["fileIds"]
+        return httpx.Response(200, json={"data": [self.files[i] for i in wanted if i in self.files]})
+
+    def _mods_bulk(self, request: httpx.Request) -> httpx.Response:
+        denied = self._auth(request)
+        if denied:
+            return denied
+        wanted = json.loads(request.content)["modIds"]
+        return httpx.Response(200, json={"data": [self.mods[i] for i in wanted if i in self.mods]})

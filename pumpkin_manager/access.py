@@ -54,7 +54,7 @@ _LIMITED_FIELDS = (
     "id", "name", "created_at", "state", "busy", "desired_running", "uptime", "exit_code", "channel", "build", "ports",
     "public_address", "players", "mc_version", "motd", "ping_ok", "stats", "disk_bytes", "engine", "modpack",
 )
-_MODPACK_MANAGEMENT = ("pending", "can_roll_back", "client_only", "client_only_count", "leave_out_client_only")
+_MODPACK_MANAGEMENT = ("pending", "can_roll_back", "client_only", "client_only_count", "leave_out_client_only", "manual")
 # Placeholders for the parts the dashboard expects to find on every server, so it never trips over a missing key.
 _NEUTRAL_FIELDS: dict[str, Any] = {
     "pinned_tag": None,

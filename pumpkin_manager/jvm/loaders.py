@@ -21,6 +21,7 @@ from urllib.parse import quote
 import httpx
 
 from ..errors import UserError
+from ..util import plain_environment
 from .net import BadDownloadError, DownloadError, download, get_json
 
 log = logging.getLogger(__name__)
@@ -65,8 +66,8 @@ Runner = Callable[[list[str], Path, Callable[[str], None]], Awaitable[tuple[int,
 async def run_process(argv: list[str], cwd: Path, on_line: Callable[[str], None], timeout: float = 1800.0) -> tuple[int, list[str]]:
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(cwd), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            limit=1 << 20,
+            *argv, cwd=str(cwd), env=plain_environment(), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, limit=1 << 20,
         )
     except OSError as exc:
         raise LoaderError(f"Could not start Java: {exc}") from exc

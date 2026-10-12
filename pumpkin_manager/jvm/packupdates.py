@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from typing import Any
 
 from ..backups import BackupError
@@ -19,15 +18,18 @@ from ..models import ServerRecord
 from ..servers import ServerError
 from ..util import iso
 from .loaders import LoaderError
-from .modrinth import summarize_version
 from .mojang import available_java
-from .mrpack import PackDownloadError, PackError, read_pack
+from .mrpack import PackDownloadError, PackError
 from .net import BadDownloadError, DownloadError
-from .service import JavaServerService, client_only_info
+from .service import JavaServerService, OpenedPack
 
 log = logging.getLogger(__name__)
 
 PREVIOUS_FIELDS = ("minecraft", "loader", "java", "launch", "pack")  # what a rollback puts back besides the files
+# A modded server can close a status request for a while after it says "Done" (hundreds of mods still finishing their start, Forge filling
+# in its status in pieces): the new version only counts as broken when it stays silent for this many tries.
+PING_ATTEMPTS = 6
+PING_PAUSE = 5.0
 
 
 def pending_of(rec: ServerRecord) -> dict[str, Any] | None:
@@ -43,10 +45,10 @@ class PackUpdater:
     # ----------------------------------------------------------------- checking
     @staticmethod
     def updatable(rec: ServerRecord) -> bool:
-        return rec.is_java and (rec.spec.get("pack") or {}).get("source") == "modrinth"
+        return rec.is_java and (rec.spec.get("pack") or {}).get("source") in ("modrinth", "curseforge")
 
     async def check(self, only: ServerRecord | None = None) -> dict[str, Any]:
-        """Ask Modrinth whether the modpacks of the servers have a newer version and flag the servers that can be updated."""
+        """Ask Modrinth and CurseForge whether the modpacks of the servers have a newer version and flag the servers to update."""
         svc = self.svc
         servers = [only] if only is not None else [r for r in svc.repo.list_servers() if self.updatable(r)]
         versions: dict[str, list[dict[str, Any]]] = {}
@@ -61,7 +63,8 @@ class PackUpdater:
                 continue
             if project not in versions and project not in errors:
                 try:
-                    versions[project] = await self.jvm.modrinth.versions(project)
+                    pack = rec.spec.get("pack") or {}
+                    versions[project] = await self.jvm.pack_versions(pack.get("source", ""), project, str(pack.get("title") or ""))
                 except DownloadError as exc:
                     errors[project] = str(exc)
             if project in errors:
@@ -74,16 +77,15 @@ class PackUpdater:
         """Set or clear the pending update of one server. Returns True if one is pending."""
         pack = rec.spec.get("pack") or {}
         kinds = ("release",) if pack.get("version_type", "release") == "release" else ("release", "beta", "alpha")
-        newest = next((v for v in versions if v.get("version_type") in kinds), None)  # newest first
+        newest = next((v for v in versions if v.get("type") in kinds), None)  # newest first
         newer = (
-            newest is not None and newest["id"] != pack.get("version_id") and newest.get("date_published", "") > (pack.get("published") or "")
+            newest is not None and newest["id"] != pack.get("version_id") and (newest.get("published") or "") > (pack.get("published") or "")
             and self.svc.repo.get_kv(f"skip:{rec.id}") != newest["id"]
         )
         if not newer:
             self._store(rec, None)
             return False
-        summary = summarize_version(newest)
-        found = {k: summary[k] for k in ("id", "number", "type", "published", "minecraft", "loaders")}
+        found = {k: newest[k] for k in ("id", "number", "type", "published", "minecraft", "loaders")}
         if pending_of(rec) != found:
             if (pending_of(rec) or {}).get("id") != found["id"]:
                 self.svc.reporter.record(
@@ -113,19 +115,19 @@ class PackUpdater:
 
     async def available(self, rec: ServerRecord) -> dict[str, Any]:
         pack = rec.spec.get("pack") or {}
-        if pack.get("source") != "modrinth":
-            raise ServerError("Only modpacks from Modrinth have versions to choose from.", 409)
+        if pack.get("source") not in ("modrinth", "curseforge"):
+            raise ServerError("Only modpacks from Modrinth or CurseForge have versions to choose from.", 409)
         try:
-            versions = await self.jvm.modrinth.versions(pack["project"])
+            versions = await self.jvm.pack_versions(pack["source"], pack["project"], str(pack.get("title") or ""))
         except DownloadError as exc:
             raise ServerError(str(exc)) from exc
-        return {"current": pack.get("version_id"), "pending": pack.get("pending"), "versions": [summarize_version(v) for v in versions]}
+        return {"current": pack.get("version_id"), "pending": pack.get("pending"), "versions": versions}
 
     # ----------------------------------------------------------------- applying
     def submit_update(self, rec: ServerRecord, version_id: str | None = None, *, trigger: str = "manual") -> dict[str, Any]:
         pack = rec.spec.get("pack") or {}
-        if pack.get("source") != "modrinth":
-            raise ServerError("Only modpacks from Modrinth can be updated from here.", 409)
+        if pack.get("source") not in ("modrinth", "curseforge"):
+            raise ServerError("Only modpacks from Modrinth or CurseForge can be updated from here.", 409)
         target = version_id or (pack.get("pending") or {}).get("id")
         if not target:
             raise ServerError("There is no newer version to install. Check for updates first.", 409)
@@ -152,24 +154,29 @@ class PackUpdater:
         update_id = svc.repo.insert_update(
             server_id=rec.id, from_build_id=None, to_build_id=None, from_tag=old_pack.get("version_number"), to_tag=None, trigger=trigger,
         )
-        pack_path = jvm.uploads_dir / f"{uuid.uuid4().hex}.mrpack"
         backup_row: dict[str, Any] | None = None
+        opened: OpenedPack | None = None
         switched = False
         to_tag = version_id
         try:
             # 1. Fetch everything while the server keeps running: a failure here costs no downtime.
             ctx.step("Looking up the new version")
-            version = await jvm.modrinth.version(version_id)
-            if version.get("project_id") != old_pack.get("project"):
-                raise ServerError("That version belongs to another modpack.")
-            to_tag = str(version.get("version_number") or version_id)
-            svc.repo.update_update(update_id, to_tag=to_tag)
-            ctx.step(f"Updating '{rec.name}': {title} {old_pack.get('version_number')} -> {to_tag}")
-            ctx.step(f"Downloading {title} {to_tag}")
-            await jvm.modrinth.download_pack(version, pack_path)
-            index = read_pack(pack_path)
-            if old_spec.get("leave_out_client_only", True):
-                await jvm.leave_out_client_only(index, ctx, pack_path)
+
+            def announce(number: str) -> None:
+                nonlocal to_tag
+                to_tag = number
+                svc.repo.update_update(update_id, to_tag=to_tag)
+                ctx.step(f"Updating '{rec.name}': {title} {old_pack.get('version_number')} -> {to_tag}")
+
+            opened = await jvm.open_version(rec, version_id, ctx, announce)
+            index, pack_path = opened.index, opened.path
+            missing = [f for f in index.manual if not (directory / f.path).is_file()]
+            if missing:
+                raise ServerError(
+                    f"This version needs {len(missing)} mod(s) that have to be added by hand first, because their authors do not allow "
+                    f"automatic downloads: {', '.join(f.name or f.path for f in missing[:6])}. Add them to the server's mods folder (the "
+                    "Modpack tab links to each), then update again."
+                )
             major = available_java(await jvm.mojang.java_major(index.minecraft))
             java = await jvm.runtimes.ensure(major, jvm._java_progress(ctx, major))
             ctx.step("Downloading the new mods (the server keeps running meanwhile)")
@@ -209,6 +216,13 @@ class PackUpdater:
                 f"{len(report['added'])} mods added, {len(report['updated'])} updated, {len(report['removed'])} removed"
                 + (f"; {len(report['kept_mods'])} you changed by hand were left alone" if report["kept_mods"] else "")
             )
+            used = {f.path for f in index.files}
+            gone = [m["path"] for m in old_lock.get("manual") or [] if m.get("path") not in used and (directory / str(m.get("path"))).is_file()]
+            if gone:  # mods that were added by hand for the old version: the manager never installed them, so it does not remove them either
+                ctx.warn(
+                    "These mods were added by hand for the old version, and the new version does not use them under that name. If they are "
+                    "out of date, delete them from the mods folder: " + ", ".join(gone[:8])
+                )
             if report["kept_configs"]:
                 ctx.warn(
                     f"{len(report['kept_configs'])} configuration file(s) you changed were kept; the modpack's new version of each is "
@@ -219,8 +233,7 @@ class PackUpdater:
                 ctx.step(f"Installing {index.loader.label}")
                 launch = await jvm.loaders.install(index.loader, directory, java.java, lambda message: ctx.progress(None, message))
             fresh = {k: v for k, v in old_pack.items() if k != "pending"}
-            new_pack = {**fresh, "version_id": version["id"], "version_number": to_tag, "published": version.get("date_published"),
-                        "version_type": version.get("version_type", "release"), **client_only_info(index)}
+            new_pack = {**fresh, **opened.info}
             previous = {k: old_spec.get(k) for k in PREVIOUS_FIELDS}
             svc.repo.update_server(
                 rec.id, pending_since=None, spec={
@@ -241,7 +254,9 @@ class PackUpdater:
             await self._handle_failure(rec, old_spec, old_lock, update_id, backup_row, was_running, switched, version_id, to_tag, ctx, exc)
             return
         finally:
-            pack_path.unlink(missing_ok=True)
+            if opened is not None:
+                opened.cleanup()
+                jvm.packs.cache.forget_staged(opened.index.stage)
 
         svc.repo.update_update(update_id, status="success", message="Updated", finished_at=iso())
         svc.repo.set_kv(f"skip:{rec.id}", "")
@@ -262,10 +277,19 @@ class PackUpdater:
             if rt.state != "running":
                 raise ServerError(f"The updated server stopped by itself ({rt.last_error or rt.state}).")
             await asyncio.sleep(1)
-        try:
-            await server_list_ping("127.0.0.1", self.svc.get(rec.id).java_port, timeout=3)
-        except PingError as exc:
-            raise ServerError(f"The updated server no longer answers on its port ({exc}).") from exc
+        last: PingError | None = None
+        for attempt in range(PING_ATTEMPTS):
+            try:
+                await server_list_ping("127.0.0.1", self.svc.get(rec.id).java_port, timeout=5)
+                return
+            except PingError as exc:
+                last = exc
+            rt = self.svc.pm.runtime(rec.id)
+            if rt.state != "running":
+                raise ServerError(f"The updated server stopped by itself ({rt.last_error or rt.state}).")
+            if attempt + 1 < PING_ATTEMPTS:
+                await asyncio.sleep(PING_PAUSE)
+        raise ServerError(f"The updated server no longer answers on its port ({last}).")
 
     async def _handle_failure(
         self, rec: ServerRecord, old_spec: dict[str, Any], old_lock: dict[str, Any], update_id: str, backup_row: dict[str, Any] | None,

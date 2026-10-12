@@ -44,8 +44,9 @@ class Settings:
     mgmt_port_range: tuple[int, int] = (29000, 29999)
     timezone: str = "UTC"
     admin_user: str = "admin"
-    admin_password: str | None = None
-    github_token: str | None = None
+    admin_password: str | None = field(default=None, repr=False)
+    github_token: str | None = field(default=None, repr=False)
+    curseforge_api_key: str | None = field(default=None, repr=False)  # a personal key for the CurseForge API: it is not meant to be shared
     github_repo: str = "Pumpkin-MC/Pumpkin"
     github_api_url: str = "https://api.github.com"
     update_check_minutes: int = 360
@@ -111,6 +112,7 @@ class Settings:
             admin_user=env.get("ADMIN_USER", "admin") or "admin",
             admin_password=env.get("ADMIN_PASSWORD") or None,
             github_token=env.get("GITHUB_TOKEN") or None,
+            curseforge_api_key=(env.get("CURSEFORGE_API_KEY") or "").strip() or None,
             github_repo=env.get("PUMPKIN_REPO", "Pumpkin-MC/Pumpkin"),
             github_api_url=env.get("GITHUB_API_URL", "https://api.github.com").rstrip("/"),
             update_check_minutes=max(5, int(env.get("UPDATE_CHECK_MINUTES", "360"))),

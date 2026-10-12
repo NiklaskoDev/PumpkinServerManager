@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +13,19 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 SERVER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+# What a program started by the manager gets of the manager's own environment: what any program needs to run, and none of
+# the manager's secrets (the administrator password, the tokens and keys for GitHub and CurseForge).
+CHILD_ENV_KEEP = frozenset({"PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR"})
+CHILD_ENV_KEEP_WINDOWS = frozenset({
+    "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "TEMP", "TMP", "WINDIR", "PROGRAMDATA", "ALLUSERSPROFILE",
+    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "COMMONPROGRAMFILES",
+})
+
+
+def plain_environment(extra: Iterable[str] = ()) -> dict[str, str]:
+    """A copy of the environment with only what a child program needs (plus the ``extra`` names the administrator allowed)."""
+    keep = CHILD_ENV_KEEP | (CHILD_ENV_KEEP_WINDOWS if os.name == "nt" else frozenset()) | set(extra)
+    return {k: v for k, v in os.environ.items() if k in keep}
 
 
 def utcnow() -> datetime:

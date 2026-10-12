@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from jvmfakes import FakeInternet, FakeJava, FakeMod, FakeModrinth
+from jvmfakes import FakeCurseForge, FakeInternet, FakeJava, FakeMod, FakeModrinth
 
 FAKE_JAVA = Path(__file__).parent / "fake_java_server.py"
 LITHIUM = FakeMod("mods/lithium.jar", b"lithium" * 100)
@@ -25,6 +25,7 @@ class JavaWorld:
         self.net.minecraft({"1.21.1": 21, "1.20.1": 17, "1.16.5": 8})
         self.net.maven_installer("neoforge", "1.21.1", "21.1.77")
         self.net.fabric("1.21.1", "0.16.9", "1.0.1")
+        self.cf = FakeCurseForge(self.net)  # unused unless a test adds CurseForge packs (and gives the app a key)
         self.installer = FakeJava()
         self.behavior: dict[str, Any] = {"minecraft": "1.21.1"}  # what the fake Java server does (see fake_java_server.py)
         self.pack = FakeModrinth(self.net, slug="cool-pack", title="Cool Pack", project_id="AbCdEf12")
