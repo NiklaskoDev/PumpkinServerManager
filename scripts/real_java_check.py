@@ -144,6 +144,15 @@ def said(ctx: AppContext, server_id: str, text: str, since: int = 0) -> bool:
     return any(text in strip_ansi(line["m"]) for line in ctx.pm.backlog(server_id, 4000) if line["n"] > since)
 
 
+def said_since_start(ctx: AppContext, server_id: str, text: str) -> bool:
+    """Whether the current run of the server said ``text``: asks the console file, which keeps everything since the last start (the
+    manager's own console window holds the last 3000 lines, and a big modpack prints more than that within a minute of saying Done)."""
+    try:
+        return text in strip_ansi((ctx.settings.logs_dir / server_id / "console.log").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------------------------------- one loader
 async def check_loader(ctx: AppContext, client: httpx.AsyncClient, loader: str, minecraft: str | None, memory: int) -> None:
     section(f"{loader}: look up versions and build a modpack from live data")
@@ -167,7 +176,6 @@ async def check_pack_update(ctx: AppContext, label: str, server_id: str, older: 
     pending = (ctx.servers.get(server_id).spec.get("pack") or {}).get("pending")
     if not check(bool(pending) and pending["id"] == newest["id"], "the update check finds the newer version", str((pending or {}).get("number"))):
         return
-    mark = max((line["n"] for line in ctx.pm.backlog(server_id, 4000)), default=0)
     row = await wait_job(ctx, ctx.pack_updates.submit_update(ctx.servers.get(server_id)), timeout=3600)
     show_job(row)
     server = ctx.servers.get(server_id)
@@ -182,7 +190,7 @@ async def check_pack_update(ctx: AppContext, label: str, server_id: str, older: 
     check(row["status"] == "success", "the update was applied", row["message"] or "")
     check((server.spec.get("pack") or {}).get("version_id") == newest["id"] and ctx.pm.runtime(server_id).state == "running",
           "the server runs the new version", f"{len(files_before)} files before, {len(files_after)} after, {len(files_after - files_before)} new")
-    check(said(ctx, server_id, "Done (", mark), "the server printed its 'Done (...)!' line again after the update")
+    check(said_since_start(ctx, server_id, "Done ("), "the server printed its 'Done (...)!' line again after the update")
     safety = [b for b in ctx.repo.list_backups(server_id) if b.get("kind") == "pre-update"]
     check(bool(safety) and bool(safety[0]["verified"]), "a verified backup was taken before the update")
     check(bool(ctx.servers.jvm.describe(server)[0]["can_roll_back"]), "the update can be rolled back")

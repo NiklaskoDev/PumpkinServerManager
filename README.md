@@ -322,7 +322,7 @@ Pumpkin servers. What is different:
   `scripts/real_java_check.py` repeats that whenever you want to see it for your own setup. CurseForge packs have been run
   on Windows with a real CurseForge key: Cobblemon Official Modpack [Fabric] (from the author's server files and from the
   list of mods; created, started, backed up, restored, updated from 1.8 to 1.8.1 and rolled back), All the Mods 10 (461 mods from
-  the author's server files, started in 19 seconds, backed up and restored), Prominence II (its server files hold no mods, so
+  the author's server files: started, backed up, restored, updated from 8.1 to 8.2 and rolled back), Prominence II (its server files hold no mods, so
   the list of mods was used: 347 mods installed, 5 left to add by hand) and Better MC [FABRIC] BMC2 (the 22 mods its Missing
   Mods Checker asks for installed through CurseForge, then every check). The Linux image has not run CurseForge packs yet: the key
   cannot go into the CI.
