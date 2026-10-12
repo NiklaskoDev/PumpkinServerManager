@@ -1,8 +1,8 @@
-"""Java servers: creating modpack servers, starting them and managing their settings.
+"""Java servers: creating modpack servers and Vanilla, Paper and Fabric servers, starting them and managing their settings.
 
 A Java server is an ordinary server of the manager (same console, backups, players, accounts) that runs a different
-engine: the manager downloads the Java it needs, installs the modpack and its mod loader, and starts it with the right
-command line. ``ServerService`` hands over to this class wherever the two engines differ.
+engine: the manager downloads the Java it needs, installs the modpack and its mod loader (or the server software itself),
+and starts it with the right command line. ``ServerService`` hands over to this class wherever the two engines differ.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from ..jobs import JobContext
-from ..models import ServerPolicy, ServerRecord
+from ..models import SOFTWARE_NAMES, ServerPolicy, ServerRecord, software_label
 from ..pumpkin_config import ConfigError
 from ..servers import ServerError
 from ..util import atomic_write_text, human_bytes, iso
@@ -49,6 +49,7 @@ from .mojang import MojangMeta, available_java
 from .mrpack import LOCK_DIR, LOCK_NAME, PackError, PackIndex, PackInstaller, override_mods, read_pack
 from .net import DownloadError, ProgressCallback
 from .runtime import JavaRuntimes
+from .software import SoftwareCatalog, SoftwareInstaller
 
 if TYPE_CHECKING:
     from ..servers import ServerService
@@ -67,6 +68,23 @@ MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 JAVA_POLICY_DEFAULTS: dict[str, Any] = {
     "start_timeout": 900, "stop_timeout": 180, "update_mode": "notify", "backup_exclude": ["logs", "crash-reports", "cache"],
 }
+SOFTWARE_MEMORY_MB = 2048  # what a server without a modpack starts with
+
+
+# What these servers unpack or download by themselves when they start and find it missing: Vanilla extracts libraries/ and versions/
+# from its jar, Paper rebuilds libraries/ and cache/, Fabric downloads libraries/ and .fabric/. A fresh server is two thirds of that
+# (130-220 MB, with a world of 3-7 MB), so backups leave it out; the patterns with a slash only match at the top of the server folder.
+REGENERATED = ["cache", "libraries/*", "versions/*"]
+
+
+def software_policy_defaults(kind: str) -> dict[str, Any]:
+    """Vanilla, Paper and Fabric start and save faster than a modpack. Paper builds are small steps (plugins are made for them), so
+    they are installed by themselves unless the person says otherwise; a new Minecraft version never is."""
+    excluded = ["logs", "crash-reports", *REGENERATED, *([".fabric/*"] if kind == "fabric" else [])]
+    return {
+        **JAVA_POLICY_DEFAULTS, "start_timeout": 600, "stop_timeout": 120, "update_mode": "auto" if kind == "paper" else "notify",
+        "backup_exclude": excluded,
+    }
 
 
 def mods_text(count: int) -> str:
@@ -81,6 +99,17 @@ def client_only_info(index: PackIndex) -> dict[str, Any]:
 def manual_info(index: PackIndex) -> dict[str, Any]:
     """The mods that have to be added by hand (their authors do not allow downloading them automatically), for the dashboard."""
     return {"manual": [{"path": f.path, "name": f.name, "page": f.page} for f in index.manual][:300], "manual_count": len(index.manual)}
+
+
+@dataclass
+class NewServer:
+    """What every new Java server has in common, checked before anything is downloaded."""
+
+    name: str
+    memory: int
+    jvm_args: str
+    values: dict[str, Any]
+    policy: ServerPolicy
 
 
 @dataclass
@@ -117,7 +146,7 @@ class JavaLaunch:
 class JavaServerService:
     def __init__(
         self, svc: ServerService, runtimes: JavaRuntimes, mojang: MojangMeta, modrinth: ModrinthClient, loaders: LoaderInstaller,
-        packs: PackInstaller, uploads_dir: Path, curseforge: CurseForgeClient,
+        packs: PackInstaller, uploads_dir: Path, curseforge: CurseForgeClient, software: SoftwareCatalog, installer: SoftwareInstaller,
     ):
         self.svc = svc
         self.runtimes = runtimes
@@ -126,6 +155,8 @@ class JavaServerService:
         self.curseforge = curseforge
         self.loaders = loaders
         self.packs = packs
+        self.software = software  # what Mojang, PaperMC and Fabric offer
+        self.installer = installer  # puts that on disk
         self.uploads_dir = uploads_dir
         self._icons: dict[str, tuple[bytes, str]] = {}
         self.argv_wrapper: Callable[[list[str]], list[str]] | None = None  # a test seam, like ServerService.command_builder
@@ -170,9 +201,17 @@ class JavaServerService:
         return " ".join(shlex.quote(t) for t in tokens)
 
     # ------------------------------------------------------------------- views
-    def describe(self, rec: ServerRecord) -> tuple[dict[str, Any], dict[str, Any]]:
-        """(modpack, java) parts of the server view: what it runs, and how it is run."""
+    def describe(self, rec: ServerRecord) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """(modpack, java) parts of the server view: what it runs, and how it is run. A server that runs Vanilla, Paper or Fabric
+        has no modpack (see ``describe_software``)."""
         spec = rec.spec
+        installed = self.runtimes.get(int(spec.get("java") or 0))
+        java = {
+            "major": spec.get("java"), "memory_mb": spec.get("memory_mb"), "jvm_args": spec.get("jvm_args", ""),
+            "runtime": installed.release if installed else None,
+        }
+        if spec.get("software"):
+            return None, java
         pack = spec.get("pack") or {}
         loader = spec.get("loader") or {}
         label = {"fabric": "Fabric", "quilt": "Quilt", "forge": "Forge", "neoforge": "NeoForge"}.get(loader.get("kind", ""), loader.get("kind", ""))
@@ -184,12 +223,21 @@ class JavaServerService:
             "server_pack": bool(pack.get("server_pack")), "manual": self._missing_manual(rec, pack),
             "loader": {"kind": loader.get("kind"), "version": loader.get("version"), "label": f"{label} {loader.get('version', '')}".strip()},
         }
-        installed = self.runtimes.get(int(spec.get("java") or 0))
-        java = {
-            "major": spec.get("java"), "memory_mb": spec.get("memory_mb"), "jvm_args": spec.get("jvm_args", ""),
-            "runtime": installed.release if installed else None,
-        }
         return modpack, java
+
+    def describe_software(self, rec: ServerRecord) -> dict[str, Any] | None:
+        """What a Vanilla, Paper or Fabric server runs, for the server view (None for the other kinds of server)."""
+        software = rec.spec.get("software")
+        if not software:
+            return None
+        kind = str(software.get("kind") or "")
+        api = software.get("fabric_api")
+        return {
+            "kind": kind, "name": SOFTWARE_NAMES.get(kind, kind), "minecraft": software.get("minecraft"), "build": software.get("build") or None,
+            "channel": software.get("channel"), "label": software_label(software), "installed_at": software.get("installed_at"),
+            "support": software.get("support"), "pending": software.get("pending"), "upgrade": software.get("upgrade"),
+            "can_roll_back": bool(rec.spec.get("previous")), "fabric_api": {"number": api.get("number")} if api else None,
+        }
 
     def _missing_manual(self, rec: ServerRecord, pack: dict[str, Any]) -> list[dict[str, Any]]:
         """The mods that have to be added by hand and are not in the server's mods folder yet."""
@@ -200,7 +248,8 @@ class JavaServerService:
         return [m for m in wanted if not (directory / str(m.get("path", "-"))).is_file()]
 
     # ------------------------------------------------------------------ create
-    async def create(self, spec: dict[str, Any], ctx: JobContext) -> ServerRecord:
+    def _check_new(self, spec: dict[str, Any], *, memory: int, defaults: dict[str, Any]) -> NewServer:
+        """Check what every new Java server needs (name, EULA, memory, options, settings, policy) before anything is downloaded."""
         svc = self.svc
         name = " ".join(str(spec["name"]).split())
         if not 1 <= len(name) <= 40:
@@ -210,15 +259,62 @@ class JavaServerService:
         if spec.get("eula") is not True:
             raise self._error(f"Running a Minecraft server means accepting the Minecraft EULA ({EULA_URL}). Tick the box to confirm.")
         try:
-            memory = self.parse_memory(4096 if spec.get("memory_mb") is None else spec["memory_mb"])  # the API sends None when it was left out
+            wanted = self.parse_memory(memory if spec.get("memory_mb") is None else spec["memory_mb"])  # the API sends None when it was left out
             jvm_args = self.parse_jvm_args(spec.get("jvm_args"))
             values = props.validate_values({"op-permission-level": props.DEFAULT_OP_LEVEL, **(spec.get("settings") or {})})
-            policy = ServerPolicy.model_validate({**JAVA_POLICY_DEFAULTS, **(spec.get("policy") or {})})
+            policy = ServerPolicy.model_validate({**defaults, **(spec.get("policy") or {})})
         except ConfigError as exc:
             raise self._error(f"Invalid settings: {exc}") from exc
         except ValueError as exc:
             raise self._error(f"Invalid policy: {exc}") from exc
+        return NewServer(name, wanted, jvm_args, values, policy)
 
+    async def create(self, spec: dict[str, Any], ctx: JobContext) -> ServerRecord:
+        software = spec.get("software")
+        if software is not None:
+            if not isinstance(software, dict):
+                raise self._error("The software to install is not valid.")
+            kind = SoftwareCatalog.check_kind(software.get("kind"))
+            new = self._check_new(spec, memory=SOFTWARE_MEMORY_MB, defaults=software_policy_defaults(kind))
+            return await self._create_software(new, kind, software, spec, ctx)
+        return await self._create_modpack(self._check_new(spec, memory=4096, defaults=JAVA_POLICY_DEFAULTS), spec, ctx)
+
+    async def _register(self, new: NewServer, staging: Path, record_spec: dict[str, Any], port: Any) -> tuple[ServerRecord, int]:
+        """Give a new server the files every server gets, move its folder into place and record it. Returns it and its game port."""
+        svc = self.svc
+        self._write_eula(staging)
+        existing = staging / props.FILE_NAME
+        text = props.apply(existing.read_text(encoding="utf-8") if existing.is_file() else "", new.values)
+        async with svc._create_lock:
+            if any(r.name.lower() == new.name.lower() for r in svc.repo.list_servers()):  # another creation may have finished meanwhile
+                raise self._error("A server with that name already exists.")
+            server_id = svc._unique_id(new.name)
+            java_port = svc.allocate_port("java", port)
+            mgmt_port = svc.allocate_port("mgmt")
+            directory = svc.server_dir(server_id)
+            rec = ServerRecord(
+                id=server_id, name=new.name, created_at=iso(), channel="", pinned_tag=None, build_id=None, previous_build_id=None,
+                java_port=java_port, bedrock_port=None, mgmt_port=mgmt_port,
+                mgmt_secret="".join(secrets.choice(_SECRET_ALPHABET) for _ in range(40)), policy=new.policy, desired_running=False,
+                last_backup_at=iso(), last_update_check_at=None, pending_build_id=None, pending_since=None, engine="java", spec=record_spec,
+            )
+            try:
+                os.replace(staging, directory)
+                atomic_write_text(directory / props.FILE_NAME, props.apply_managed(text, java_port)[0])
+                svc.repo.insert_server(rec)
+            except BaseException:
+                shutil.rmtree(directory, ignore_errors=True)
+                raise
+        return rec, java_port
+
+    def _announce_created(self, rec: ServerRecord, java_port: int, what: str, ctx: JobContext) -> None:
+        ctx.claim(rec.id)
+        ctx.step(f"Server '{rec.name}' created on port {java_port}")
+        self.svc.reporter.record("success", "server", f"Server '{rec.name}' created ({what}, port {java_port})", rec.id)
+        self.svc.publish_state(rec.id)
+
+    async def _create_modpack(self, new: NewServer, spec: dict[str, Any], ctx: JobContext) -> ServerRecord:
+        svc = self.svc
         modpack = spec.get("modpack") or {}
         staging = svc.settings.servers_dir / f".create-{uuid.uuid4().hex}"
         opened: OpenedPack | None = None
@@ -249,47 +345,80 @@ class JavaServerService:
             ctx.step(f"Installing {index.loader.label}")
             launch = await self.loaders.install(index.loader, staging, java.java, lambda message: ctx.progress(None, message))
             ctx.progress(0.9, "Creating the server")
-            self._write_eula(staging)
-            text = props.apply((staging / props.FILE_NAME).read_text(encoding="utf-8") if (staging / props.FILE_NAME).is_file() else "", values)
-
-            async with svc._create_lock:
-                if any(r.name.lower() == name.lower() for r in svc.repo.list_servers()):  # another creation may have finished meanwhile
-                    raise self._error("A server with that name already exists.")
-                server_id = svc._unique_id(name)
-                java_port = svc.allocate_port("java", spec.get("java_port"))
-                mgmt_port = svc.allocate_port("mgmt")
-                directory = svc.server_dir(server_id)
-                rec = ServerRecord(
-                    id=server_id, name=name, created_at=iso(), channel="", pinned_tag=None, build_id=None, previous_build_id=None,
-                    java_port=java_port, bedrock_port=None, mgmt_port=mgmt_port,
-                    mgmt_secret="".join(secrets.choice(_SECRET_ALPHABET) for _ in range(40)), policy=policy, desired_running=False,
-                    last_backup_at=iso(), last_update_check_at=None, pending_build_id=None, pending_since=None, engine="java",
-                    spec={
-                        "kind": "modpack", "minecraft": index.minecraft, "loader": {"kind": index.loader.kind, "version": index.loader.version},
-                        "java": major, "memory_mb": memory, "jvm_args": jvm_args, "launch": launch, "pack": pack_info,
-                        "leave_out_client_only": leave_out, "eula_accepted_at": iso(),
-                    },
-                )
-                try:
-                    os.replace(staging, directory)
-                    atomic_write_text(directory / props.FILE_NAME, props.apply_managed(text, java_port)[0])
-                    svc.repo.insert_server(rec)
-                except BaseException:
-                    shutil.rmtree(directory, ignore_errors=True)
-                    raise
+            rec, java_port = await self._register(new, staging, {
+                "kind": "modpack", "minecraft": index.minecraft, "loader": {"kind": index.loader.kind, "version": index.loader.version},
+                "java": major, "memory_mb": new.memory, "jvm_args": new.jvm_args, "launch": launch, "pack": pack_info,
+                "leave_out_client_only": leave_out, "eula_accepted_at": iso(),
+            }, spec.get("java_port"))
         finally:
             shutil.rmtree(staging, ignore_errors=True)
             if opened is not None:
                 opened.cleanup()
         if modpack.get("source") == "upload":
             self._forget_upload(modpack.get("upload"))
-        ctx.claim(rec.id)
-        ctx.step(f"Server '{name}' created on port {java_port}")
-        svc.reporter.record("success", "server", f"Server '{name}' created ({index.name}, port {java_port})", rec.id)
-        svc.publish_state(rec.id)
+        self._announce_created(rec, java_port, index.name, ctx)
         if spec.get("start", True) and index.manual:
             ctx.step("The server is not started yet: add the mods listed in the Modpack tab first, then start it")
         elif spec.get("start", True):
+            ctx.step("Starting the server for the first time (the world is generated now, which takes a while)")
+            await svc._do_start(rec, ctx)
+        return rec
+
+    async def _create_software(self, new: NewServer, kind: str, request: dict[str, Any], spec: dict[str, Any], ctx: JobContext) -> ServerRecord:
+        """Vanilla, Paper or Fabric: nothing to unpack, so this is mostly one download and a check of it."""
+        svc = self.svc
+        staging = svc.settings.servers_dir / f".create-{uuid.uuid4().hex}"
+        try:
+            ctx.step(f"Looking up {SOFTWARE_NAMES[kind]}")
+            build, options = await self.software.resolve(kind, request.get("minecraft") or None, request.get("build") or None)
+            ctx.step(f"Using {build.label}")
+            if kind == "paper" and not build.stable:
+                ctx.warn(
+                    f"Paper has no stable build for Minecraft {build.minecraft} yet. Build {build.build} is an experimental one ({build.channel}); "
+                    "PaperMC advises against running those on a server that matters. Choose an older Minecraft version for a stable build."
+                )
+            if (options.support or {}).get("status") == "UNSUPPORTED":
+                end = (options.support or {}).get("end")
+                ctx.warn(f"PaperMC no longer maintains Minecraft {build.minecraft}{f' (since {end})' if end else ''}: it still runs, but gets no more fixes.")
+            major = available_java(max(await self.mojang.java_major(build.minecraft), options.java_minimum or 0))
+            ctx.step(f"Minecraft {build.minecraft} needs Java {major}")
+            java = await self.runtimes.ensure(major, self._java_progress(ctx, major))
+
+            staging.mkdir(parents=True)
+            launch = await self.installer.fetch(
+                build, staging, java.java, lambda message: ctx.progress(None, message),
+                lambda done, total: ctx.progress(0.25 + 0.5 * (done / total if total else 0), f"Downloading {build.label} ({done // 1048576} of {total // 1048576} MiB)"),
+            )
+            fabric_api = None
+            if kind == "fabric" and request.get("fabric_api") is not False:
+                api = await self.installer.fabric_api(build.minecraft)
+                if api is None:
+                    ctx.warn(
+                        f"Fabric API has no version for Minecraft {build.minecraft} yet. Most mods need it: add it to the mods folder yourself "
+                        "once it is published."
+                    )
+                else:
+                    ctx.step(f"Installing Fabric API {api.number}")
+                    fabric_api = await self.installer.install_fabric_api(api, staging)
+            jvm_args = new.jvm_args
+            if not jvm_args and options.flags and request.get("recommended_flags") is not False:
+                jvm_args = self.parse_jvm_args(" ".join(options.flags))
+                ctx.step("Using the Java options PaperMC recommends for this version")
+            ctx.progress(0.9, "Creating the server")
+            software: dict[str, Any] = {
+                "kind": kind, "minecraft": build.minecraft, "build": build.build, "channel": build.channel, "installed_at": iso(),
+                "support": options.support,
+            }
+            if fabric_api:
+                software["fabric_api"] = fabric_api
+            rec, java_port = await self._register(new, staging, {
+                "kind": "software", "minecraft": build.minecraft, "software": software, "java": major, "memory_mb": new.memory,
+                "jvm_args": jvm_args, "launch": launch, "eula_accepted_at": iso(),
+            }, spec.get("java_port"))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        self._announce_created(rec, java_port, build.label, ctx)
+        if spec.get("start", True):
             ctx.step("Starting the server for the first time (the world is generated now, which takes a while)")
             await svc._do_start(rec, ctx)
         return rec
@@ -766,22 +895,42 @@ class JavaServerService:
         launch = spec.get("launch") or {}
         wanted = directory / (launch.get("argfile") or launch.get("jar") or "-")
         if not wanted.is_file():
-            found = find_launch(directory, (spec.get("loader") or {}).get("kind", ""))
-            if found is None:
-                raise self._error(
-                    "The files that start the mod loader are missing from the server folder. "
-                    "Restore a backup, or create the server again from its modpack."
-                )
-            spec = {**spec, "launch": found}
-            svc.repo.update_server(rec.id, spec=spec)
-            rec = svc.get(rec.id)
+            if spec.get("software"):
+                rec = await self._reinstall_software(rec, java, ctx)  # the manager knows exactly what belongs here
+                spec = rec.spec
+            else:
+                found = find_launch(directory, (spec.get("loader") or {}).get("kind", ""))
+                if found is None:
+                    raise self._error(
+                        "The files that start the mod loader are missing from the server folder. "
+                        "Restore a backup, or create the server again from its modpack."
+                    )
+                spec = {**spec, "launch": found}
+                svc.repo.update_server(rec.id, spec=spec)
+                rec = svc.get(rec.id)
         env = svc.child_env(rec)
         env.pop("RUST_BACKTRACE", None)
         env.update(JAVA_HOME=str(java.path), LANG="C.UTF-8", PATH=os.pathsep.join([str(java.java.parent), env.get("PATH", "")]).rstrip(os.pathsep))
-        modpack, _ = self.describe(rec)
-        label = f"{modpack['title'] or 'the modpack'} ({modpack['loader']['label']}, Java {major})"
+        if spec.get("software"):
+            label = f"{software_label(spec['software'])} on Java {major}"
+        else:
+            modpack, _ = self.describe(rec)
+            label = f"{modpack['title'] or 'the modpack'} ({modpack['loader']['label']}, Java {major})"
         argv = self.build_argv(rec, java.java, directory)
         return JavaLaunch(argv=self.argv_wrapper(argv) if self.argv_wrapper else argv, env=env, ready_re=READY_RE, fail_re=FAIL_RE, label=label)
+
+    async def _reinstall_software(self, rec: ServerRecord, java: Any, ctx: JobContext) -> ServerRecord:
+        """The jar of a Vanilla, Paper or Fabric server is gone (deleted, or lost with a restore): fetch exactly the build it runs again."""
+        svc = self.svc
+        software = rec.spec["software"]
+        build, _ = await self.software.resolve(software["kind"], software["minecraft"], software.get("build") or None)
+        ctx.step(f"The files of {build.label} are missing from the server folder; downloading them again")
+        launch = await self.installer.fetch(
+            build, svc.server_dir(rec.id), java.java, lambda message: ctx.progress(None, message),
+            lambda done, total: ctx.progress(0.2 + 0.3 * (done / total if total else 0), f"Downloading {build.label}"),
+        )
+        svc.repo.update_server(rec.id, spec={**rec.spec, "launch": launch})
+        return svc.get(rec.id)
 
     # ------------------------------------------------------------ player lists
     def lists_dir(self, rec: ServerRecord) -> Path:

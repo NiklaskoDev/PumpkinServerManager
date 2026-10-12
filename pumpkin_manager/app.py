@@ -36,6 +36,8 @@ from .jvm.net import new_client
 from .jvm.packupdates import PackUpdater
 from .jvm.runtime import JavaDownloads, JavaRuntimes, JavaSource, run_java_version
 from .jvm.service import JavaServerService
+from .jvm.software import SoftwareCatalog, SoftwareInstaller
+from .jvm.softwareupdates import SoftwareUpdater
 from .models import AppSettings
 from .notify import Notifier
 from .process import ProcessManager
@@ -115,6 +117,7 @@ class AppContext:
             lambda: self.release_source, self.app_settings, **extra,
         )
         self.pack_updates = PackUpdater(self.servers.jvm, **extra)
+        self.software_updates = SoftwareUpdater(self.servers.jvm, **extra)
         self.scheduler = Scheduler(self)
         self.jobs.on_finish = self._on_job_finished
         self.generated_admin_password: str | None = None
@@ -145,9 +148,11 @@ class AppContext:
         self.loader_installer = LoaderInstaller(self.java_http, java_runner or run_process)
         self.mod_cache = ModCache(self.settings.cache_dir / "mods")
         self.packs = PackInstaller(self.java_http, self.mod_cache, headers_for=self.curseforge.download_headers)
+        self.software = SoftwareCatalog(self.java_http, self.mojang)
+        self.software_installer = SoftwareInstaller(self.java_http, self.loader_installer, self.modrinth)
         self.servers.jvm = JavaServerService(
             self.servers, self.runtimes, self.mojang, self.modrinth, self.loader_installer, self.packs, self.settings.cache_dir / "uploads",
-            self.curseforge,
+            self.curseforge, self.software, self.software_installer,
         )
 
     # ----------------------------------------------------------------- settings
@@ -329,9 +334,9 @@ def create_app(
             body["code"] = exc.code  # type: ignore[attr-defined]
         return JSONResponse(body, status_code=exc.status)
 
-    from .api import auth, backups, files, modpacks, servers, system, users, versions
+    from .api import auth, backups, files, modpacks, servers, software, system, users, versions
 
-    for module in (auth, system, users, servers, files, backups, versions, modpacks):
+    for module in (auth, system, users, servers, files, backups, versions, modpacks, software):
         app.include_router(module.router, prefix="/api")
 
     if STATIC_DIR.is_dir():

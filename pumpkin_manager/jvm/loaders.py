@@ -122,8 +122,11 @@ def find_launch(server_dir: Path, kind: str) -> dict[str, str] | None:
             if jar:
                 return {"jar": jar.name}
         return None
-    name = {"fabric": "fabric-server-launch.jar", "quilt": "quilt-server-launch.jar"}[kind]
-    return {"jar": name} if (server_dir / name).is_file() else None
+    # Fabric and Quilt leave a launcher; the servers the manager sets up without a modpack keep their jar under a fixed name.
+    name = {
+        "fabric": "fabric-server-launch.jar", "quilt": "quilt-server-launch.jar", "vanilla": "server.jar", "paper": "paper.jar",
+    }.get(kind)
+    return {"jar": name} if name and (server_dir / name).is_file() else None
 
 
 class LoaderInstaller:

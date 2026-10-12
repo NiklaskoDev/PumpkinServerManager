@@ -1,8 +1,9 @@
-// "New server": which kind? A Pumpkin server (fast, light, no mods) or a Java modpack server.
+// "New server": which kind? A Pumpkin server (fast, light, no mods), a Vanilla, Paper or Fabric server, or a Java modpack server.
 
 import { h, icon } from "../dom.js";
 import { modal } from "../ui.js";
 import { openCreateModpackServer } from "./create-modpack.js";
+import { openCreateSoftwareServer } from "./create-software.js";
 import { openCreateServer } from "./create.js";
 
 export function openNewServer() {
@@ -13,6 +14,9 @@ export function openNewServer() {
       h("button", { type: "button", class: "option-card", onclick: choose(openCreateServer) },
         h("span", { class: "name" }, icon("server"), "Pumpkin server", h("span", { class: "badge success" }, "light")),
         h("span", { class: "desc" }, "Minecraft written in Rust. Starts in seconds and needs very little memory. Vanilla gameplay: no mods or plugins.")),
+      h("button", { type: "button", class: "option-card", onclick: choose(openCreateSoftwareServer) },
+        h("span", { class: "name" }, icon("layers"), "Vanilla, Paper or Fabric server", h("span", { class: "badge accent" }, "Java")),
+        h("span", { class: "desc" }, "Java Edition without a modpack: Mojang's own server, Paper for plugins, or Fabric for mods. The manager downloads the software and the Java it needs, and keeps it up to date.")),
       h("button", { type: "button", class: "option-card", onclick: choose(openCreateModpackServer) },
         h("span", { class: "name" }, icon("layers"), "Modpack server", h("span", { class: "badge accent" }, "Java")),
         h("span", { class: "desc" }, "Java Edition with mods. Pick a modpack from Modrinth or CurseForge, or upload one: Java, the mod loader and the mods are set up for you. Needs several GB of memory."))),

@@ -12,7 +12,27 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 Channel = Literal["stable", "nightly", "canary"]
 CHANNELS: tuple[str, ...] = ("stable", "nightly", "canary")
 
+# Java servers that are not made from a modpack: the manager downloads and updates the software itself.
+SOFTWARE_NAMES = {"vanilla": "Vanilla", "paper": "Paper", "fabric": "Fabric"}
+_SOFTWARE_BUILD_WORD = {"paper": "build", "fabric": "loader"}
+
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def software_label(software: dict[str, Any]) -> str:
+    """'Paper 1.21.8 (build 60)', 'Fabric 1.21.8 (loader 0.19.5)' or 'Vanilla 1.21.8': what a server's software is, in a few words."""
+    kind = str(software.get("kind") or "")
+    name = SOFTWARE_NAMES.get(kind, kind.capitalize() or "Software")
+    label = f"{name} {software.get('minecraft') or ''}".strip()
+    build, word = software.get("build"), _SOFTWARE_BUILD_WORD.get(kind)
+    return f"{label} ({word} {build})" if build and word else label
+
+
+def software_tag(software: dict[str, Any]) -> str:
+    """The same without the name of the software ('1.21.8 (build 60)'): the version, as the update history writes it."""
+    label = software_label(software)
+    name = SOFTWARE_NAMES.get(str(software.get("kind") or ""), "")
+    return label[len(name):].strip() if name and label.startswith(name) else label
 
 
 class BackupSchedule(BaseModel):
@@ -166,6 +186,17 @@ class ServerRecord:
     @property
     def is_java(self) -> bool:
         return self.engine == "java"
+
+    @property
+    def java_tag(self) -> str | None:
+        """What a Java server runs, in a few words (a modpack and its version, or the software and its version); None for Pumpkin."""
+        if not self.is_java:
+            return None
+        software = self.spec.get("software")
+        if software:
+            return software_label(software)
+        pack = self.spec.get("pack") or {}
+        return f"{pack.get('title') or 'Modpack'} {pack.get('version_number') or ''}".strip()
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "ServerRecord":

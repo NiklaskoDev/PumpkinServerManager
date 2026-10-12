@@ -160,6 +160,28 @@ class ModrinthClient:
             raise DownloadError("That is not a valid Modrinth version id.")
         return await get_json(self._client, f"{API}/version/{quote(version_id)}", what="Modrinth", delay=self._delay)
 
+    async def mod_versions(self, project: str, loader: str, minecraft: str) -> list[dict[str, Any]]:
+        """The versions of a mod (or plugin) project that run on this loader and Minecraft version, newest first."""
+        if not _IDENT_RE.match(project) or not _IDENT_RE.match(loader) or not _IDENT_RE.match(minecraft):
+            raise DownloadError("That is not a valid mod project or version name.")
+        data = await get_json(
+            self._client, f"{API}/project/{quote(project)}/version",
+            params={"loaders": json.dumps([loader]), "game_versions": json.dumps([minecraft]), "include_changelog": "false"},
+            what="Modrinth", delay=self._delay,
+        )
+        listed = [v for v in data if isinstance(v, dict) and v.get("status", "listed") in ("listed", "archived")]
+        return sorted(listed, key=lambda v: v.get("date_published", ""), reverse=True)
+
+    async def download_file(self, file: dict[str, Any], dest: Path, progress: ProgressCallback | None = None, what: str = "the file") -> None:
+        """Download one file of a version, checked against the checksum Modrinth lists for it."""
+        hashes = file.get("hashes") or {}
+        if not hashes.get("sha512"):
+            raise DownloadError("Modrinth did not give a checksum for that file, so it cannot be verified.")
+        await download(
+            self._client, file["url"], dest, size=file.get("size"), sha1=hashes.get("sha1"), sha512=hashes["sha512"],
+            progress=progress, allowed_hosts=ALLOWED_DOWNLOAD_HOSTS, what=what, delay=self._delay,
+        )
+
     async def download_pack(self, version: dict[str, Any], dest: Path, progress: ProgressCallback | None = None) -> None:
         file = pack_file(version)
         if file is None:

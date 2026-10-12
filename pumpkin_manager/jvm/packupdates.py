@@ -3,6 +3,8 @@
 The order is the safety guarantee, the same as for Pumpkin updates: fetch everything while the server keeps running,
 stop it, make a verified backup, switch the files, start it and watch it, and if it does not come up restore the backup.
 Mods and configuration live in the server folder, so restoring the backup returns the whole server to how it was.
+
+``JavaUpdates`` holds what updating a modpack and updating a server's software (``softwareupdates``) have in common.
 """
 
 from __future__ import annotations
@@ -16,12 +18,14 @@ from ..jobs import JobContext
 from ..mcnet import PingError, server_list_ping
 from ..models import ServerRecord
 from ..servers import ServerError
+from ..updater import retry_delay_minutes
 from ..util import iso
 from .loaders import LoaderError
 from .mojang import available_java
 from .mrpack import PackDownloadError, PackError
 from .net import BadDownloadError, DownloadError
 from .service import JavaServerService, OpenedPack
+from .software import SoftwareError
 
 log = logging.getLogger(__name__)
 
@@ -36,11 +40,193 @@ def pending_of(rec: ServerRecord) -> dict[str, Any] | None:
     return (rec.spec.get("pack") or {}).get("pending")
 
 
-class PackUpdater:
+class JavaUpdates:
+    """The parts of updating a Java server that do not depend on what is updated: watching the new version run, putting everything
+    back when it does not, and going back on request. A subclass says how its kind of version is named and what a rollback restores."""
+
+    previous_fields: tuple[str, ...] = PREVIOUS_FIELDS
+    counts_failures = False  # automatic updates wait longer after each failed attempt (software; a modpack is never updated by itself)
+    nothing_earlier = "This server has no earlier version to go back to."
+
     def __init__(self, jvm: JavaServerService, stability_seconds: float = 15.0):
         self.jvm = jvm
         self.svc = jvm.svc
         self.stability_seconds = stability_seconds
+
+    # ------------------------------------------------------------------------------------------ what differs
+    def tag_of(self, spec: dict[str, Any]) -> str | None:
+        """The short version a spec describes, as it is written in the update history."""
+        raise NotImplementedError
+
+    def name_of(self, spec: dict[str, Any]) -> str:
+        """What a spec runs, for messages: 'Cool Pack 1.0.0', 'Paper 1.21.8 (build 60)'."""
+        raise NotImplementedError
+
+    def marker_of(self, spec: dict[str, Any]) -> str:
+        """What names the version a spec runs in the 'do not offer it again' marker."""
+        raise NotImplementedError
+
+    def version_is_bad(self, exc: Exception) -> bool:
+        """Does this failure mean the version itself is unusable (so offering it again is pointless)?"""
+        return False
+
+    # ------------------------------------------------------------------------------------------ watching
+    async def _watch_stability(self, rec: ServerRecord, ctx: JobContext) -> None:
+        if self.stability_seconds <= 0:
+            return
+        ctx.step(f"Watching the new version for {int(self.stability_seconds)} seconds")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.stability_seconds
+        while loop.time() < deadline:
+            rt = self.svc.pm.runtime(rec.id)
+            if rt.state != "running":
+                raise ServerError(f"The updated server stopped by itself ({rt.last_error or rt.state}).")
+            await asyncio.sleep(1)
+        last: PingError | None = None
+        for attempt in range(PING_ATTEMPTS):
+            try:
+                await server_list_ping("127.0.0.1", self.svc.get(rec.id).java_port, timeout=5)
+                return
+            except PingError as exc:
+                last = exc
+            rt = self.svc.pm.runtime(rec.id)
+            if rt.state != "running":
+                raise ServerError(f"The updated server stopped by itself ({rt.last_error or rt.state}).")
+            if attempt + 1 < PING_ATTEMPTS:
+                await asyncio.sleep(PING_PAUSE)
+        raise ServerError(f"The updated server no longer answers on its port ({last}).")
+
+    async def _handle_failure(
+        self, rec: ServerRecord, old_spec: dict[str, Any], update_id: str, backup_row: dict[str, Any] | None,
+        was_running: bool, switched: bool, marker: str, to_label: str, ctx: JobContext, exc: Exception,
+    ) -> None:
+        svc = self.svc
+        known = (ServerError, BackupError, PackError, LoaderError, DownloadError, SoftwareError)
+        reason = str(exc) if isinstance(exc, known) else f"Unexpected error: {exc}"
+        if not isinstance(exc, known):
+            log.exception("Update of %s failed", rec.id)
+        ctx.step(f"Update failed: {reason}", "error")
+        rt = svc.pm.runtime(rec.id)
+        bad = self.version_is_bad(exc)
+        if switched or bad:
+            svc.repo.set_kv(f"skip:{rec.id}", marker)  # the version itself is the problem: do not offer it again
+        if not switched:
+            # Nothing was changed. Put the server back the way it was.
+            svc.repo.update_update(update_id, status="failed", message=reason, finished_at=iso())
+            if was_running and not rt.is_active:
+                ctx.step("Restarting the server on the previous version")
+                try:
+                    await svc._do_start(svc.get(rec.id), ctx)
+                except Exception as restart_exc:
+                    ctx.step(f"The previous version could not be restarted: {restart_exc}", "error")
+            retry_note = ""
+            if self.counts_failures:
+                if bad:
+                    retry_note = " This version will not be tried again automatically; a newer one will be."
+                else:
+                    failures = int(svc.repo.get_kv(f"autofails:{rec.id}") or 0) + 1
+                    svc.repo.set_kv(f"autofails:{rec.id}", str(failures))
+                    if rec.policy.update_mode == "auto":
+                        retry_note = f" The next automatic attempt is in about {retry_delay_minutes(failures)} minutes."
+            svc.reporter.record(
+                "error", "update", f"Update of '{rec.name}' to {to_label} was not applied: {reason}{retry_note}", rec.id,
+                notify="update_failed", title=f"Update of {rec.name} failed",
+            )
+            svc.publish_state(rec.id)
+            return
+
+        # The new version was switched in but did not start properly: put everything back from the backup.
+        ctx.step(f"Rolling back to {self.tag_of(old_spec) or 'the previous version'}", "warning")
+        rolled_back = False
+        try:
+            if rt.is_active:
+                await svc.pm.stop(rec.id, 20)
+            if backup_row is not None:
+                await svc.backups.restore(
+                    svc.get(rec.id), backup_row["id"], ctx, safety_backup=False, restart=False,
+                    reapply_config=lambda r: svc.ensure_config(r, ctx),
+                )
+            svc.repo.update_server(rec.id, spec=old_spec, pending_since=None)
+            if was_running:
+                await svc._do_start(svc.get(rec.id), ctx)
+            rolled_back = True
+        except Exception as rollback_exc:
+            ctx.step(f"The rollback failed: {rollback_exc}", "error")
+            log.exception("Rollback of %s failed", rec.id)
+        if rolled_back:
+            svc.repo.update_update(update_id, status="rolled_back", message=reason, finished_at=iso())
+            svc.reporter.record(
+                "warning", "update", f"Update of '{rec.name}' to {to_label} failed ({reason}); rolled back to the previous version",
+                rec.id, notify="update_failed", title=f"Update of {rec.name} rolled back",
+            )
+        else:
+            svc.repo.update_update(update_id, status="failed", message=f"{reason}; rollback failed", finished_at=iso())
+            svc.reporter.record(
+                "error", "update",
+                f"Update of '{rec.name}' failed and the automatic rollback did not complete. The backup "
+                f"{backup_row['file_name'] if backup_row else ''} is intact; restore it from the Backups tab.",
+                rec.id, notify="update_failed", title=f"Update of {rec.name} failed - action needed",
+            )
+        svc.publish_state(rec.id)
+
+    # ---------------------------------------------------------------- rollback
+    def submit_rollback(self, rec: ServerRecord) -> dict[str, Any]:
+        if not rec.spec.get("previous"):
+            raise ServerError(self.nothing_earlier, 409)
+        return self.svc.jobs.submit("rollback", f"Roll back {rec.name}", rec.id, lambda ctx: self.rollback(rec, ctx))
+
+    async def rollback(self, rec: ServerRecord, ctx: JobContext) -> None:
+        """Go back to how the server was before its last update: the backup made then is restored, mods and world included."""
+        svc = self.svc
+        rec = svc.get(rec.id)
+        previous = rec.spec.get("previous")
+        last = svc.repo.latest_update(rec.id, ("success",))
+        backup = svc.repo.get_backup(last["backup_id"]) if last and last.get("backup_id") else None
+        if not previous or backup is None:
+            raise ServerError("The backup that was made before the last update no longer exists, so there is nothing to go back to.")
+        update_id = svc.repo.insert_update(
+            server_id=rec.id, from_build_id=None, to_build_id=None, from_tag=self.tag_of(rec.spec), to_tag=self.tag_of(previous),
+            trigger="rollback",
+        )
+        was_running = svc.pm.runtime(rec.id).is_active
+        try:
+            if was_running:
+                await svc._do_stop(rec, ctx)
+            ctx.step("Restoring the server from the backup made before the update (everything since then is lost)")
+            await svc.backups.restore(rec, backup["id"], ctx, safety_backup=True, restart=False, reapply_config=lambda r: svc.ensure_config(r, ctx))
+            fresh = svc.get(rec.id)
+            restored = {k: v for k, v in fresh.spec.items() if k != "previous"}
+            restored.update({k: previous[k] for k in self.previous_fields if previous.get(k) is not None})
+            svc.repo.update_server(rec.id, spec=restored, pending_since=None)
+            if was_running:
+                await svc._do_start(svc.get(rec.id), ctx)
+        except Exception as exc:
+            svc.repo.update_update(update_id, status="failed", message=str(exc), finished_at=iso())
+            raise
+        svc.repo.update_update(update_id, status="success", message="Rolled back", finished_at=iso())
+        svc.repo.set_kv(f"skip:{rec.id}", self.marker_of(rec.spec))
+        svc.reporter.record(
+            "warning", "update", f"'{rec.name}' rolled back to {self.name_of(previous)} (world and mods restored from the backup)", rec.id,
+        )
+        svc.publish_state(rec.id)
+
+
+class PackUpdater(JavaUpdates):
+    nothing_earlier = "This server has no earlier modpack version to go back to."
+
+    # ------------------------------------------------------------------------------------------ naming
+    def tag_of(self, spec: dict[str, Any]) -> str | None:
+        return (spec.get("pack") or {}).get("version_number")
+
+    def name_of(self, spec: dict[str, Any]) -> str:
+        pack = spec.get("pack") or {}
+        return f"{pack.get('title') or 'the modpack'} {pack.get('version_number')}"
+
+    def marker_of(self, spec: dict[str, Any]) -> str:
+        return (spec.get("pack") or {}).get("version_id") or ""
+
+    def version_is_bad(self, exc: Exception) -> bool:
+        return isinstance(exc, (PackError, BadDownloadError)) and not isinstance(exc, PackDownloadError)
 
     # ----------------------------------------------------------------- checking
     @staticmethod
@@ -251,7 +437,7 @@ class PackUpdater:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self._handle_failure(rec, old_spec, old_lock, update_id, backup_row, was_running, switched, version_id, to_tag, ctx, exc)
+            await self._handle_failure(rec, old_spec, update_id, backup_row, was_running, switched, version_id, to_tag, ctx, exc)
             return
         finally:
             if opened is not None:
@@ -263,137 +449,5 @@ class PackUpdater:
         ctx.step(f"Update complete: now running {title} {to_tag}")
         svc.reporter.record(
             "success", "update", f"'{rec.name}' updated to {title} {to_tag}", rec.id, notify="update_applied", title=f"{rec.name} updated",
-        )
-        svc.publish_state(rec.id)
-
-    async def _watch_stability(self, rec: ServerRecord, ctx: JobContext) -> None:
-        if self.stability_seconds <= 0:
-            return
-        ctx.step(f"Watching the new version for {int(self.stability_seconds)} seconds")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.stability_seconds
-        while loop.time() < deadline:
-            rt = self.svc.pm.runtime(rec.id)
-            if rt.state != "running":
-                raise ServerError(f"The updated server stopped by itself ({rt.last_error or rt.state}).")
-            await asyncio.sleep(1)
-        last: PingError | None = None
-        for attempt in range(PING_ATTEMPTS):
-            try:
-                await server_list_ping("127.0.0.1", self.svc.get(rec.id).java_port, timeout=5)
-                return
-            except PingError as exc:
-                last = exc
-            rt = self.svc.pm.runtime(rec.id)
-            if rt.state != "running":
-                raise ServerError(f"The updated server stopped by itself ({rt.last_error or rt.state}).")
-            if attempt + 1 < PING_ATTEMPTS:
-                await asyncio.sleep(PING_PAUSE)
-        raise ServerError(f"The updated server no longer answers on its port ({last}).")
-
-    async def _handle_failure(
-        self, rec: ServerRecord, old_spec: dict[str, Any], old_lock: dict[str, Any], update_id: str, backup_row: dict[str, Any] | None,
-        was_running: bool, switched: bool, version_id: str, to_tag: str, ctx: JobContext, exc: Exception,
-    ) -> None:
-        svc = self.svc
-        known = (ServerError, BackupError, PackError, LoaderError, DownloadError)
-        reason = str(exc) if isinstance(exc, known) else f"Unexpected error: {exc}"
-        if not isinstance(exc, known):
-            log.exception("Update of %s failed", rec.id)
-        ctx.step(f"Update failed: {reason}", "error")
-        rt = svc.pm.runtime(rec.id)
-        if switched or (isinstance(exc, (PackError, BadDownloadError)) and not isinstance(exc, PackDownloadError)):
-            svc.repo.set_kv(f"skip:{rec.id}", version_id)  # the version itself is the problem: do not offer it again
-        if not switched:
-            # Nothing was changed. Put the server back the way it was.
-            svc.repo.update_update(update_id, status="failed", message=reason, finished_at=iso())
-            if was_running and not rt.is_active:
-                ctx.step("Restarting the server on the previous version")
-                try:
-                    await svc._do_start(svc.get(rec.id), ctx)
-                except Exception as restart_exc:
-                    ctx.step(f"The previous version could not be restarted: {restart_exc}", "error")
-            svc.reporter.record(
-                "error", "update", f"Update of '{rec.name}' to {to_tag} was not applied: {reason}", rec.id,
-                notify="update_failed", title=f"Update of {rec.name} failed",
-            )
-            svc.publish_state(rec.id)
-            return
-
-        # The new version was switched in but did not start properly: put everything back from the backup.
-        ctx.step(f"Rolling back to {(old_spec.get('pack') or {}).get('version_number') or 'the previous version'}", "warning")
-        rolled_back = False
-        try:
-            if rt.is_active:
-                await svc.pm.stop(rec.id, 20)
-            if backup_row is not None:
-                await svc.backups.restore(
-                    svc.get(rec.id), backup_row["id"], ctx, safety_backup=False, restart=False,
-                    reapply_config=lambda r: svc.ensure_config(r, ctx),
-                )
-            svc.repo.update_server(rec.id, spec=old_spec, pending_since=None)
-            if was_running:
-                await svc._do_start(svc.get(rec.id), ctx)
-            rolled_back = True
-        except Exception as rollback_exc:
-            ctx.step(f"The rollback failed: {rollback_exc}", "error")
-            log.exception("Rollback of %s failed", rec.id)
-        if rolled_back:
-            svc.repo.update_update(update_id, status="rolled_back", message=reason, finished_at=iso())
-            svc.reporter.record(
-                "warning", "update", f"Update of '{rec.name}' to {to_tag} failed ({reason}); rolled back to the previous version",
-                rec.id, notify="update_failed", title=f"Update of {rec.name} rolled back",
-            )
-        else:
-            svc.repo.update_update(update_id, status="failed", message=f"{reason}; rollback failed", finished_at=iso())
-            svc.reporter.record(
-                "error", "update",
-                f"Update of '{rec.name}' failed and the automatic rollback did not complete. The backup "
-                f"{backup_row['file_name'] if backup_row else ''} is intact; restore it from the Backups tab.",
-                rec.id, notify="update_failed", title=f"Update of {rec.name} failed - action needed",
-            )
-        svc.publish_state(rec.id)
-
-    # ---------------------------------------------------------------- rollback
-    def submit_rollback(self, rec: ServerRecord) -> dict[str, Any]:
-        if not rec.spec.get("previous"):
-            raise ServerError("This server has no earlier modpack version to go back to.", 409)
-        return self.svc.jobs.submit("rollback", f"Roll back {rec.name}", rec.id, lambda ctx: self.rollback(rec, ctx))
-
-    async def rollback(self, rec: ServerRecord, ctx: JobContext) -> None:
-        """Go back to how the server was before its last update: the backup made then is restored, mods and world included."""
-        svc = self.svc
-        rec = svc.get(rec.id)
-        previous = rec.spec.get("previous")
-        last = svc.repo.latest_update(rec.id, ("success",))
-        backup = svc.repo.get_backup(last["backup_id"]) if last and last.get("backup_id") else None
-        if not previous or backup is None:
-            raise ServerError("The backup that was made before the last update no longer exists, so there is nothing to go back to.")
-        current_pack = rec.spec.get("pack") or {}
-        old_pack = previous.get("pack") or {}
-        update_id = svc.repo.insert_update(
-            server_id=rec.id, from_build_id=None, to_build_id=None, from_tag=current_pack.get("version_number"),
-            to_tag=old_pack.get("version_number"), trigger="rollback",
-        )
-        was_running = svc.pm.runtime(rec.id).is_active
-        try:
-            if was_running:
-                await svc._do_stop(rec, ctx)
-            ctx.step("Restoring the server from the backup made before the update (everything since then is lost)")
-            await svc.backups.restore(rec, backup["id"], ctx, safety_backup=True, restart=False, reapply_config=lambda r: svc.ensure_config(r, ctx))
-            fresh = svc.get(rec.id)
-            restored = {k: v for k, v in fresh.spec.items() if k != "previous"}
-            restored.update({k: previous[k] for k in PREVIOUS_FIELDS if previous.get(k) is not None})
-            svc.repo.update_server(rec.id, spec=restored, pending_since=None)
-            if was_running:
-                await svc._do_start(svc.get(rec.id), ctx)
-        except Exception as exc:
-            svc.repo.update_update(update_id, status="failed", message=str(exc), finished_at=iso())
-            raise
-        svc.repo.update_update(update_id, status="success", message="Rolled back", finished_at=iso())
-        svc.repo.set_kv(f"skip:{rec.id}", current_pack.get("version_id") or "")
-        svc.reporter.record(
-            "warning", "update", f"'{rec.name}' rolled back to {old_pack.get('title') or 'the modpack'} {old_pack.get('version_number')} "
-            "(world and mods restored from the backup)", rec.id,
         )
         svc.publish_state(rec.id)

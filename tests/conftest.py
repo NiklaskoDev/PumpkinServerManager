@@ -169,6 +169,16 @@ async def create_java_server(ctx: AppContext, name: str = "Modded", **spec: Any)
     return next(s for s in ctx.repo.list_servers() if s.name == name)
 
 
+async def create_software_server(ctx: AppContext, name: str = "Paper", kind: str = "paper", **spec: Any):
+    """Create a Vanilla, Paper or Fabric server from the fake world and wait for the job; returns the server record.
+    ``software`` holds the options of the software itself (Minecraft version, build, ...), the rest goes into the request."""
+    software = {"kind": kind, **spec.pop("software", {})}
+    body = {"name": name, "engine": "java", "eula": True, "software": software, "start": spec.pop("start", True), **spec}
+    row = await finish(ctx, ctx.servers.submit_create(body))
+    assert row["status"] == "success", row["message"]
+    return next(s for s in ctx.repo.list_servers() if s.name == name)
+
+
 @pytest_asyncio.fixture
 async def jvm_live(tmp_path, source):
     """The whole application over HTTP with the fake Java world behind it. Yields (world, api, ctx)."""

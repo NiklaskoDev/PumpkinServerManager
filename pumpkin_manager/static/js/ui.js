@@ -185,9 +185,10 @@ export function versionText(build) {
   return build.label || build.tag;
 }
 
-// What an update banner names: the Pumpkin build, or the modpack version.
+// What an update banner names: the Pumpkin build, the modpack version, or the software and its version.
 export function pendingText(server) {
   if (server.engine === "java") {
+    if (server.software) return server.update?.pending_software?.label || "";
     const pending = server.update?.pending_pack;
     return pending ? `${server.modpack?.title || "modpack"} ${pending.number}` : "";
   }
@@ -196,8 +197,18 @@ export function pendingText(server) {
 
 export const fmtMemoryMb = (mb) => (mb % 1024 === 0 ? `${mb / 1024} GiB` : `${mb} MiB`);
 
-// The chips under a server's name: a Pumpkin server shows its build and channel, a modpack server the pack and its loader.
+// The chips under a server's name: a Pumpkin server shows its build and channel, a modpack server the pack and its loader, and a
+// Vanilla, Paper or Fabric server the software and its version.
 export function serverChips(server) {
+  if (server.engine === "java" && server.software) {
+    const sw = server.software;
+    return [
+      h("span", { class: "chip", title: "Server software" }, icon("layers", "sm"), sw.name),
+      sw.minecraft ? h("span", { class: "chip" }, `Minecraft ${sw.minecraft}`) : null,
+      sw.build ? h("span", { class: "chip", title: sw.kind === "paper" ? "Paper build" : "Fabric loader version" }, `${sw.kind === "paper" ? "build" : "loader"} ${sw.build}`) : null,
+      server.java ? h("span", { class: "chip", title: `Java ${server.java.major}, ${fmtMemoryMb(server.java.memory_mb)} of memory` }, icon("cpu", "sm"), `Java ${server.java.major}`) : null,
+    ].filter(Boolean); // Element.append() would write a missing chip as the text "null"
+  }
   if (server.engine === "java") {
     const pack = server.modpack || {};
     return [
@@ -205,7 +216,7 @@ export function serverChips(server) {
       pack.loader?.label ? h("span", { class: "chip", title: "Mod loader" }, pack.loader.label) : null,
       pack.minecraft ? h("span", { class: "chip" }, `Minecraft ${pack.minecraft}`) : null,
       server.java ? h("span", { class: "chip", title: `Java ${server.java.major}, ${fmtMemoryMb(server.java.memory_mb)} of memory` }, icon("cpu", "sm"), `Java ${server.java.major}`) : null,
-    ];
+    ].filter(Boolean);
   }
   return [
     h("span", { class: "chip" }, icon("layers", "sm"), versionText(server.build)),

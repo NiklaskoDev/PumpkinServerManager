@@ -251,6 +251,11 @@ async def main() -> int:
     if BEHAVIOR.get("crash_on_start"):
         print("Exception in thread \"main\" java.lang.IllegalStateException: simulated crash", flush=True)
         return 1
+    marker = BEHAVIOR.get("crash_if_jar_contains")  # a build of the server software that does not start: its jar carries this marker
+    jar = ARGV[ARGV.index("-jar") + 1] if "-jar" in ARGV else None
+    if marker and jar and Path(jar).is_file() and marker.encode() in Path(jar).read_bytes():
+        print("Exception in thread \"main\" java.lang.UnsupportedClassVersionError: simulated broken build of the server software", flush=True)
+        return 1
     once = Path("fake-first-start.done")
     if BEHAVIOR.get("exit_clean_on_start") or (BEHAVIOR.get("exit_clean_once") and not once.exists()):
         # Better MC downloads its mods at the first start and then ends the server on purpose

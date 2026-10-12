@@ -39,7 +39,8 @@ def main() -> None:
     source.publish("nightly", "nightly-1")
     source.publish("canary", "canary-1")
 
-    # Modpack servers: a fake Modrinth, Adoptium and loader sites, and a fake Java server (nothing is downloaded for real).
+    # Modpack servers: a fake Modrinth, Adoptium and loader sites, and a fake Java server (nothing is downloaded for real). The same
+    # world has Mojang, PaperMC and Fabric for Vanilla, Paper and Fabric servers (Minecraft 1.21.4, 1.21.1, 1.20.4, ...).
     world = JavaWorld()
     world.net.maven_installer("forge", "1.20.1", "47.2.0")
     jei = FakeMod("mods/jei.jar", b"jei" * 400)
@@ -86,6 +87,9 @@ def main() -> None:
             wrapper="Server-Files-1.1.0", date="2026-09-20T12:00:00.000Z",
         )
         print("[dev] published fake CurseForge version Cobble Adventures 1.1.0", flush=True)
+        world.paper.add_build("1.21.4", 13, "STABLE")
+        world.fabric.add_loader("0.16.11")
+        print("[dev] published a fake Paper build (13) for Minecraft 1.21.4 and Fabric loader 0.16.11", flush=True)
 
     threading.Timer(float(os.environ.get("DEV_UPDATE_AFTER", "90")), publish_update).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

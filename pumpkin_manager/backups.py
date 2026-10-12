@@ -397,8 +397,7 @@ class BackupService:
         final = self.settings.backup_dir / file_name
         partial = final.with_name(final.name + ".partial")
         build = self.repo.get_build(rec.build_id)
-        pack = rec.spec.get("pack") or {}
-        pack_tag = f"{pack.get('title') or 'Modpack'} {pack.get('version_number') or ''}".strip() if rec.is_java else None
+        pack_tag = rec.java_tag
         manifest = {
             "format": 1,
             "created_at": iso(),

@@ -77,6 +77,29 @@ class MojangMeta:
         self._manifest = (time.monotonic(), by_id)
         return by_id
 
+    def refresh(self) -> None:
+        """Forget the version list, so that the next question reads Mojang's current one (it is kept for an hour otherwise)."""
+        self._manifest = None
+
+    async def manifest(self) -> list[dict[str, Any]]:
+        """Every Minecraft version Mojang lists, newest first: ``{"id", "type" (release | snapshot | old_*), "published"}``."""
+        return [
+            {"id": entry["id"], "type": entry.get("type", ""), "published": entry.get("releaseTime")}
+            for entry in (await self._versions()).values()
+        ]
+
+    async def version_meta(self, mc_version: str) -> dict[str, Any]:
+        """Mojang's data for one Minecraft version (downloads, Java version, ...)."""
+        entry = (await self._versions()).get(mc_version)
+        if entry is None:
+            unknown = DownloadError(f"Mojang does not list Minecraft {mc_version}.")
+            unknown.status = 404
+            raise unknown
+        meta = await get_json(self._client, entry["url"], what=f"Mojang's data for Minecraft {mc_version}", delay=self._delay)
+        if not isinstance(meta, dict):
+            raise DownloadError(f"Mojang's data for Minecraft {mc_version} could not be read.")
+        return meta
+
     async def java_major(self, mc_version: str) -> int:
         """The Java major version this Minecraft version asks for (not yet mapped to what can be installed)."""
         key = f"mc-java:{mc_version}"

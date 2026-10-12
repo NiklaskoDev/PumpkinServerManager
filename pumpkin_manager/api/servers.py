@@ -40,6 +40,9 @@ class CreateBody(BaseModel):
     # Java servers: which modpack ({"source": "modrinth", "project": ..., "version": ...} or {"source": "upload", "upload": ...}),
     # how much memory it gets, extra JVM options, and that the Minecraft EULA was accepted
     modpack: dict[str, Any] | None = None
+    # Java servers without a modpack: {"kind": "vanilla" | "paper" | "fabric", "minecraft": ..., "build": ..., "fabric_api": true,
+    # "recommended_flags": true}; the Minecraft version and the build are the newest stable ones when left out
+    software: dict[str, Any] | None = None
     memory_mb: int | None = Field(None, ge=512, le=1_048_576)
     jvm_args: str | None = Field(None, max_length=2000)
     leave_out_client_only: bool = True  # skip mods that Modrinth says do not work on a server (recommended)

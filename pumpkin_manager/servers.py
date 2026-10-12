@@ -140,6 +140,7 @@ class ServerService:
             "last_error": rt.last_error,
             "engine": rec.engine,
             "modpack": None,
+            "software": None,
             "java": None,
             "channel": rec.channel,
             "pinned_tag": rec.pinned_tag,
@@ -170,8 +171,11 @@ class ServerService:
         }
         if rec.is_java and self.jvm is not None:
             view["modpack"], view["java"] = self.jvm.describe(rec)
-            view["update"]["pending_pack"] = view["modpack"]["pending"]
-            view["update"]["available"] = view["modpack"]["pending"] is not None
+            view["software"] = self.jvm.describe_software(rec)
+            held = view["modpack"] or view["software"] or {}
+            view["update"]["pending_pack"] = view["modpack"]["pending"] if view["modpack"] else None
+            view["update"]["pending_software"] = view["software"]["pending"] if view["software"] else None
+            view["update"]["available"] = held.get("pending") is not None
         if detail:
             view["stats"]["cpu_history"] = list(rt.cpu_history)
             view["stats"]["mem_history"] = list(rt.mem_history)
@@ -857,7 +861,7 @@ class ServerService:
             if not directory.exists():
                 log.warning("The folder of server %s is missing; creating an empty one", rec.id)
                 directory.mkdir()
-        for leftover in base.glob(".create-*"):  # a modpack install that was interrupted
+        for leftover in [*base.glob(".create-*"), *base.glob(".update-*")]:  # a server install or a software update that was interrupted
             shutil.rmtree(leftover, ignore_errors=True)
 
     def autostart_targets(self) -> list[ServerRecord]:

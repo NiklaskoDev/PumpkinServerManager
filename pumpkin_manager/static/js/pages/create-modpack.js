@@ -2,32 +2,27 @@
 
 import { get, post, qs, upload } from "../api.js";
 import { clear, fmtBytes, h, icon } from "../dom.js";
-import { OP_LEVELS } from "../oplevels.js";
-import { loadServers, state } from "../store.js";
+import { loadServers } from "../store.js";
 import { field, jobDialog, modal, notifyError, packIcon, segmented, selectControl, switchControl } from "../ui.js";
-import { SCHEDULES } from "./create.js";
+import { javaServerForm } from "./java-form.js";
 
-const EULA_URL = "https://aka.ms/MinecraftEULA";
-const GAMEMODES = [["survival", "Survival"], ["creative", "Creative"], ["adventure", "Adventure"], ["spectator", "Spectator"]].map(([value, label]) => ({ value, label }));
-const DIFFICULTIES = [["peaceful", "Peaceful"], ["easy", "Easy"], ["normal", "Normal"], ["hard", "Hard"]].map(([value, label]) => ({ value, label }));
 const LOADERS = { fabric: "Fabric", forge: "Forge", neoforge: "NeoForge", quilt: "Quilt" };
 const SOURCES = [{ value: "modrinth", label: "Modrinth" }, { value: "curseforge", label: "CurseForge" }];
 const compact = new Intl.NumberFormat("en", { notation: "compact" });
-const gib = (bytes) => `${(bytes / 1024 ** 3).toFixed(bytes >= 10 * 1024 ** 3 ? 0 : 1)} GiB`;
 const versionLabel = (v) => `${v.number}${v.type !== "release" ? ` (${v.type})` : ""} · Minecraft ${v.minecraft.join(", ")} · ${v.loaders.map((l) => LOADERS[l] || l).join(", ")}${v.server_pack ? " · server files" : ""}`;
 const sourceOf = (text) => (/modrinth\.com\//i.test(text) ? "modrinth" : /curseforge\.com\//i.test(text) ? "curseforge" : null);
 
 export function openCreateModpackServer() {
-  const memory = state.system?.memory;
-  const f = {
-    name: "", nameTouched: false, source: "modrinth", pack: null, version: "", serverPack: true, gib: 4, touched: {}, op: 1, manualPort: false, port: "",
-    autostart: "last", schedule: "daily", keep: 7, eula: false, start: true, clientOnly: true,
-  };
-  const setting = (key, value) => { f.touched[key] = value; };
+  // the memory, game, network and EULA parts are the same as for a Vanilla, Paper or Fabric server
+  const form = javaServerForm({
+    gib: 4, memoryHint: "Most modpacks need 4-8 GiB.", gameHint: "Only what you change here is written; everything else keeps the modpack's own settings.",
+    onChange: () => refresh(),
+  });
+  const f = { name: "", nameTouched: false, source: "modrinth", pack: null, version: "", serverPack: true, clientOnly: true };
 
   const nameInput = h("input", { class: "input", placeholder: "My modpack server", maxlength: "40", autocomplete: "off", oninput: (e) => { f.name = e.target.value; f.nameTouched = true; refresh(); } });
   const createBtn = h("button", { class: "btn primary", disabled: true }, icon("plus", "sm"), "Create server");
-  const refresh = () => { createBtn.disabled = !(f.pack && f.name.trim() && f.eula) || needsKey(); };
+  const refresh = () => { createBtn.disabled = !(f.pack && f.name.trim() && form.f.eula) || needsKey(); };
 
   // ---- the modpack ------------------------------------------------------------------------------------------
   let sources = null; // which sources are ready (CurseForge needs an API key); asked when the dialog opens
@@ -196,33 +191,6 @@ export function openCreateModpackServer() {
     else { packHost.appendChild(picker); drawPicker(); }
   }
 
-  // ---- memory -----------------------------------------------------------------------------------------------------
-  const memNotice = h("div", {});
-  const memInput = h("input", { class: "input", type: "number", min: "1", max: "1024", step: "0.5", value: String(f.gib), "aria-label": "Memory in GiB", oninput: (e) => { f.gib = Number(e.target.value) || 0; memCheck(); } });
-  function memCheck() {
-    clear(memNotice);
-    if (!memory) return;
-    const wanted = f.gib * 1024 ** 3;
-    const ceiling = memory.limit || memory.total;
-    if (wanted > ceiling) memNotice.appendChild(h("div", { class: "notice danger" }, icon("alert", "sm"), `That is more than this ${memory.limit ? "container may use" : "machine has"} (${gib(ceiling)}). The server would not start.`));
-    else if (wanted > memory.available * 0.9) memNotice.appendChild(h("div", { class: "notice warning" }, icon("alert", "sm"), `Only ${gib(memory.available)} is free right now. The server may be slow, or other programs may be pushed out of memory.`));
-  }
-  const memHint = memory
-    ? `This machine has ${gib(memory.total)} (${gib(memory.available)} free)${memory.limit ? `; the container is limited to ${gib(memory.limit)}` : ""}. Most modpacks need 4-8 GiB.`
-    : "Most modpacks need 4-8 GiB.";
-  memCheck();
-
-  // ---- the rest ---------------------------------------------------------------------------------------------------
-  const ranges = state.system?.ports;
-  const portInput = h("input", { class: "input", type: "number", min: "1024", max: "65535", placeholder: "automatic", disabled: true, oninput: (e) => { f.port = e.target.value; } });
-  const portSwitch = switchControl({ label: "Choose the port myself", hint: ranges ? `Automatic ports come from ${ranges.java_range[0]}–${ranges.java_range[1]} (the range published by the container).` : null,
-    onChange: (on) => { f.manualPort = on; portInput.disabled = !on; if (on) portInput.focus(); } });
-  const eulaSwitch = switchControl({
-    label: h("span", {}, "I accept the ", h("a", { href: EULA_URL, target: "_blank", rel: "noopener noreferrer" }, "Minecraft End User License Agreement")),
-    hint: "Mojang requires this for every Minecraft server. The manager writes eula.txt for you once you accept.",
-    onChange: (v) => { f.eula = v; refresh(); },
-  });
-
   const clientOnlyNote = h("span", {});
   const clientOnlySwitch = switchControl({ label: "Leave out mods that only work on a client", checked: true, onChange: (v) => { f.clientOnly = v; }, hint: clientOnlyNote });
   function updateClientOnly() {
@@ -238,31 +206,9 @@ export function openCreateModpackServer() {
     h("div", { class: "section-title" }, "Modpack"), packHost,
     clientOnlySwitch,
     field("Server name", nameInput, "Shown in this dashboard. Starts out as the modpack's name.", null),
-    h("div", { class: "section-title" }, "Memory"),
-    field("Memory for the server (GiB)", memInput, memHint), memNotice,
-    h("div", { class: "section-title" }, "Game"),
-    h("p", { class: "hint" }, "Only what you change here is written; everything else keeps the modpack's own settings."),
-    h("div", { class: "form-grid" },
-      field("Game mode", selectControl(GAMEMODES, "survival", (v) => setting("gamemode", v))),
-      field("Difficulty", selectControl(DIFFICULTIES, "easy", (v) => setting("difficulty", v))),
-      field("Max players", h("input", { class: "input", type: "number", min: "1", max: "100000", value: "20", oninput: (e) => { if (e.target.value) setting("max-players", Number(e.target.value)); } })),
-      field("World seed", h("input", { class: "input", placeholder: "random", maxlength: "64", oninput: (e) => setting("level-seed", e.target.value) })),
-      field("Operator level", selectControl(OP_LEVELS.map(({ value, label }) => ({ value, label })), f.op, (v) => { f.op = Number(v); }),
-        "The level players get when you make them an operator. You can change it per player later."),
-      h("div", { class: "span-2" }, field("Message of the day", h("input", { class: "input", placeholder: "A Minecraft Server", maxlength: "120", oninput: (e) => setting("motd", e.target.value) }))),
-      switchControl({ label: "Verify player accounts (online mode)", hint: "Turn off only for LAN or offline play.", checked: true, onChange: (v) => setting("online-mode", v) }),
-      switchControl({ label: "Whitelist", hint: "Only listed players can join.", checked: false, onChange: (v) => setting("white-list", v) })),
-    h("div", { class: "section-title" }, "Network & automation"),
-    h("div", { class: "form-grid" },
-      h("div", { class: "stack-sm" }, portSwitch, portInput),
-      field("Backups", selectControl(SCHEDULES, f.schedule, (v) => { f.schedule = v; })),
-      field("When the container starts", selectControl([
-        { value: "last", label: "Restore the previous state" }, { value: "always", label: "Always start this server" }, { value: "never", label: "Never start it automatically" },
-      ], f.autostart, (v) => { f.autostart = v; })),
-      field("Backups to keep", h("input", { class: "input", type: "number", min: "1", max: "365", value: String(f.keep), oninput: (e) => { f.keep = e.target.value; } }))),
+    ...form.memorySection, ...form.gameSection, ...form.networkSection(),
     h("div", { class: "notice" }, icon("info", "sm"), "The first start generates the world, which can take several minutes for a big modpack. The server is backed up before every change the manager makes."),
-    eulaSwitch,
-    switchControl({ label: "Start the server right away", checked: true, onChange: (v) => { f.start = v; } }));
+    form.eulaSwitch, form.startSwitch);
 
   const dlg = modal({ title: "New modpack server", size: "wide", body, footer: [h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"), createBtn] });
   renderPack();
@@ -270,13 +216,10 @@ export function openCreateModpackServer() {
 
   createBtn.addEventListener("click", async () => {
     const payload = {
-      name: f.name.trim(), engine: "java", eula: true, memory_mb: Math.round(f.gib * 1024), start: f.start,
+      name: f.name.trim(), engine: "java", eula: true, ...form.payload(), leave_out_client_only: f.clientOnly,
       modpack: f.pack.source === "upload" ? { source: "upload", upload: f.pack.upload }
         : f.pack.source === "curseforge" ? { source: "curseforge", project: f.pack.id, version: f.version, server_pack: f.serverPack }
           : { source: "modrinth", project: f.pack.id, version: f.version },
-      java_port: f.manualPort && f.port ? Number(f.port) : null, leave_out_client_only: f.clientOnly,
-      settings: { "op-permission-level": f.op, ...f.touched },
-      policy: { autostart: f.autostart, backup_schedule: SCHEDULES.find((s) => s.value === f.schedule).schedule, backup_keep: Number(f.keep) || 7 },
     };
     dlg.close();
     const job = await jobDialog(post("/api/servers", payload), { title: `Creating "${payload.name}"` });

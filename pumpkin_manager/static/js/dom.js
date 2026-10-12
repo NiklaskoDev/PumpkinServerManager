@@ -149,6 +149,10 @@ export function fmtDateTime(iso) {
   return iso ? new Date(iso).toLocaleString() : "-";
 }
 
+export function fmtDate(iso) {
+  return iso ? new Date(iso).toLocaleDateString() : "-";
+}
+
 export function plural(n, one, many) {
   return `${n} ${n === 1 ? one : many || one + "s"}`;
 }

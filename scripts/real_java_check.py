@@ -9,8 +9,15 @@ stops it.
     python scripts/real_java_check.py --accept-eula --loader all          # Fabric, NeoForge, Forge and Quilt
     python scripts/real_java_check.py --accept-eula --loader neoforge --memory 3072
     python scripts/real_java_check.py --accept-eula --loader forge --minecraft 1.16.5 --loader-version 36.2.20   # an exact old loader
+    python scripts/real_java_check.py --accept-eula --software all                 # Vanilla, Paper and Fabric servers, newest stable
+    python scripts/real_java_check.py --accept-eula --software paper --software-update   # ... one step behind, updated, then rolled back
+    python scripts/real_java_check.py --accept-eula --software fabric --software-from 1.21.11   # ... on an older Minecraft, switched to the newest
     python scripts/real_java_check.py --accept-eula --pack cobblemon-fabric   # a real Modrinth modpack (name or link; repeatable)
     CURSEFORGE_API_KEY=... python scripts/real_java_check.py --accept-eula --curseforge-pack 715572   # a CurseForge modpack
+
+Vanilla, Paper and Fabric servers (--software) are made from what Mojang, PaperMC and Fabric offer right now; --software-update installs
+the previous build (or the previous release, for Vanilla) first, then updates to the newest one and rolls that back. --software-from
+starts on an older Minecraft version instead and switches to the newest one (a version upgrade: new Java, converted world, new Fabric API).
 
 A real modpack is looked up and installed the way the dashboard does it; its mods are downloaded for real (a few hundred MB) and
 it gets 4096 MiB unless --pack-memory says otherwise. With --pack the generated packs are skipped unless --loader asks for them.
@@ -59,9 +66,11 @@ from pumpkin_manager.app import AppContext  # noqa: E402
 from pumpkin_manager.config import Settings  # noqa: E402
 from pumpkin_manager.jvm.net import USER_AGENT  # noqa: E402
 from pumpkin_manager.mcnet import server_list_ping  # noqa: E402
+from pumpkin_manager.models import software_label  # noqa: E402
 from pumpkin_manager.util import strip_ansi  # noqa: E402
 
 LOADERS = ("fabric", "neoforge", "forge", "quilt")
+SOFTWARE = ("vanilla", "paper", "fabric")
 DEFAULT_MINECRAFT = {"fabric": None, "neoforge": "1.21.1", "forge": "1.20.1", "quilt": "1.21.1"}  # None: the newest release
 MODS = {"fabric": ("fabric-api", "lithium")}
 SETTINGS = {"online-mode": False, "view-distance": 4, "simulation-distance": 4, "max-players": 5, "motd": "real java check"}
@@ -173,6 +182,99 @@ async def check_loader(
     await check_server(ctx, loader, body, mods=mods, generated=True)
 
 
+async def check_software_update(ctx: AppContext, label: str, server_id: str, older: Any, newest: Any, upgrade: bool = False) -> None:
+    """Update the running server from the older to the newest version of its software, then undo it. ``upgrade``: to a newer Minecraft
+    version, which for Paper and Fabric is offered but never installed by itself."""
+    section(f"{label}: update {older.label} -> {newest.label}, then roll back")
+    await ctx.software_updates.check(only=ctx.servers.get(server_id))
+    software = ctx.servers.get(server_id).spec["software"]
+    news = software.get("pending") or {}
+    if upgrade and older.kind != "vanilla":
+        news = software.get("upgrade") or {}
+        found = news.get("minecraft") == newest.minecraft
+    else:
+        found = news.get("minecraft") == newest.minecraft and news.get("build") == newest.build
+    if not check(found, "the update check finds the newer version", str(news.get("label"))):
+        return
+    target = await ctx.software_updates.prepare(ctx.servers.get(server_id), newest.minecraft if upgrade else None, newest.build or None if upgrade else None)
+    row = await wait_job(ctx, ctx.software_updates.submit_update(ctx.servers.get(server_id), target), timeout=3600)
+    show_job(row)
+    server = ctx.servers.get(server_id)
+    latest = (ctx.repo.list_updates(server_id) or [{}])[0]
+    if latest.get("status") == "rolled_back":
+        print(f"        the new version did not start, so the manager rolled back by itself: {(latest.get('message') or '')[:300]}")
+        check(server.spec["software"]["build"] == older.build and ctx.pm.runtime(server_id).state == "running", "the update that could not start was rolled back automatically")
+        return
+    check(row["status"] == "success" and latest.get("status") == "success", "the update was applied", f"{row['message'] or ''} {latest.get('message') or ''}".strip())
+    check(server.spec["software"]["build"] == newest.build and server.spec["minecraft"] == newest.minecraft and ctx.pm.runtime(server_id).state == "running",
+          "the server runs the new version", f"Java {server.spec['java']}" + (f", Fabric API {server.spec['software']['fabric_api']['number']}" if server.spec["software"].get("fabric_api") else ""))
+    check(said_since_start(ctx, server_id, "Done ("), "the server printed its 'Done (...)!' line again after the update")
+    safety = [b for b in ctx.repo.list_backups(server_id) if b.get("kind") == "pre-update"]
+    check(bool(safety) and bool(safety[0]["verified"]), "a verified backup was taken before the update", safety[0]["build_tag"] if safety else "")
+    check(bool(ctx.servers.jvm.describe_software(server)["can_roll_back"]), "the update can be rolled back")
+    row = await wait_job(ctx, ctx.software_updates.submit_rollback(server), timeout=3600)
+    show_job(row)
+    server = ctx.servers.get(server_id)
+    check(row["status"] == "success" and server.spec["software"]["build"] == older.build and server.spec["minecraft"] == older.minecraft, "the roll back put the older version back", row["message"] or "")
+    check(ctx.pm.runtime(server_id).state == "running", "the server runs again")
+    if older.kind == "fabric" and older.minecraft != newest.minecraft:
+        check(bool(server.spec["software"].get("fabric_api")) and (ctx.servers.server_dir(server_id) / server.spec["software"]["fabric_api"]["file"]).is_file(),
+              "the Fabric API of the older version is back too", str((server.spec["software"].get("fabric_api") or {}).get("number")))
+
+
+async def check_software(ctx: AppContext, kind: str, minecraft: str | None, memory: int, update: bool, start_from: str | None = None) -> None:
+    """A Vanilla, Paper or Fabric server made from what its maker offers right now."""
+    section(f"{kind}: look up what is offered")
+    catalog = ctx.software
+    try:
+        listed = await catalog.versions(kind)
+        mc = minecraft or await catalog.recommended_minecraft(kind)
+        build, options = await catalog.resolve(kind, mc)
+    except Exception as exc:  # noqa: BLE001
+        check(False, f"{kind}: the maker's service answers", repr(exc))
+        return
+    check(True, "what is offered", f"{len(listed)} Minecraft versions (newest {listed[0]['id']}); {build.label} ({build.channel}), Java {options.java_minimum or '?'} at least, "
+          f"{build.size / 1048576:.1f} MiB" if build.size else f"{len(listed)} Minecraft versions; {build.label}")
+    body = {
+        "name": f"Real {kind}", "engine": "java", "eula": True, "memory_mb": memory, "start": True, "software": {"kind": kind, "minecraft": mc},
+        "settings": SETTINGS,
+    }
+    extra = None
+    if start_from:
+        try:
+            older, _ = await catalog.resolve(kind, start_from)
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"{kind}: {start_from} is offered", repr(exc))
+            return
+        body["software"] = {"kind": kind, "minecraft": older.minecraft, **({"build": older.build} if older.build else {})}
+        check(True, "starting on an older Minecraft version", f"{older.label}, then switching to {build.label}")
+
+        async def extra(server_id: str) -> None:
+            await check_software_update(ctx, kind, server_id, older, build, upgrade=True)
+
+    elif update:
+        older = None
+        if kind == "vanilla":
+            index = next((i for i, v in enumerate(listed) if v["id"] == mc), None)
+            if index is not None and index + 1 < len(listed):
+                older = (await catalog.resolve(kind, listed[index + 1]["id"]))[0]
+        else:
+            stable = options.stable_builds()
+            if len(stable) >= 2:
+                older = stable[1]
+        if older is None:  # a brand new Minecraft version has a single Fabric loader, for instance
+            print("        (there is no earlier version to update from, so only the plain checks run; try --software-from)")
+        else:
+            check(True, "there is an older version to update from", older.label)
+            body["software"] = {"kind": kind, "minecraft": older.minecraft, **({"build": older.build} if older.build else {})}
+            newest = build if kind == "vanilla" else options.stable_builds()[0]
+
+            async def extra(server_id: str) -> None:
+                await check_software_update(ctx, kind, server_id, older, newest)
+
+    await check_server(ctx, kind, body, mods=[], generated=False, extra=extra)
+
+
 async def check_pack_update(ctx: AppContext, label: str, server_id: str, older: dict[str, Any], newest: dict[str, Any]) -> None:
     """Update the running server from the older to the newest release, then undo it: backup first, switch, start, roll back."""
     section(f"{label}: update {older['number']} -> {newest['number']}, then roll back")
@@ -266,7 +368,7 @@ async def check_server(
         row = await wait_job(ctx, ctx.servers.submit_start(ctx.servers.get(server.id)), timeout=3600)
         show_job(row)
     if server is not None and row["status"] == "success":
-        manual = ctx.servers.jvm.describe(server)[0]["manual"]
+        manual = (ctx.servers.jvm.describe(server)[0] or {}).get("manual")  # a server without a modpack has none
         if manual:  # CurseForge mods whose authors do not allow automatic downloads: the manager lists them and waits
             check(True, "mods that have to be added by hand are listed, and the server waits for them", f"{len(manual)}: " + ", ".join(m["name"] for m in manual[:6]))
             check(all(m["page"].startswith("https://www.curseforge.com/") for m in manual), "each of them links to its CurseForge page")
@@ -299,9 +401,8 @@ async def check_server(
         check((directory / "config" / "real-check.txt").is_file(), "the pack's configuration was applied")
         check("allow-flight=true" in props, "the pack's own server.properties setting is there")
     check((directory / "eula.txt").read_text(encoding="utf-8").count("eula=true") == 1, "eula.txt was written")
-    loader_name = (server.spec.get("loader") or {}).get("kind", "?")
-    print(f"        {loader_name} {server.spec['loader']['version']}, Minecraft {server.spec['minecraft']}, Java {server.spec['java']}, "
-          f"{dir_megabytes(directory):.0f} MB on disk after the first start")
+    what = software_label(server.spec["software"]) if server.spec.get("software") else f"{server.spec['loader']['kind']} {server.spec['loader']['version']}, Minecraft {server.spec['minecraft']}"
+    print(f"        {what}, Java {server.spec['java']}, {dir_megabytes(directory):.0f} MB on disk after the first start")
 
     section(f"{label}: talk to the running server")
     info = None
@@ -360,6 +461,7 @@ async def check_server(
 async def run(
     loaders: list[str], packs: list[tuple[str, str]], minecraft: str | None, memory: int | None, pack_memory: int | None, keep: bool,
     update: bool = False, server_files: bool = True, start_anyway: bool = False, loader_version: str | None = None,
+    software: list[str] | None = None, software_update: bool = False, software_from: str | None = None,
 ) -> int:
     work = Path(tempfile.mkdtemp(prefix="java-real-check-"))
     print(f"Working folder: {work}")
@@ -383,6 +485,14 @@ async def run(
 
                 traceback.print_exc()
                 check(False, f"{loader}: the check ran to completion", repr(exc))
+        for kind in software or []:
+            try:
+                await check_software(ctx, kind, minecraft, memory or 2048, software_update, software_from)
+            except Exception as exc:  # noqa: BLE001
+                import traceback
+
+                traceback.print_exc()
+                check(False, f"{kind}: the check ran to completion", repr(exc))
         for source, reference in packs:
             try:
                 await check_pack(ctx, reference, pack_memory or memory or 4096, update, source, server_files, start_anyway)
@@ -404,6 +514,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--accept-eula", action="store_true", help="accept the Minecraft EULA for the throw-away servers (required)")
     parser.add_argument("--loader", choices=[*LOADERS, "all", "none"], help="which mod loader to test with a small generated pack (default: fabric, or none when --pack is given)")
+    parser.add_argument("--software", choices=[*SOFTWARE, "all"], help="also test Vanilla, Paper or Fabric servers (made without a modpack) from what their makers offer")
+    parser.add_argument("--software-update", action="store_true",
+                        help="install the previous build (the previous release for Vanilla) of each --software first, then update to the newest and roll that back")
+    parser.add_argument("--software-from", metavar="VERSION",
+                        help="install each --software on this older Minecraft version first, then switch to the newest one (or --minecraft) and roll that back")
     parser.add_argument("--pack", action="append", default=[], metavar="SLUG_OR_LINK",
                         help="also install a real Modrinth modpack, e.g. cobblemon-fabric or its modrinth.com link (repeat for several)")
     parser.add_argument("--curseforge-pack", action="append", default=[], metavar="PROJECT_OR_LINK",
@@ -426,14 +541,15 @@ def main() -> int:
         print("CurseForge packs need your own API key in the environment variable CURSEFORGE_API_KEY.", file=sys.stderr)
         return 2
     packs = [("modrinth", p) for p in args.pack] + [("curseforge", p) for p in args.curseforge_pack]
-    choice = args.loader or ("none" if packs else "fabric")
+    choice = args.loader or ("none" if packs or args.software else "fabric")
     loaders = list(LOADERS) if choice == "all" else ([] if choice == "none" else [choice])
     if args.loader_version and len(loaders) != 1:
         print("--loader-version needs exactly one --loader.", file=sys.stderr)
         return 2
+    software = list(SOFTWARE) if args.software == "all" else ([args.software] if args.software else [])
     return asyncio.run(run(
         loaders, packs, args.minecraft, args.memory, args.pack_memory, args.keep, args.pack_update, not args.no_server_files, args.start_anyway,
-        args.loader_version,
+        args.loader_version, software, args.software_update, args.software_from,
     ))
 
 

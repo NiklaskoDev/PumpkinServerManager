@@ -133,7 +133,7 @@ export function render({ id, getServer }) {
     return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Java")),
       h("div", { class: "form-grid" },
         field("Memory for the server (GiB)", h("input", { class: "input", type: "number", min: "1", max: "1024", step: "0.5", value: String(gib), oninput: (e) => { gib = Number(e.target.value) || 0; } }),
-          `Now ${fmtMemoryMb(s.java.memory_mb)}. Java ${s.java.major} is used for Minecraft ${s.modpack?.minecraft || ""}.`),
+          `Now ${fmtMemoryMb(s.java.memory_mb)}. Java ${s.java.major} is used for Minecraft ${(s.modpack || s.software)?.minecraft || ""}.`),
         field("Extra Java options", h("input", { class: "input", value: options, placeholder: "for example -Dfml.readTimeout=90", spellcheck: "false", maxlength: "2000", oninput: (e) => { options = e.target.value; } }),
           "Optional. Only options that start with - are accepted; they are added to the command that starts Java.")),
       h("div", {}, h("button", { class: "btn primary sm", onclick: async () => {

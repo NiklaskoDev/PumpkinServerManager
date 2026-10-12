@@ -98,6 +98,9 @@ class Scheduler:
         packs = await self.ctx.pack_updates.check()
         if packs["errors"]:
             log.info("Modpack update check finished with errors: %s", packs["errors"])
+        software = await self.ctx.software_updates.check()
+        if software["errors"]:
+            log.info("Server software update check finished with errors: %s", software["errors"])
 
     def reset_update_timer(self) -> None:
         self._next_update_check = 0.0
@@ -105,6 +108,7 @@ class Scheduler:
     async def _pending_updates(self) -> None:
         if self.ctx.app_settings().update_check_enabled:
             await self.ctx.updater.process_pending()
+            await self.ctx.software_updates.process_pending()
 
     async def _scheduled_backups(self) -> None:
         now = utcnow()

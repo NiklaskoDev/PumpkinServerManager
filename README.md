@@ -7,7 +7,9 @@ Pumpkin is a Minecraft server written in Rust. This manager downloads it from th
 as many servers as you like (each with its own port, world and settings), keeps them running, checks for new
 Pumpkin versions on a schedule and **never applies an update without first making a verified backup**.
 
-For modded play it also runs **Java modpack servers**: pick a modpack from [Modrinth](https://modrinth.com) or
+It also runs **Java servers**. [Vanilla, Paper and Fabric servers](#vanilla-paper-and-fabric-servers) are set up from what Mojang,
+PaperMC and Fabric publish and kept up to date by the manager (the Minecraft version you pick, the newest stable build, the Java it
+needs). For modded play, pick a modpack from [Modrinth](https://modrinth.com) or
 [CurseForge](https://www.curseforge.com/minecraft/modpacks) and the manager downloads Java, the mods and the mod loader and
 starts it. See [Modpack servers](#modpack-servers-java).
 
@@ -18,6 +20,7 @@ starts it. See [Modpack servers](#modpack-servers-java).
 | | |
 |---|---|
 | **One-click servers** | Pick a name, a Pumpkin channel and a few settings; the manager downloads the binary, writes `pumpkin.toml`, assigns ports and starts it. |
+| **Vanilla, Paper and Fabric servers** | Java servers without a modpack: Mojang's own server, Paper for plugins, or Fabric for mods (with Fabric API). The manager downloads the software (checksum-verified) and the Java it needs, offers newer builds, and switches to another Minecraft version with a backup first and an automatic rollback. |
 | **Modpack servers** | Java servers from Modrinth and CurseForge modpacks (Fabric, Quilt, Forge, NeoForge): the right Java, every mod (checksum-verified), the loader and the pack's configuration are set up for you. Search from the dashboard, paste a link or upload a `.mrpack` or a CurseForge pack zip. CurseForge needs your own API key. |
 | **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators with individual levels, bans). |
 | **Automatic updates** | Checks GitHub for new Pumpkin builds (stable releases, plus the rolling *nightly* and *canary* builds), per server: install automatically, notify only, or off. Waits until nobody is online. |
@@ -31,7 +34,7 @@ starts it. See [Modpack servers](#modpack-servers-java).
 
 - [Install on Unraid](#install-on-unraid) · [Docker Compose](#docker-compose) · [First steps](#first-steps)
 - [Ports and networking](#ports-and-networking) · [Configuration](#configuration)
-- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Modpack servers](#modpack-servers-java) · [Accounts for friends](#accounts-for-friends)
+- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Vanilla, Paper and Fabric](#vanilla-paper-and-fabric-servers) · [Modpack servers](#modpack-servers-java) · [Accounts for friends](#accounts-for-friends)
 - [Security](#security) · [Where things are stored](#where-things-are-stored) · [Troubleshooting](#troubleshooting)
 - [Pumpkin notes](#notes-about-pumpkin) · [Development](#development)
 
@@ -246,6 +249,59 @@ you notice after playing for a while. That is what the pre-update backup and the
   management secret) stay the manager's.
 * **Download / upload**: move backups to another machine or restore an archive from elsewhere.
 * A backup needs free space about the size of the world; the manager checks first and says so if there is not enough.
+
+## Vanilla, Paper and Fabric servers
+
+*New server → Vanilla, Paper or Fabric server* sets up a Java server without a modpack, from what its maker publishes:
+
+* **Paper** (the recommended one): fast, runs plugins (the Bukkit and Spigot ones) and fixes many problems of the vanilla server.
+  The jar comes from PaperMC's download service.
+* **Vanilla**: Mojang's own `server.jar`, exactly as it ships. No plugins and no mods.
+* **Fabric**: a light mod loader. The manager installs Fabric's server launcher and, unless you turn it off, **Fabric API**, which
+  nearly every Fabric mod needs (from Modrinth, for the right Minecraft version).
+
+Pick the software, a **Minecraft version** (the newest release that has a stable build is suggested; snapshots can be shown for Vanilla
+and Fabric), and optionally a specific Paper build or Fabric loader version. The manager downloads the file and checks it against
+the checksum its maker published with it (SHA-1 from Mojang, SHA-256 from PaperMC; Fabric's launcher has none, so it is checked to be
+a jar), installs the **Java** that Minecraft version needs the same way as for modpacks (see *Which Java and why* below), writes
+`server.properties` and `eula.txt` and starts the server. Memory starts at 2 GiB (a few friends are fine with that; more players,
+bigger worlds or many plugins want more), and Paper servers start with the Java options PaperMC recommends for the version (a switch
+in the dialog; they show under *Settings → Java* and can be changed there). Console, players, files, backups and accounts for friends
+work as for every other server.
+
+* **Builds.** Paper marks each build *stable*, *beta* or *alpha*, and advises against running the experimental ones on a server that
+  matters, so the manager only installs and offers stable builds unless you choose an experimental one on purpose. A brand new
+  Minecraft version often has none yet; then the dialog says so and the newest stable version stays the suggestion.
+* **Plugins and mods.** Upload them in the *Files* tab: Paper's go into `plugins/`, Fabric's into `mods/`. The manager does not manage
+  them (it does not update them), except for Fabric API, which it installs and keeps matching the Minecraft version.
+* **Updates, two kinds.** A newer **build** of the Minecraft version the server runs (a Paper build, a Fabric loader version) shows
+  as *Update available* in the *Version* tab and on the dashboard. A Paper server installs those by itself by default, waiting until
+  nobody is online, like Pumpkin updates (*install automatically*, *notify only* or *off*, per server; Fabric and Vanilla servers
+  start on *notify*). A newer **Minecraft version** is different: it converts the world and breaks plugins and mods until their makers
+  catch up. The *Version* tab tells you when one is out, and you switch to it yourself. For Vanilla, a newer release is the update
+  and is never installed without you either.
+* **The update procedure** is the one of every other server: the new file is downloaded while the server keeps running, then the
+  server is stopped, a **verified backup** is made, the file is switched, the server starts and is watched, and if it does not
+  come up the backup is restored automatically. *Roll back* restores the backup made before the last update.
+* **Switching version.** *Version → Switch to another version* installs any version the software offers. Going to a newer Minecraft
+  version warns that the world is converted and that the old version cannot open it again (the backup made first is the way back);
+  going to an *older* one has to be confirmed, because a world that a newer version opened usually cannot be opened by an older one. The
+  right Java is installed if the other version needs another. Fabric API follows the Minecraft version; one you replaced by hand is
+  left alone, and a version Fabric API does not exist for yet is refused before anything changes. Paper no longer builds old versions
+  (and says when it stopped maintaining one): those still run, but get no more fixes.
+* **Backups** leave out what the software unpacks or downloads again by itself when it starts: `cache/`, `libraries/`, `versions/`
+  and, for Fabric, `.fabric/` at the top of the server folder. A fresh server is mostly that, so a backup is far smaller (a new Vanilla
+  server: 108 → 54 MiB, Paper: 169 → 77 MiB, Fabric: 134 → 3 MiB), and the world, `plugins/`, `mods/` and the configuration are always in.
+  After a restore (or a rolled back update) Paper and Fabric fetch those files from their makers again on the next start, as they did
+  on their first one, so the container needs internet access then; Vanilla unpacks them from its own jar. The patterns are part of
+  the server's backup settings.
+* **A deleted jar comes back.** If the server's jar is missing when it starts (deleted by accident, or lost in a restore), the
+  manager downloads exactly the build the server runs again.
+* **Run for real.** Vanilla, Paper and Fabric servers were created, started, pinged, given commands, backed up, restored and stopped
+  with the real services (Minecraft 26.3 on Java 25); each was updated one build (Vanilla: one release) forward and rolled back; and
+  each was switched from 1.21.11 (Java 21) to 26.3 (Java 25), converting its world, with Fabric API replaced and restored by the
+  rollback. `scripts/real_java_check.py --accept-eula --software all` (add `--software-update` or `--software-from 1.21.11`) repeats
+  that on your own setup.
 
 ## Modpack servers (Java)
 
@@ -467,6 +523,10 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | *"CurseForge does not let this API key search by name"* | Some keys may not use CurseForge's search. Pick a pack from the list, or enter its project number (the *Project ID* on its CurseForge page). |
 | A CurseForge server was created but is not running, and *Modpack* lists *Mods to add yourself* | Those mods' authors do not allow downloads by other programs. Open each mod's page from the list, download the file, upload it into `mods/` (Files tab) and start the server. |
 | Server stops right after starting | Open the console tab for the output. After editing `pumpkin.toml` by hand, use the Advanced editor, which validates it. |
+| A Paper or Fabric server says *"Paper's download service could not be reached"* (or Fabric's, or Mojang's) when it is created, checked or updated | The container needs internet access to `fill.papermc.io`, `meta.fabricmc.net`, `piston-meta.mojang.com` and `api.modrinth.com` (and the hosts they send files from). The *Version* tab and the new-server dialog show the reason; nothing is changed by a failed lookup. |
+| A Paper or Fabric update was rolled back by itself | The new build did not start, so the backup made before it was restored; the history in the *Version* tab says why, and that exact build is not offered again (the next one is). Nothing was lost. |
+| The Version tab says *"Minecraft X is older than ..."* | Switching to an older Minecraft version has to be confirmed: a world that a newer version has opened usually cannot be opened by an older one. Restore from a backup made with that version, or keep the newer one. |
+| *"Paper has no builds for Minecraft X"* / *"Fabric does not support Minecraft X"* | PaperMC builds Paper for Minecraft 1.7.10 and newer only, and Fabric supports 1.14 and newer; the version list shows what exists. A version with only experimental builds can be chosen on purpose under *Choose a specific build → Include experimental builds*. |
 | Adding a player to the whitelist, operators or bans changes nothing | Those buttons type the command into the running server's console, and the Players tab shows what the server then wrote to its `data/` folder. The dashboard tells you when a list did not change; the console tab has the server's answer (for example *No player was found* when an account name does not exist and online mode is on). The server must be running. |
 | Operators have too few (or too many) rights | New servers give operators **level 1** (moderator: can build inside the spawn protection, almost no commands); levels work as in vanilla (2 game master, 3 admin, 4 owner). Set the default for future operators under *Settings → Operator permission level*, and a single operator's level in the *Players* tab. Pumpkin reads levels only at startup, so changing one on a **running** server restarts it (the dashboard asks first); on a stopped server nothing restarts. Servers created before this default keep their old setting (4) until you change it, and so do operators who already exist. |
 | The difficulty is not the one I chose | Pumpkin ignores `default_difficulty` in `pumpkin.toml`, so the manager sets it with the `/difficulty` command when a server starts for the first time and whenever you change it in *Settings* (a running server switches at once). A difficulty an operator sets in-game stays until you change the setting here. |
@@ -507,6 +567,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
 .venv/bin/python scripts/dev_server.py            # dashboard on :8420 with a fake GitHub + fake Pumpkin (admin / devpassword)
 .venv/bin/python scripts/real_binary_check.py /path/to/pumpkin   # end-to-end check against a REAL Pumpkin binary
 .venv/bin/python scripts/real_java_check.py --accept-eula          # the same for a modpack server (real Java, Mojang, Modrinth, loader)
+.venv/bin/python scripts/real_java_check.py --accept-eula --software all    # ... for Vanilla, Paper and Fabric servers
 CURSEFORGE_API_KEY=... .venv/bin/python scripts/real_java_check.py --accept-eula --curseforge-pack 285109   # a real CurseForge pack (your own key)
 ```
 
@@ -527,9 +588,13 @@ CURSEFORGE_API_KEY=... .venv/bin/python scripts/real_java_check.py --accept-eula
   first, then updates to the newest and rolls that back; such a pack needs 4 GiB and downloads its mods for real.
   `--curseforge-pack <project number or link>` does the same for CurseForge packs (with your own key in `CURSEFORGE_API_KEY`;
   `--no-server-files` installs from the list of mods instead of the author's server files).
+* `--software vanilla|paper|fabric|all` does it for servers without a modpack, from what Mojang, PaperMC and Fabric offer right now;
+  `--software-update` installs the previous build first, then updates to the newest one and rolls that back, and `--software-from
+  <Minecraft version>` starts on an older Minecraft version and switches to the newest (new Java, converted world, Fabric API).
 * Layout: `pumpkin_manager/` (backend: `process.py` supervision, `updater.py` the update procedure,
-  `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `jvm/` the Java engine for modpack servers: Java runtimes,
-  mod loaders, Modrinth and CurseForge packs, a pack's own server files, `server.properties`, pack updates; `api/` routers, `static/` the dashboard -
+  `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `jvm/` the Java engine: Java runtimes, mod loaders, Modrinth and
+  CurseForge packs, a pack's own server files, `server.properties`, pack updates, and `software.py` / `softwareupdates.py` for Vanilla,
+  Paper and Fabric servers; `api/` routers, `static/` the dashboard -
   plain ES modules, no build step), `tests/` (including `fake_pumpkin.py` and `fake_java_server.py`, stand-in servers, and
-  `jvmfakes.py`, a fake internet for Modrinth, CurseForge, Adoptium, Mojang and the loaders), `docker/`, `unraid/`.
+  `jvmfakes.py`, a fake internet for Modrinth, CurseForge, Adoptium, Mojang, PaperMC, Fabric and the loaders), `docker/`, `unraid/`.
 * The frontend has no dependencies and never uses inline scripts or styles, so the strict CSP stays strict.

@@ -52,9 +52,10 @@ ROLE_LABELS = {PLAYER: "Player", MODERATOR: "Moderator", ADMIN: "Admin"}
 # What a player or moderator gets to see of a server; everything else (update policy, backup times, ...) is for admins.
 _LIMITED_FIELDS = (
     "id", "name", "created_at", "state", "busy", "desired_running", "uptime", "exit_code", "channel", "build", "ports",
-    "public_address", "players", "mc_version", "motd", "ping_ok", "stats", "disk_bytes", "engine", "modpack",
+    "public_address", "players", "mc_version", "motd", "ping_ok", "stats", "disk_bytes", "engine", "modpack", "software",
 )
 _MODPACK_MANAGEMENT = ("pending", "can_roll_back", "client_only", "client_only_count", "leave_out_client_only", "manual")
+_SOFTWARE_MANAGEMENT = ("pending", "upgrade", "can_roll_back", "support", "fabric_api", "installed_at")
 # Placeholders for the parts the dashboard expects to find on every server, so it never trips over a missing key.
 _NEUTRAL_FIELDS: dict[str, Any] = {
     "pinned_tag": None,
@@ -65,6 +66,7 @@ _NEUTRAL_FIELDS: dict[str, Any] = {
     "msmp_ok": False,
     "last_error": None,
     "update": {"mode": None, "available": False, "pending_build": None, "pending_since": None, "last_check": None},
+    "software": None,
 }
 
 
@@ -145,6 +147,8 @@ class AccessService:
             shaped = {**copy.deepcopy(_NEUTRAL_FIELDS), **{key: view[key] for key in _LIMITED_FIELDS if key in view}}
             if shaped.get("modpack"):  # which modpack it is is for everybody; updates and undo are for those who manage it
                 shaped["modpack"] = {k: v for k, v in shaped["modpack"].items() if k not in _MODPACK_MANAGEMENT}
+            if shaped.get("software"):  # likewise: which software and version it runs is for everybody
+                shaped["software"] = {k: v for k, v in shaped["software"].items() if k not in _SOFTWARE_MANAGEMENT}
             if CONSOLE_VIEW in perms:
                 shaped["last_error"] = view.get("last_error")
         shaped["access"] = {"role": role, "can": sorted(perms)}

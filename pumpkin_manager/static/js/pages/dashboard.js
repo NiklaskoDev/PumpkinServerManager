@@ -66,7 +66,7 @@ function serverCard(initial) {
     if (statsOnly) return;
 
     // Structural parts are rebuilt only when what they show actually changed (keeps hover/focus stable).
-    const shape = JSON.stringify([server.state, server.busy, server.name, server.engine, server.modpack, server.java?.major, server.build?.id, server.channel, server.update.available, server.update.pending_build?.id, server.ports, server.public_address, server.access]);
+    const shape = JSON.stringify([server.state, server.busy, server.name, server.engine, server.modpack, server.software, server.java?.major, server.build?.id, server.channel, server.update.available, server.update.pending_build?.id, server.ports, server.public_address, server.access]);
     if (shape === lastShape) return;
     lastShape = shape;
     name.textContent = server.name;
@@ -80,7 +80,7 @@ function serverCard(initial) {
     if (server.update.available) {
       refs.update.appendChild(h("div", { class: "update-banner" }, icon("arrowUp"),
         h("div", { class: "grow" }, "Update available: ", h("strong", {}, pendingText(server))),
-        server.update.mode === "auto" && server.engine !== "java"
+        server.update.mode === "auto" && (server.engine !== "java" || server.software?.pending?.kind === "build")
           ? h("span", { class: "muted small" }, "installs automatically")
           : h("a", { class: "btn sm primary", href: `#/server/${server.id}/version` }, "Review")));
     }
@@ -142,7 +142,7 @@ export function render() {
     if (!servers.length) {
       emptyHost.appendChild(h("div", { class: "card" }, isAdministrator()
         ? emptyState("server", "Create your first server",
-          "Run a fast Pumpkin server, or a Java modpack server with mods from Modrinth or CurseForge. The manager downloads and sets it up, and keeps it backed up (and Pumpkin updated) for you.",
+          "Run a fast Pumpkin server, a Vanilla, Paper or Fabric server, or a Java modpack server with mods from Modrinth or CurseForge. The manager downloads and sets it up, and keeps it backed up and updated for you.",
           h("button", { class: "btn primary", onclick: openNewServer }, icon("plus", "sm"), "New server"))
         : emptyState("server", "No servers yet", "The administrator has not given you access to a server. Once they do, it shows up here.")));
     }

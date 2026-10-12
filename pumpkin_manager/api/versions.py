@@ -35,6 +35,13 @@ class DownloadBody(BaseModel):
     channel: Literal["stable", "nightly", "canary"] | None = None
 
 
+def _java_server(rec: ServerRecord) -> ServerError:
+    """The answer to Pumpkin's update routes for a Java server: where its updates are."""
+    if rec.spec.get("software"):
+        return ServerError("This server runs Vanilla, Paper or Fabric: update it from its Version tab.", 409)
+    return ServerError("This is a modpack server: update it from its Modpack tab.", 409)
+
+
 async def _resolve_target(request: Request, body: TargetBody, rec_channel: str) -> BuildRecord:
     """Turn the many ways the UI can name a version into a registered build."""
     ctx = get_ctx(request)
@@ -139,7 +146,7 @@ async def update_history(request: Request, rec: ServerRecord = Depends(server_pe
 async def update_server(request: Request, body: TargetBody, rec: ServerRecord = Depends(server_perm(VERSIONS))) -> JSONResponse:
     ctx = get_ctx(request)
     if rec.is_java:
-        raise ServerError("This is a modpack server: update it from its Modpack tab.", 409)
+        raise _java_server(rec)
     if body.build_id is None and body.tag is None and body.channel is None and rec.pending_build_id:
         target = ctx.repo.get_build(rec.pending_build_id)
         if target is None:
@@ -156,7 +163,7 @@ async def check_server(
 ) -> dict[str, Any]:
     ctx = get_ctx(request)
     if rec.is_java:
-        raise ServerError("This is a modpack server: update it from its Modpack tab.", 409)
+        raise _java_server(rec)
     result = await asyncio.wait_for(ctx.updater.check(), timeout=60)
     rec = ctx.servers.get(rec.id)
     return {**result, "server": ctx.access.shape_server_view(principal, ctx.servers.view(rec, detail=True))}
@@ -165,5 +172,5 @@ async def check_server(
 @router.post("/servers/{server_id}/rollback", status_code=202)
 async def rollback(request: Request, body: RollbackBody, rec: ServerRecord = Depends(server_perm(VERSIONS))) -> JSONResponse:
     if rec.is_java:
-        raise ServerError("This is a modpack server: update it from its Modpack tab.", 409)
+        raise _java_server(rec)
     return JSONResponse({"job": get_ctx(request).updater.submit_rollback(rec, body.restore_data)}, status_code=202)

@@ -24,7 +24,7 @@ class ModpackUpdateBody(BaseModel):
 
 
 def _java(rec: ServerRecord) -> ServerRecord:
-    if not rec.is_java:
+    if not rec.is_java or rec.spec.get("software"):
         raise ServerError("This server does not run a modpack.", 404)
     return rec
 

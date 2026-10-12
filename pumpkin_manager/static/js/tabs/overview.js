@@ -62,7 +62,17 @@ export function render({ id, getServer }) {
 
     clear(versionHost);
     const manage = can(s, PERM.VERSIONS);
-    if (s.engine === "java") {
+    if (s.engine === "java" && s.software) {
+      const sw = s.software;
+      versionHost.appendChild(h("dl", { class: "kv" },
+        h("dt", {}, "Software"), h("dd", {}, h("strong", {}, sw.label)),
+        h("dt", {}, "Minecraft"), h("dd", {}, sw.minecraft || "–"),
+        ...(manage && s.java ? [
+          h("dt", {}, "Java"), h("dd", {}, `Java ${s.java.major} · ${fmtMemoryMb(s.java.memory_mb)} of memory`),
+          h("dt", {}, "Updates"), h("dd", {}, { auto: "automatic, backup first", notify: "notify only", off: "off" }[s.update.mode] || "–"),
+          h("dt", {}, "Last backup"), h("dd", {}, fmtRelative(s.last_backup_at)),
+        ] : [])));
+    } else if (s.engine === "java") {
       const m = s.modpack || {};
       versionHost.appendChild(h("dl", { class: "kv" },
         h("dt", {}, "Modpack"), h("dd", {}, h("strong", {}, [m.title, m.version_number].filter(Boolean).join(" ") || "–")),
@@ -84,7 +94,7 @@ export function render({ id, getServer }) {
     if (manage && s.update.available) {
       versionHost.appendChild(h("div", { class: "update-banner", style: { marginTop: "12px" } }, icon("arrowUp"),
         h("div", { class: "grow" }, "Update available: ", h("strong", {}, pendingText(s))),
-        h("button", { class: "btn primary sm", disabled: !!s.busy, onclick: () => jobDialog(post(`/api/servers/${id}/${s.engine === "java" ? "modpack/update" : "update"}`, {}), { title: `Updating ${s.name}`, successToast: "Update installed" }) }, "Update now")));
+        h("button", { class: "btn primary sm", disabled: !!s.busy, onclick: () => jobDialog(post(`/api/servers/${id}/${s.engine !== "java" ? "update" : s.software ? "software/update" : "modpack/update"}`, {}), { title: `Updating ${s.name}`, successToast: "Update installed" }) }, "Update now")));
     }
   }
 
@@ -118,7 +128,7 @@ export function render({ id, getServer }) {
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h3", {}, "Memory")), v.mem, memSpark)),
     h("div", { class: "grid cols-2" },
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Connect")), connHost),
-      h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, server.engine === "java" ? "Modpack" : "Version"),
+      h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, server.engine === "java" && !server.software ? "Modpack" : "Version"),
         can(server, PERM.VERSIONS) ? h("a", { class: "small", href: `#/server/${id}/version` }, "Manage") : null), versionHost)),
     h("div", { class: followsActivity ? "grid cols-2" : "grid" },
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Online players")), playersHost),

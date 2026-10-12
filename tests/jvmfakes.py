@@ -15,6 +15,7 @@ import tarfile
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -49,11 +50,17 @@ def jre_archive(kind: str = "tar.gz", release: str = JRE_RELEASE, *, evil_member
 
 
 def _zip_bytes(files: dict[str, bytes]) -> bytes:
+    """A zip with fixed timestamps: the same files always give the same bytes, so a test can compare a jar with what it should be."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         for name, data in files.items():
-            zf.writestr(name, data)
+            zf.writestr(zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0)), data)
     return buf.getvalue()
+
+
+def server_jar(version: str) -> bytes:
+    """What Mojang's server.jar of a Minecraft version looks like to the manager: a jar (a zip) that is different for every version."""
+    return _zip_bytes({"version.json": json.dumps({"id": version}).encode(), "net/minecraft/server/Main.class": version.encode() * 40})
 
 
 class FakeJava:
@@ -159,6 +166,7 @@ class FakeInternet:
         self.curseforge: FakeCurseForge | None = None
         self.offline = False
         self.java_downloads = 0
+        self.server_jar_downloads = 0  # Minecraft server jars fetched from Mojang
         self.mod_downloads: dict[str, int] = {}
         self.modrinth_projects: list[FakeModrinth] = []
         # What the projects behind mod files say about servers: sha1 -> (project id, required | optional | unsupported)
@@ -346,17 +354,195 @@ class FakeInternet:
         return jar
 
     # ------------------------------------------------------------------- Mojang
-    def minecraft(self, versions: dict[str, int | None]) -> None:
-        """Register Minecraft versions with the Java major version Mojang's metadata names for them (None: no javaVersion)."""
+    def minecraft(self, versions: dict[str, int | None], *, snapshots: dict[str, int | None] | None = None, no_server: tuple[str, ...] = ()) -> None:
+        """Register Minecraft versions, newest first, with the Java major version Mojang's metadata names for them (None: no
+        javaVersion). Every version has a server jar with its real size and SHA-1 (except those in ``no_server``). ``snapshots`` are
+        newer than all the releases."""
         entries = []
-        for version, java in versions.items():
+        base = datetime(2026, 9, 1, 12, tzinfo=UTC)
+        ordered = [(v, j, "snapshot") for v, j in (snapshots or {}).items()] + [(v, j, "release") for v, j in versions.items()]
+        for index, (version, java, kind) in enumerate(ordered):
+            released = (base - timedelta(days=20 * index)).isoformat()
             url = f"https://piston-meta.mojang.com/v1/packages/{hashlib.sha1(version.encode()).hexdigest()}/{version}.json"
-            entries.append({"id": version, "type": "release", "url": url, "sha1": "0" * 40, "releaseTime": "2026-01-01T00:00:00+00:00"})
-            meta: dict[str, Any] = {"id": version, "downloads": {"server": {"sha1": "1" * 40, "size": 50_000_000, "url": f"https://piston-data.mojang.com/{version}/server.jar"}}}
+            entries.append({"id": version, "type": kind, "url": url, "sha1": "0" * 40, "releaseTime": released})
+            jar = server_jar(version)
+            sha1 = hashlib.sha1(jar).hexdigest()
+            jar_url = f"https://piston-data.mojang.com/v1/objects/{sha1}/server.jar"
+            meta: dict[str, Any] = {"id": version, "type": kind, "releaseTime": released, "downloads": {}}
+            if version not in no_server:
+                meta["downloads"]["server"] = {"sha1": sha1, "size": len(jar), "url": jar_url}
+                self.route(jar_url, lambda request, data=jar: self._serve_server_jar(data))
             if java is not None:
                 meta["javaVersion"] = {"component": "java-runtime", "majorVersion": java}
             self.json(url, meta)
-        self.json("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json", {"latest": {"release": next(iter(versions), "")}, "versions": entries})
+        latest_release = next((v for v, _, kind in ordered if kind == "release"), "")
+        latest_snapshot = next((v for v, _, kind in ordered if kind == "snapshot"), latest_release)
+        self.json(
+            "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+            {"latest": {"release": latest_release, "snapshot": latest_snapshot}, "versions": entries},
+        )
+
+    def _serve_server_jar(self, data: bytes) -> httpx.Response:
+        self.server_jar_downloads += 1
+        return httpx.Response(200, content=data)
+
+
+class FakePaper:
+    """PaperMC's download service (Fill v3): the Minecraft versions it builds (release candidates too, like the real one), their
+    builds with a channel, what it says about each version, and the jars, which are found by their SHA-256 on another host."""
+
+    API = "fill.papermc.io"
+    DATA = "fill-data.papermc.io"
+
+    def __init__(self, net: FakeInternet) -> None:
+        self.net = net
+        self.versions: dict[str, dict[str, Any]] = {}
+        self.blobs: dict[str, bytes] = {}  # sha256 -> the jar
+        self.downloads = 0
+        self.api_calls: list[str] = []
+        net.route_pattern(self.API, r"/v3/projects/paper", self._project)
+        net.route_pattern(self.API, r"/v3/projects/paper/versions/[^/]+", self._version)
+        net.route_pattern(self.API, r"/v3/projects/paper/versions/[^/]+/builds", self._builds)
+        net.route_pattern(self.DATA, r"/v1/objects/[0-9a-f]{64}/.+", self._jar)
+
+    def add_version(self, version: str, *, java: int = 21, flags: tuple[str, ...] = ("-XX:+UseG1GC", "-XX:MaxGCPauseMillis=200"),
+                    support: str = "SUPPORTED", end: str | None = None) -> None:
+        self.versions[version] = {"java": java, "flags": list(flags), "support": {"status": support, **({"end": end} if end else {})}, "builds": []}
+
+    def add_build(self, version: str, build: int, channel: str = "STABLE", *, broken: bool = False) -> dict[str, Any]:
+        """Publish a build. A ``broken`` one has a jar that the fake Java server refuses to run (see ``crash_if_jar_contains``)."""
+        files = {"paperclip.json": json.dumps({"version": version, "build": build}).encode(), "meta/versions.list": f"{version}-{build}".encode() * 30}
+        if broken:
+            files["BROKEN"] = b"this build does not start"
+        jar = _zip_bytes(files)
+        sha256 = hashlib.sha256(jar).hexdigest()
+        self.blobs[sha256] = jar
+        entry = {
+            "id": build, "time": f"2026-09-{(build % 27) + 1:02d}T10:00:00.000Z", "channel": channel.upper(),
+            "commits": [{"sha": "0" * 40, "time": "2026-09-01T00:00:00Z", "message": "A change"}],
+            "downloads": {"server:default": {
+                "name": f"paper-{version}-{build}.jar", "checksums": {"sha256": sha256}, "size": len(jar),
+                "url": f"https://{self.DATA}/v1/objects/{sha256}/paper-{version}-{build}.jar",
+            }},
+        }
+        self.versions[version]["builds"].insert(0, entry)
+        self.versions[version]["builds"].sort(key=lambda b: b["id"], reverse=True)
+        return entry
+
+    def _missing(self) -> httpx.Response:
+        return httpx.Response(404, json={"ok": False, "error": "version_not_found", "message": "Version not found"})
+
+    def _project(self, request: httpx.Request) -> httpx.Response:
+        self.api_calls.append(request.url.path)
+        groups: dict[str, list[str]] = {}
+        for version in sorted(self.versions, key=lambda v: [int(n) if n.isdigit() else 0 for n in re.split(r"[.-]", v)], reverse=True):
+            groups.setdefault(".".join(version.split(".")[:2]).split("-")[0], []).append(version)
+        return httpx.Response(200, json={"project": {"id": "paper", "name": "Paper"}, "versions": groups})
+
+    def _version(self, request: httpx.Request) -> httpx.Response:
+        self.api_calls.append(request.url.path)
+        version = request.url.path.rsplit("/", 1)[-1]
+        known = self.versions.get(version)
+        if known is None:
+            return self._missing()
+        return httpx.Response(200, json={
+            "version": {"id": version, "support": known["support"], "java": {"version": {"minimum": known["java"]}, "flags": {"recommended": known["flags"]}}},
+            "builds": [b["id"] for b in known["builds"]],
+        })
+
+    def _builds(self, request: httpx.Request) -> httpx.Response:
+        self.api_calls.append(request.url.path)
+        known = self.versions.get(request.url.path.split("/")[-2])
+        return httpx.Response(200, json=known["builds"]) if known is not None else self._missing()
+
+    def _jar(self, request: httpx.Request) -> httpx.Response:
+        jar = self.blobs.get(request.url.path.split("/")[3])
+        if jar is None:
+            return httpx.Response(404)
+        self.downloads += 1
+        return httpx.Response(200, content=jar)
+
+
+class FakeFabric:
+    """Fabric's metadata service: the Minecraft versions it supports, the loader versions for them, and the server launcher jars."""
+
+    HOST = "meta.fabricmc.net"
+
+    def __init__(self, net: FakeInternet, installer: str = "1.0.1") -> None:
+        self.net = net
+        self.installer = installer
+        self.games: dict[str, bool] = {}  # Minecraft version -> stable
+        self.loaders: list[tuple[str, bool]] = []  # (version, stable), newest first
+        self.broken: set[tuple[str, str]] = set()  # (Minecraft version, loader version) of launchers the fake Java server refuses to run
+        self.downloads = 0
+        net.route_pattern(self.HOST, r"/v2/versions/game", self._games)
+        net.route_pattern(self.HOST, r"/v2/versions/loader/[^/]+", self._loaders)
+        net.route_pattern(self.HOST, r"/v2/versions/loader/[^/]+/[^/]+/[^/]+/server/jar", self._launcher)
+
+    def add_game(self, version: str, stable: bool = True) -> None:
+        self.games = {version: stable, **self.games}  # newest first
+
+    def add_loader(self, version: str, stable: bool = True) -> None:
+        self.loaders.insert(0, (version, stable))
+
+    def _games(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"version": v, "stable": s} for v, s in self.games.items()])
+
+    def _loaders(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.rsplit("/", 1)[-1] not in self.games:
+            return httpx.Response(400, json=[])  # what the real service answers for a Minecraft version it does not know
+        return httpx.Response(200, json=[
+            {"loader": {"version": v, "stable": s, "separator": ".", "build": 1, "maven": f"net.fabricmc:fabric-loader:{v}"}, "intermediary": {}, "launcherMeta": {}}
+            for v, s in self.loaders
+        ])
+
+    def _launcher(self, request: httpx.Request) -> httpx.Response:
+        parts = request.url.path.split("/")
+        self.downloads += 1
+        marker = {"fabric-launcher": f"{parts[4]}-{parts[5]}-{parts[6]}"}
+        if (parts[4], parts[5]) in self.broken:
+            marker["BROKEN"] = "this loader does not start"
+        return httpx.Response(200, content=_zip_bytes({k: v.encode() for k, v in marker.items()}), headers={"Content-Type": "application/java-archive"})
+
+
+class FakeFabricApi:
+    """The Fabric API mod on Modrinth: versions for Minecraft versions, found with the loader and game version filters like the real one."""
+
+    PROJECT = "P7dR8mSH"
+
+    def __init__(self, net: FakeInternet) -> None:
+        self.net = net
+        self.versions: list[dict[str, Any]] = []
+        self.files: dict[str, bytes] = {}
+        self.downloads = 0
+        net.route("https://api.modrinth.com/v2/project/fabric-api/version", self._versions)
+
+    def add_version(self, number: str, minecraft: str, version_type: str = "release") -> dict[str, Any]:
+        vid = f"FA{len(self.versions) + 1:06d}"
+        content = _zip_bytes({"fabric.mod.json": json.dumps({"id": "fabric-api", "version": number}).encode()})
+        filename = f"fabric-api-{number}.jar"
+        url = f"https://cdn.modrinth.com/data/{self.PROJECT}/versions/{vid}/{filename}"
+        version = {
+            "id": vid, "project_id": self.PROJECT, "name": f"Fabric API {number}", "version_number": number, "version_type": version_type,
+            "date_published": f"2026-09-{len(self.versions) + 1:02d}T12:00:00Z", "game_versions": [minecraft], "loaders": ["fabric"], "status": "listed",
+            "files": [{"hashes": {"sha1": hashlib.sha1(content).hexdigest(), "sha512": hashlib.sha512(content).hexdigest()}, "url": url,
+                       "filename": filename, "primary": True, "size": len(content)}],
+        }
+        self.versions.insert(0, version)
+        self.files[vid] = content
+        self.net.route(url, lambda request, data=content: self._serve(data))
+        return version
+
+    def _serve(self, data: bytes) -> httpx.Response:
+        self.downloads += 1
+        return httpx.Response(200, content=data)
+
+    def _versions(self, request: httpx.Request) -> httpx.Response:
+        query = parse_qs(request.url.query.decode())
+        loaders = json.loads((query.get("loaders") or ["[]"])[0])
+        games = json.loads((query.get("game_versions") or ["[]"])[0])
+        found = [v for v in self.versions if (not loaders or set(loaders) & set(v["loaders"])) and (not games or set(games) & set(v["game_versions"]))]
+        return httpx.Response(200, json=found)
 
 
 class FakeModrinth:
