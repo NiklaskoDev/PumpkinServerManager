@@ -280,13 +280,16 @@ async def main() -> int:
     if not BEHAVIOR.get("no_done_line"):
         KEEP_ALIVE.append(await asyncio.start_server(slp_client, "0.0.0.0", port))
     threading.Thread(target=stdin_reader, daemon=True).start()
-    log(f"Starting Minecraft server on *:{port}")
+    log(f"Starting Minecraft server on *:{port}")  # answers_without_done: from here on it answers, and never says Done
     if BEHAVIOR.get("early_empty_status"):
         loading = True
         log('Preparing level "world"')
         await asyncio.sleep(float(BEHAVIOR["early_empty_status"]))
         loading = False
-    if not BEHAVIOR.get("no_done_line"):
+    if BEHAVIOR.get("early_full_status"):  # NeoForge with hundreds of mods answers with its real status while it is still loading
+        log('Preparing level "world"')
+        await asyncio.sleep(float(BEHAVIOR["early_full_status"]))
+    if not BEHAVIOR.get("no_done_line") and not BEHAVIOR.get("answers_without_done"):
         log('Done (1.234s)! For help, type "help"')
     await stop_event.wait()
     log("Stopping the server", thread="Server thread")

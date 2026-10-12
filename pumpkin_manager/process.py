@@ -27,6 +27,9 @@ log = logging.getLogger(__name__)
 READY_RE = re.compile(r"server is now running", re.IGNORECASE)
 PUMPKIN_START_HINT = "if Pumpkin rejected pumpkin.toml it silently falls back to default settings."
 FAILURE_EXIT_GRACE = 20.0  # seconds a server gets to end by itself after it said it could not start
+# A modded server can answer status requests well before it says "Done" (NeoForge with hundreds of mods did): the answers alone only
+# count as "up" after they have gone on this long without the console line, for servers that never print one.
+ANSWER_GRACE = 120.0
 _FORMAT_CODES = re.compile("§.")  # Minecraft's formatting codes, which mod loaders put into their error messages
 # A line of a Java stack trace ("at net.minecraft.Foo.bar(Foo.java:12)", "... 11 more"), whatever the logger put in front of it.
 _STACK_FRAME = re.compile(r"\bat [\w$.<>/]+\((?:[\w$.]+(?::\d+)?|Native Method|Unknown Source)\)|\.\.\. \d+ more")
@@ -367,6 +370,7 @@ class ProcessManager:
         # A Java server announces on its console when it is up. Pinging it meanwhile only fills that console (Forge logs every
         # ping it answers before the world is loaded), so it is asked rarely, and the console line ends the wait at once.
         pause = 5.0 if rt.strict_ping else 0.4
+        answering_since: float | None = None
         while True:
             if rt.exited.is_set():
                 error = ProcessError(self._describe_early_exit(rt))
@@ -382,8 +386,12 @@ class ProcessManager:
             if port:
                 try:
                     info = await server_list_ping("127.0.0.1", port, timeout=1.5)
-                    if info["version"] or not rt.strict_ping:
+                    if not rt.strict_ping:
                         return
+                    if info["version"]:
+                        answering_since = answering_since if answering_since is not None else loop.time()
+                        if loop.time() - answering_since > ANSWER_GRACE:
+                            return
                 except PingError:
                     pass
             if loop.time() > deadline:

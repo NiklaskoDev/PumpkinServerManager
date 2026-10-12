@@ -342,6 +342,32 @@ async def test_the_known_old_forge_on_new_java_failure_is_explained(jvm):
     assert "old Forge builds for Minecraft 1.16.5" in row["message"] and "36.2.26 or newer" in row["message"]
 
 
+async def test_a_server_that_answers_with_its_real_status_before_it_says_done_is_still_not_called_up(jvm):
+    """NeoForge with hundreds of mods did: an update was judged by a server that was still loading."""
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "AnswersEarly", start=False)
+    world.behavior["early_full_status"] = 8.0
+    started = time.monotonic()
+    row = await finish(ctx, ctx.servers.submit_start(rec), timeout=60)
+    assert row["status"] == "success", row["message"]
+    assert any("Done (" in line["m"] for line in ctx.pm.backlog(rec.id, 200)), "it was only called up once the console said so"
+    assert time.monotonic() - started >= 7, "the first answer (after 5 seconds) was not taken for 'up'"
+    assert ctx.pm.runtime(rec.id).state == "running"
+
+
+async def test_a_server_that_answers_but_never_says_done_is_called_up_after_a_while(jvm, monkeypatch):
+    from pumpkin_manager import process
+
+    monkeypatch.setattr(process, "ANSWER_GRACE", 1.0)
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "Quiet", start=False)
+    world.behavior["answers_without_done"] = True
+    row = await finish(ctx, ctx.servers.submit_start(rec), timeout=60)
+    assert row["status"] == "success", row["message"]
+    assert not any("Done (" in line["m"] for line in ctx.pm.backlog(rec.id, 200))
+    assert ctx.pm.runtime(rec.id).state == "running"
+
+
 async def test_a_server_that_opens_its_port_early_is_not_called_up_before_it_says_done(jvm):
     world, ctx = jvm
     rec = await create_java_server(ctx, "EarlyPort", start=False)
