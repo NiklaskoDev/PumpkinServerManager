@@ -8,7 +8,10 @@ import { busy, confirmDialog, field, fmtMemoryMb, jobDialog, notifyError, packIc
 const LOADERS = { fabric: "Fabric", forge: "Forge", neoforge: "NeoForge", quilt: "Quilt" };
 const STATUS = { success: "success", rolled_back: "warning", failed: "error", interrupted: "warning", running: "info" };
 const STATUS_LABEL = { success: "done", rolled_back: "rolled back", failed: "failed", interrupted: "interrupted", running: "running" };
-const versionLabel = (v, current) => `${v.number}${v.type !== "release" ? ` (${v.type})` : ""} · Minecraft ${v.minecraft.join(", ")} · ${v.loaders.map((l) => LOADERS[l] || l).join(", ")}${v.id === current ? " · installed" : ""}`;
+const SOURCE_NAMES = { modrinth: "Modrinth", curseforge: "CurseForge" };
+const versionLabel = (v, current) => `${v.number}${v.type !== "release" ? ` (${v.type})` : ""} · Minecraft ${v.minecraft.join(", ")} · ${v.loaders.map((l) => LOADERS[l] || l).join(", ")}${v.server_pack ? " · server files" : ""}${v.id === current ? " · installed" : ""}`;
+// The address of a mod's page comes from CurseForge's API: only a page on CurseForge itself becomes a link.
+const curseforgePage = (url) => (/^https:\/\/(www\.)?curseforge\.com\//.test(url || "") ? url : null);
 
 export function render({ id, getServer }) {
   const host = h("div", { class: "stack" });
@@ -34,14 +37,16 @@ export function render({ id, getServer }) {
 
   function packCard(info) {
     const m = info.modpack;
-    const source = m.source === "modrinth" && m.slug
-      ? h("a", { href: `https://modrinth.com/modpack/${encodeURIComponent(m.slug)}`, target: "_blank", rel: "noopener noreferrer" }, "Modrinth ", icon("external", "sm"))
-      : (m.source === "upload" ? "an uploaded .mrpack file" : "unknown");
+    const link = (url, label) => h("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, `${label} `, icon("external", "sm"));
+    const source = m.source === "modrinth" && m.slug ? link(`https://modrinth.com/modpack/${encodeURIComponent(m.slug)}`, "Modrinth")
+      : m.source === "curseforge" ? (m.slug ? link(`https://www.curseforge.com/minecraft/modpacks/${encodeURIComponent(m.slug)}`, "CurseForge") : "CurseForge")
+        : (m.source === "upload" ? "an uploaded modpack file" : "unknown");
     return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Modpack")),
       h("div", { class: "row" }, packIcon(m.icon, 52), h("div", { class: "grow" }, h("strong", { class: "big" }, m.title || "Modpack"),
         h("div", { class: "muted" }, m.version_number ? `Version ${m.version_number}` : ""))),
       h("dl", { class: "kv" },
         h("dt", {}, "Source"), h("dd", {}, source),
+        m.server_pack ? h("dt", {}, "Installed from") : null, m.server_pack ? h("dd", {}, "the pack author's own server files") : null,
         h("dt", {}, "Minecraft"), h("dd", {}, m.minecraft || "–"),
         h("dt", {}, "Mod loader"), h("dd", {}, m.loader?.label || "–"),
         h("dt", {}, "Mods"), h("dd", {}, `${info.mod_count}`),
@@ -52,10 +57,26 @@ export function render({ id, getServer }) {
     const m = info.modpack;
     if (!m.client_only_count) return null;
     return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Left out"), h("span", { class: "muted small" }, `${m.client_only_count} ${m.client_only_count === 1 ? "mod" : "mods"}`)),
-      h("p", { class: "hint" }, "Modrinth says these mods only work on a client (minimaps, menus, shader helpers, ...). The modpack lists them for the server as well, but they can stop a server from starting, so they were not installed. Updates leave them out too."),
+      h("p", { class: "hint" }, "Modrinth or the modpack's own tags say these mods only work on a client (minimaps, menus, shader helpers, ...). The modpack lists them for the server as well, but they can stop a server from starting, so they were not installed. Updates leave them out too."),
       h("details", {}, h("summary", {}, "Show the list"),
         h("div", { class: "mod-list", style: { marginTop: "10px" } }, m.client_only.map((p) => h("div", { class: "mod mono small truncate", title: p }, p.replace(/^mods\//, ""))))),
       m.client_only_count > m.client_only.length ? h("p", { class: "hint" }, `Showing the first ${m.client_only.length}.`) : null);
+  }
+
+  // Mods whose authors do not allow other programs to download them: the person fetches those from the mod's page.
+  function manualCard(info, reload) {
+    const m = info.modpack;
+    if (!m.manual?.length) return null;
+    return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Mods to add yourself"), h("span", { class: "muted small" }, `${m.manual.length} ${m.manual.length === 1 ? "mod" : "mods"}`)),
+      h("div", { class: "notice warning" }, icon("alert", "sm"), h("span", {}, "The authors of these mods do not allow other programs to download them. Download each one from its CurseForge page and put the file into the server's mods folder (",
+        h("a", { href: `#/server/${id}/files` }, "Files tab"), "). The server was not started after it was created, and an update of the modpack waits for these files as well. You can also start it without them: a missing mod may stop it from starting, or only be missed by the players.")),
+      h("div", { class: "stack-sm" }, m.manual.map((mod) => {
+        const page = curseforgePage(mod.page);
+        return h("div", { class: "row" },
+          h("div", { class: "grow" }, h("strong", {}, mod.name || mod.path), h("div", { class: "muted small mono truncate", title: mod.path }, mod.path)),
+          page ? h("a", { class: "btn sm", href: page, target: "_blank", rel: "noopener noreferrer" }, icon("external", "sm"), "Open its page") : null);
+      })),
+      h("div", {}, h("button", { class: "btn sm", onclick: (e) => busy(e.currentTarget, reload) }, icon("restart", "sm"), "Check again")));
   }
 
   function javaCard(info) {
@@ -73,7 +94,7 @@ export function render({ id, getServer }) {
   async function updatesCard(info, reload) {
     const s = getServer();
     const m = info.modpack;
-    if (m.source !== "modrinth") {
+    if (!SOURCE_NAMES[m.source]) {
       return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Updates")),
         h("p", { class: "muted" }, "This server was made from an uploaded modpack file, so there is no place to look for newer versions. To use another version, create a new server from it."));
     }
@@ -144,7 +165,7 @@ export function render({ id, getServer }) {
     const mode = h("div", { class: "row" }, h("span", { class: "muted small" }, "New versions:"), selectControl(
       [{ value: "notify", label: "tell me" }, { value: "off", label: "do not look for them" }], s.policy.update_mode === "off" ? "off" : "notify",
       async (v) => { try { await patch(`/api/servers/${id}`, { policy: { update_mode: v } }); toast("Saved", "success"); } catch (err) { notifyError(err); } }));
-    const checkBtn = h("button", { class: "btn sm", onclick: (e) => busy(e.currentTarget, async () => { await post(`/api/servers/${id}/modpack/check`); await reload(); toast("Checked Modrinth", "success"); }) }, icon("restart", "sm"), "Check now");
+    const checkBtn = h("button", { class: "btn sm", onclick: (e) => busy(e.currentTarget, async () => { await post(`/api/servers/${id}/modpack/check`); await reload(); toast(`Checked ${SOURCE_NAMES[m.source]}`, "success"); }) }, icon("restart", "sm"), "Check now");
     return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Updates"), checkBtn),
       banner, mode, picker, rollback, table ? h("div", {}, h("div", { class: "section-title" }, "History"), table) : null);
   }
@@ -155,10 +176,10 @@ export function render({ id, getServer }) {
     try { info = await get(`/api/servers/${id}/modpack`); } catch (err) { return notifyError(err); }
     const updates = await updatesCard(info, load);
     shown = shapeOf(getServer());
-    clear(host).append(packCard(info), updates, modsCard(info), ...[leftOutCard(info), javaCard(info)].filter(Boolean));
+    clear(host).append(...[manualCard(info, load), packCard(info), updates, modsCard(info), leftOutCard(info), javaCard(info)].filter(Boolean));
   }
 
-  const shapeOf = (s) => JSON.stringify([s.modpack?.version_number, s.modpack?.pending?.id, s.modpack?.can_roll_back, s.modpack?.client_only_count, s.busy, s.policy?.update_mode]);
+  const shapeOf = (s) => JSON.stringify([s.modpack?.version_number, s.modpack?.pending?.id, s.modpack?.can_roll_back, s.modpack?.client_only_count, s.modpack?.manual?.length, s.busy, s.policy?.update_mode]);
   load();
   // The server view changes when a check finds something or an update ends: redraw then (and only then).
   return { el: host, onServer: (s) => { if (shapeOf(s) !== shown) load(); } };

@@ -142,7 +142,7 @@ export function render() {
     if (!servers.length) {
       emptyHost.appendChild(h("div", { class: "card" }, isAdministrator()
         ? emptyState("server", "Create your first server",
-          "Run a fast Pumpkin server, or a Java modpack server with mods from Modrinth. The manager downloads and sets it up, and keeps it backed up (and Pumpkin updated) for you.",
+          "Run a fast Pumpkin server, or a Java modpack server with mods from Modrinth or CurseForge. The manager downloads and sets it up, and keeps it backed up (and Pumpkin updated) for you.",
           h("button", { class: "btn primary", onclick: openNewServer }, icon("plus", "sm"), "New server"))
         : emptyState("server", "No servers yet", "The administrator has not given you access to a server. Once they do, it shows up here.")));
     }

@@ -29,6 +29,37 @@ export async function render() {
   }
 
   const tokenInput = h("input", { class: "input", type: "password", autocomplete: "off", placeholder: s.has_github_token ? "A token is saved (type to replace)" : "optional", oninput: (e) => { draft.github_token = e.target.value; } });
+  const keyInput = h("input", { class: "input", type: "password", autocomplete: "off", spellcheck: "false", "aria-label": "CurseForge API key" });
+  const keyState = h("p", { class: "hint" });
+  const removeKey = h("button", { class: "btn sm danger hidden", onclick: (e) => busy(e.currentTarget, () => saveKey("")) }, "Remove the key");
+  function showKey() {
+    const fromEnvironment = state.settings.curseforge_key_from_environment;
+    keyInput.value = "";
+    keyInput.placeholder = state.settings.has_curseforge_key ? "A key is saved (type to replace it)" : "Paste your CurseForge API key";
+    keyState.textContent = fromEnvironment ? "A key is set with the CURSEFORGE_API_KEY variable of the container. A key saved here is used instead." :
+      state.settings.has_curseforge_key ? "A key is saved. It is never shown again." : "No key yet: CurseForge modpacks are not available.";
+    removeKey.classList.toggle("hidden", !(state.settings.has_curseforge_key && !fromEnvironment));
+  }
+  async function saveKey(value) {
+    try {
+      state.settings = await put("/api/settings", { curseforge_api_key: value });
+      toast(value ? "CurseForge accepted the key" : "The key was removed", "success");
+    } catch (err) { notifyError(err); }
+    showKey();
+  }
+  showKey();
+  const modpacks = h("div", { class: "card stack" }, h("h2", {}, "Modpacks"),
+    h("p", { class: "muted" }, "Modrinth modpacks need no setup. CurseForge hands out its modpacks through an API that wants a key: ",
+      h("a", { href: "https://console.curseforge.com/", target: "_blank", rel: "noopener noreferrer" }, "create one at console.curseforge.com"),
+      " (it starts with $2a$10$). The key is personal, so each person uses their own; it is stored in this manager's database and sent to CurseForge only."),
+    field("CurseForge API key", keyInput, null), keyState,
+    h("div", { class: "row" },
+      h("button", { class: "btn primary sm", onclick: (e) => {
+        const value = keyInput.value.trim();
+        if (!value) return toast("Paste the key first.", "info");
+        return busy(e.currentTarget, () => saveKey(value));
+      } }, icon("save", "sm"), "Save and check the key"), removeKey));
+
   const webhookInput = h("input", { class: "input", type: "url", value: s.webhook_url || "", placeholder: "https://discord.com/api/webhooks/…", oninput: (e) => { draft.webhook_url = e.target.value; } });
 
   const updates = h("div", { class: "card stack" }, h("h2", {}, "Update checks"),
@@ -73,11 +104,12 @@ export async function render() {
       ...diskRow("Backup disk", sys.disk.backup_free, sys.disk.backup_total),
       h("dt", {}, "Game ports"), h("dd", {}, `${sys.ports.java_range[0]}–${sys.ports.java_range[1]} (TCP) · Bedrock ${sys.ports.bedrock_range[0]}–${sys.ports.bedrock_range[1]} (UDP)`),
       h("dt", {}, "Binaries"), h("dd", {}, fmtBytes(sys.disk.binaries)),
-      h("dt", {}, "GitHub token"), h("dd", {}, sys.github_token ? "configured" : "not set")));
+      h("dt", {}, "GitHub token"), h("dd", {}, sys.github_token ? "configured" : "not set"),
+      h("dt", {}, "CurseForge key"), h("dd", {}, sys.curseforge_key ? "configured" : "not set")));
 
   return {
     el: h("div", { class: "stack" },
       h("div", { class: "page-head" }, h("div", { class: "titles" }, h("h1", {}, "Settings"), h("p", {}, "Applies to the whole manager. Each server has its own settings on its page."))),
-      h("div", { class: "grid cols-2" }, h("div", { class: "stack" }, updates, defaults, account), h("div", { class: "stack" }, notifications, system))),
+      h("div", { class: "grid cols-2" }, h("div", { class: "stack" }, updates, modpacks, defaults, account), h("div", { class: "stack" }, notifications, system))),
   };
 }

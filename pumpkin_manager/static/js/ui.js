@@ -130,11 +130,15 @@ export function segmented(options, value, onChange) {
     b.dataset.value = o.value;
     return b;
   });
-  function select(v) {
+  function show(v) {
     value = v;
     buttons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.value === v)));
+  }
+  function select(v) {
+    show(v);
     onChange(v);
   }
+  wrap.set = show; // changes the choice without telling onChange (for when the page itself decided)
   buttons.forEach((b) => wrap.appendChild(b));
   return wrap;
 }
