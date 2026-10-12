@@ -43,8 +43,9 @@ _KNOWN_PROBLEMS = (
         "config/missing_mods_checker.json, which can be deleted once they are in the mods folder)."
     )),
     (re.compile(r"ManifestEntryVerifier"), (
-        "This is a known problem of old Forge builds for Minecraft 1.16.5 (36.2.25 and older): their launcher does not work with the Java "
-        "security update of January 2022 (Java 8u321 or 11.0.14 and newer), which is what is available today. Use a version of the "
+        "This is a known problem of old Forge builds for Minecraft 1.16.5 (36.2.25 and older): their launcher does not work with a Java 8 "
+        "newer than 8u312 (the security update of January 2022). The manager runs Java 8 servers on 8u312, so this one probably ran on a "
+        "newer Java 8 because the pinned build could not be installed here (the manager's log says why). Otherwise use a version of the "
         "modpack that is built on Forge 36.2.26 or newer."
     )),
 )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import tomllib
 from datetime import UTC, datetime, timedelta
@@ -12,6 +14,7 @@ import pytest
 from pumpkin_manager import files as fm
 from pumpkin_manager import pumpkin_config as pc
 from pumpkin_manager.db import Database
+from pumpkin_manager.mcnet import PingError, _encode_varint, server_list_ping
 from pumpkin_manager.models import ServerPolicy, ServerRecord
 from pumpkin_manager.repo import Repo
 from pumpkin_manager.scheduler import backup_due
@@ -294,3 +297,40 @@ use_console = true
     overridden = fixed.replace('address = "127.0.0.1:29010"', 'address = "0.0.0.0:1234"')
     _, changed = pc.apply_managed(overridden, managed)
     assert changed == ["networking.management.address"]
+
+
+# ------------------------------------------------------------------------ server list ping
+async def serve_status(answer) -> tuple[asyncio.AbstractServer, int]:
+    """A server that answers any status request with ``answer`` (as JSON), the way a Minecraft server does."""
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read(64)
+        body = json.dumps(answer).encode()
+        inner = _encode_varint(0) + _encode_varint(len(body)) + body
+        writer.write(_encode_varint(len(inner)) + inner)
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1]
+
+
+@pytest.mark.parametrize("answer", ["Server is still starting! Please wait before reconnecting.", ["x"], 5, None])
+async def test_a_status_that_is_not_an_object_is_a_ping_error_and_not_a_crash(answer):
+    """Forge 1.7.10 answers with the first one while it loads."""
+    server, port = await serve_status(answer)
+    async with server:
+        with pytest.raises(PingError, match="instead of its status"):
+            await server_list_ping("127.0.0.1", port)
+
+
+async def test_old_and_odd_status_shapes_are_read_as_far_as_they_go():
+    server, port = await serve_status({"description": "A 1.7 server", "players": {"max": 5, "online": 1}, "version": {"name": "1.7.10", "protocol": 5}})
+    async with server:
+        info = await server_list_ping("127.0.0.1", port)
+    assert info["motd"] == "A 1.7 server" and info["version"] == "1.7.10" and (info["online"], info["max"]) == (1, 5)
+
+    server, port = await serve_status({"description": {"text": "x"}, "players": "none", "version": "1.7.10"})
+    async with server:
+        info = await server_list_ping("127.0.0.1", port)
+    assert info["motd"] == "x" and info["version"] == "" and (info["online"], info["max"]) == (0, 0)

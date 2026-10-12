@@ -87,16 +87,18 @@ jobs:
           curl -fsS -c jar -H 'Content-Type: application/json' \
             -d '{"username":"admin","password":"ci-password-123"}' http://127.0.0.1:8420/api/auth/login
           curl -fsS -b jar http://127.0.0.1:8420/api/system | head -c 300
-      # Modpack servers download a Java runtime when they need one. This proves that the real Temurin builds start inside
-      # this (musl) image, for the Java versions Minecraft has asked for so far. Each result is also shown as an annotation.
+      # Modpack servers download a Java runtime when they need one. This proves that the real builds start inside this (musl)
+      # image, for the Java versions Minecraft has asked for so far. Java 8 must be the pinned 8u312 (old Forge for 1.16.5 cannot
+      # run on anything newer). Each result is also shown as an annotation.
       - name: Java runs inside the image
         run: |
           failed=0
           for major in 8 17 21 25; do
-            if out=$(docker run --rm -e DATA_DIR=/tmp/pm-data pumpkin-manager:ci python -m pumpkin_manager java-install "$major" 2>&1); then
+            if out=$(docker run --rm -e DATA_DIR=/tmp/pm-data pumpkin-manager:ci python -m pumpkin_manager java-install "$major" 2>&1) \
+               && { [ "$major" != 8 ] || echo "$out" | grep -q '1\.8\.0_312'; }; then
               echo "::notice title=Java $major::$(echo "$out" | tail -n 3 | tr '\n' ' ')"
             else
-              echo "::error title=Java $major does not start in the image::$(echo "$out" | tail -n 8 | tr '\n' ' ')"
+              echo "::error title=Java $major does not start in the image, or is not the pinned build::$(echo "$out" | tail -n 8 | tr '\n' ' ')"
               failed=1
             fi
           done

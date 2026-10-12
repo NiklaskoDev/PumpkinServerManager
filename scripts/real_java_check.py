@@ -8,6 +8,7 @@ stops it.
     python scripts/real_java_check.py --accept-eula                       # Fabric (the default)
     python scripts/real_java_check.py --accept-eula --loader all          # Fabric, NeoForge, Forge and Quilt
     python scripts/real_java_check.py --accept-eula --loader neoforge --memory 3072
+    python scripts/real_java_check.py --accept-eula --loader forge --minecraft 1.16.5 --loader-version 36.2.20   # an exact old loader
     python scripts/real_java_check.py --accept-eula --pack cobblemon-fabric   # a real Modrinth modpack (name or link; repeatable)
     CURSEFORGE_API_KEY=... python scripts/real_java_check.py --accept-eula --curseforge-pack 715572   # a CurseForge modpack
 
@@ -77,10 +78,12 @@ async def get_json(client: httpx.AsyncClient, url: str, **params: Any) -> Any:
     return resp.json()
 
 
-async def pick_versions(client: httpx.AsyncClient, loader: str, minecraft: str | None) -> tuple[str, str]:
-    """(Minecraft version, loader version) to test: the newest the loader's own site offers for it."""
+async def pick_versions(client: httpx.AsyncClient, loader: str, minecraft: str | None, loader_version: str | None = None) -> tuple[str, str]:
+    """(Minecraft version, loader version) to test: the one asked for, or the newest the loader's own site offers."""
     if minecraft is None:
         minecraft = (await get_json(client, "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"))["latest"]["release"]
+    if loader_version:
+        return minecraft, loader_version
     if loader == "fabric":
         found = await get_json(client, f"https://meta.fabricmc.net/v2/versions/loader/{minecraft}")
         return minecraft, next((e["loader"]["version"] for e in found if e["loader"]["stable"]), found[0]["loader"]["version"])
@@ -154,9 +157,11 @@ def said_since_start(ctx: AppContext, server_id: str, text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------------------------------- one loader
-async def check_loader(ctx: AppContext, client: httpx.AsyncClient, loader: str, minecraft: str | None, memory: int) -> None:
+async def check_loader(
+    ctx: AppContext, client: httpx.AsyncClient, loader: str, minecraft: str | None, memory: int, loader_version: str | None = None
+) -> None:
     section(f"{loader}: look up versions and build a modpack from live data")
-    minecraft, loader_version = await pick_versions(client, loader, minecraft)
+    minecraft, loader_version = await pick_versions(client, loader, minecraft, loader_version)
     pack, mods = await build_pack(client, loader, minecraft, loader_version)
     check(True, "versions chosen", f"Minecraft {minecraft}, {loader} {loader_version}, mods: {', '.join(mods) or 'none'}")
     upload = await ctx.servers.jvm.accept_upload(chunks(pack))
@@ -354,7 +359,7 @@ async def check_server(
 
 async def run(
     loaders: list[str], packs: list[tuple[str, str]], minecraft: str | None, memory: int | None, pack_memory: int | None, keep: bool,
-    update: bool = False, server_files: bool = True, start_anyway: bool = False,
+    update: bool = False, server_files: bool = True, start_anyway: bool = False, loader_version: str | None = None,
 ) -> int:
     work = Path(tempfile.mkdtemp(prefix="java-real-check-"))
     print(f"Working folder: {work}")
@@ -372,7 +377,7 @@ async def run(
     try:
         for loader in loaders:
             try:
-                await check_loader(ctx, client, loader, minecraft or DEFAULT_MINECRAFT[loader], memory or 2048)
+                await check_loader(ctx, client, loader, minecraft or DEFAULT_MINECRAFT[loader], memory or 2048, loader_version)
             except Exception as exc:  # noqa: BLE001 - report everything, then go on with the next loader
                 import traceback
 
@@ -408,6 +413,7 @@ def main() -> int:
     parser.add_argument("--pack-update", action="store_true",
                         help="install the previous release of each pack first, then update it to the newest release and roll that back")
     parser.add_argument("--minecraft", help="Minecraft version (default: the newest release for Fabric, a well supported one for the others)")
+    parser.add_argument("--loader-version", help="the exact version of the one --loader to test (default: the newest the loader offers for --minecraft)")
     parser.add_argument("--memory", type=int, help="memory per server in MiB (default 2048 for the generated packs, 4096 for real ones)")
     parser.add_argument("--pack-memory", type=int, help="memory for the real modpacks in MiB (default: --memory, or 4096)")
     parser.add_argument("--keep", action="store_true", help="do not delete the temporary folder")
@@ -422,7 +428,13 @@ def main() -> int:
     packs = [("modrinth", p) for p in args.pack] + [("curseforge", p) for p in args.curseforge_pack]
     choice = args.loader or ("none" if packs else "fabric")
     loaders = list(LOADERS) if choice == "all" else ([] if choice == "none" else [choice])
-    return asyncio.run(run(loaders, packs, args.minecraft, args.memory, args.pack_memory, args.keep, args.pack_update, not args.no_server_files, args.start_anyway))
+    if args.loader_version and len(loaders) != 1:
+        print("--loader-version needs exactly one --loader.", file=sys.stderr)
+        return 2
+    return asyncio.run(run(
+        loaders, packs, args.minecraft, args.memory, args.pack_memory, args.keep, args.pack_update, not args.no_server_files, args.start_anyway,
+        args.loader_version,
+    ))
 
 
 if __name__ == "__main__":

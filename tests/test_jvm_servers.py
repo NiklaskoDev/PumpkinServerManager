@@ -380,6 +380,18 @@ async def test_a_server_that_opens_its_port_early_is_not_called_up_before_it_say
     assert sum("still starting" in line for line in lines) <= 2, "the console is not filled with readiness probes while the server loads"
 
 
+async def test_a_server_that_answers_pings_with_a_message_while_it_loads_is_waited_for(jvm):
+    """Forge 1.7.10 does: the answer is the JSON string "Server is still starting!...", and reading it as a status used to fail the start."""
+    world, ctx = jvm
+    rec = await create_java_server(ctx, "Message", start=False)
+    world.behavior["early_empty_status"] = 2.0
+    world.behavior["loading_message"] = True
+    row = await finish(ctx, ctx.servers.submit_start(rec))
+    assert row["status"] == "success", row["message"]
+    assert any("Done (" in line["m"] for line in ctx.pm.backlog(rec.id, 200))
+    assert ctx.pm.runtime(rec.id).state == "running"
+
+
 @pytest.mark.parametrize("how", ["exit", "hang"])
 async def test_a_server_that_says_it_cannot_start_is_stopped_at_once_and_the_reason_is_shown(jvm, monkeypatch, how):
     """Forge keeps the JVM alive after 'Failed to start the minecraft server'; waiting for the startup timeout helps nobody."""
@@ -485,6 +497,19 @@ async def test_backups_skip_logs_and_crash_reports_but_keep_mods_and_the_world(j
     assert any(n.endswith("mods/lithium.jar") for n in names) and any(n.endswith("world/level.dat") for n in names)
     assert not any("latest.log" in n or "crash.txt" in n for n in names)
     assert not any(n.endswith("session.lock") for n in names), "the lock file is recreated at every start and never belongs in a backup"
+
+
+async def test_a_hot_backup_of_a_minecraft_1_7_server_is_consistent_and_does_not_wait_for_a_message_it_never_prints(jvm):
+    """Minecraft 1.7 says "Turned off world auto-saving" and "Saved the world"; waiting for the modern wording cost 30 seconds and the flag."""
+    world, ctx = jvm
+    world.behavior["old_save_messages"] = True
+    rec = await create_java_server(ctx, "Old")
+    started = time.monotonic()
+    row = await finish(ctx, ctx.backups.submit_backup(rec, "manual"))
+    assert row["status"] == "success", row["message"]
+    assert ctx.repo.list_backups(rec.id)[0]["consistent"], "the server did confirm: just in its own words"
+    assert time.monotonic() - started < 25, "it did not sit out the 30 seconds for a confirmation that was already there"
+    assert "did not confirm" not in (row["message"] or "")
 
 
 async def test_modpack_servers_are_not_offered_pumpkin_updates(jvm):

@@ -90,6 +90,8 @@ loading = False  # Forge listens long before the world is loaded and answers pin
 
 
 def status_json() -> str:
+    if loading and BEHAVIOR.get("loading_message"):  # Forge 1.7.10 answers with a bare JSON string, not a status object
+        return json.dumps("Server is still starting! Please wait before reconnecting.")
     if loading:
         return json.dumps({"version": {"name": "", "protocol": 0}, "players": {"max": 0, "online": 0}, "description": {"text": ""}})
     return json.dumps({
@@ -136,18 +138,20 @@ def handle_command(line: str) -> None:
             return
         stop_event.set()
     elif cmd == "save-all":
-        log("Saving the game (this may take a moment!)")
+        old = bool(BEHAVIOR.get("old_save_messages"))  # Minecraft 1.7 words these differently
+        log("Saving..." if old else "Saving the game (this may take a moment!)")
         if BEHAVIOR.get("no_save_confirmation"):
             return
+        saved = "Saved the world" if old else "Saved the game"
         delay = float(BEHAVIOR.get("slow_save", 0))
         if delay:
-            loop.call_later(delay, log, "Saved the game")
+            loop.call_later(delay, log, saved)
         else:
-            log("Saved the game")
+            log(saved)
     elif cmd == "save-off":
-        log("Automatic saving is now disabled")
+        log("Turned off world auto-saving" if BEHAVIOR.get("old_save_messages") else "Automatic saving is now disabled")
     elif cmd == "save-on":
-        log("Automatic saving is now enabled")
+        log("Turned on world auto-saving" if BEHAVIOR.get("old_save_messages") else "Automatic saving is now enabled")
     elif cmd == "say":
         log(f"[Server] {' '.join(args)}")
     elif cmd == "fakejoin" and args:

@@ -34,7 +34,7 @@ from .jvm.mojang import MojangMeta
 from .jvm.mrpack import ModCache, PackInstaller
 from .jvm.net import new_client
 from .jvm.packupdates import PackUpdater
-from .jvm.runtime import AdoptiumSource, JavaRuntimes, JavaSource, run_java_version
+from .jvm.runtime import JavaDownloads, JavaRuntimes, JavaSource, run_java_version
 from .jvm.service import JavaServerService
 from .models import AppSettings
 from .notify import Notifier
@@ -122,18 +122,24 @@ class AppContext:
     def _setup_java(
         self, http_client: httpx.AsyncClient | None, java_source: JavaSource | None, java_runner: Runner | None, verify_java: bool
     ) -> None:
-        """The Java engine: one HTTP client for Mojang, Modrinth, Adoptium and the loaders' download sites."""
+        """The Java engine: one HTTP client for Mojang, Modrinth, Adoptium, Azul and the loaders' download sites."""
         self.java_http = http_client or new_client()
         self._own_java_http = http_client is None
         self._java_source: JavaSource | None = java_source
 
         def source() -> JavaSource:
             if self._java_source is None:  # looked at only when Java is first needed, so an unusual CPU only matters then
-                self._java_source = AdoptiumSource(self.java_http)
+                self._java_source = JavaDownloads(self.java_http)
             return self._java_source
 
+        def java_in_use(major: int) -> bool:
+            running = set(self.pm.running_ids())
+            return any(r.is_java and r.spec.get("java") == major and r.id in running for r in self.repo.list_servers())
+
         self.mojang = MojangMeta(self.java_http, self.repo)
-        self.runtimes = JavaRuntimes(self.settings.java_dir, source, verifier=run_java_version if verify_java else None)
+        self.runtimes = JavaRuntimes(
+            self.settings.java_dir, source, verifier=run_java_version if verify_java else None, in_use=java_in_use
+        )
         self.modrinth = ModrinthClient(self.java_http)
         self.curseforge = CurseForgeClient(self.java_http, self._curseforge_key)
         self.loader_installer = LoaderInstaller(self.java_http, java_runner or run_process)

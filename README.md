@@ -255,7 +255,8 @@ version, set the memory, accept the [Minecraft EULA](https://aka.ms/MinecraftEUL
 of your own, see [CurseForge modpacks](#curseforge-modpacks).) The manager then
 
 1. reads the pack and downloads the **Java** its Minecraft version needs (Eclipse Temurin: Java 8, 17, 21 or 25, chosen
-   from Mojang's own data and installed in `/data/java`, so it is not part of the image);
+   from Mojang's own data and installed in `/data/java`, so it is not part of the image; Java 8 is pinned to 8u312, see
+   *Which Java and why*);
 2. downloads every mod, checked against the checksums in the pack (the Modrinth format only allows Modrinth, GitHub and GitLab
    as sources; for CurseForge packs the checksums come from CurseForge's API), and puts the pack's configuration in place;
 3. installs the **mod loader** (Fabric, Quilt, Forge or NeoForge) with its official installer;
@@ -313,6 +314,13 @@ Pumpkin servers. What is different:
   year-based versions (26.x) Java 25. The manager takes this from Mojang's metadata and keeps the runtime a server uses.
   *Versions → Java runtimes* lists what is installed and removes what no server needs. On arm64 only Java 21 and 25 exist for
   Alpine, so older modpacks cannot run there.
+* **Java 8 stays on 8u312** (October 2021) instead of following the newest build, so that old modpacks work: Forge for
+  Minecraft 1.16.5 up to 36.2.25 (Create: Above and Beyond, for one) cannot start on the Java 8 security update of January 2022 or
+  anything newer, and everything older (1.7.10, 1.12.2, ...) runs on 8u312 just as well. Temurin never built 8u312 for Alpine,
+  so the container takes the same version from Azul (Zulu); Windows and other Linux systems get Temurin's. Servers on Java 8
+  that were set up before this switched to it the next time one starts and no other Java 8 server is running; if the download
+  fails they keep the Java they had. The price is a Java 8 without the security fixes released since then, which matters little
+  for a game server that only friends can reach.
 * **The image is Alpine Linux** (musl). Almost every mod works; the few that ship native libraries built only for the
   common Linux (glibc) may fail to load, which then shows in the console.
 
@@ -468,9 +476,9 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | A modpack server stops while starting, or says it *did not become ready* | Open the console tab: `OutOfMemoryError` means the memory is too small (*Settings → Java*), a mod that complains names itself in the log, and a big modpack may simply need more than the startup timeout (*Settings → Startup timeout*). |
 | A modpack server says *"The server reported that it could not start"* and names a mod (*"X has failed to load correctly"* with `net/minecraft/client/...`, or *"Mod A requires B ... B is not installed"*) | The pack was made for players and lists a mod for the server that only works on a client (or one that the manager left out is needed after all). The message is the loader's own: open the *Files* tab and delete the named jar from `mods/` for the first kind, or find the jar of the second kind (*Modpack → Left out* lists what was skipped; the modpack's page has the file) and upload it to `mods/`, then start again. Packs with a proper server version (a *server pack*) are the other way out. |
 | A modpack server ends with *"No X11 DISPLAY variable was set"* (`HeadlessException`) | A mod wants to open a window, and a server has no screen. The lines before the error name the mod. Better MC's *Missing Mods Checker* is handled by the manager (see *Packs with the Missing Mods Checker* above): if you still see it, put the mods it lists into `mods/` and delete `config/missing_mods_checker.json` in the *Files* tab. |
-| A Forge 1.16.5 modpack ends right away with `NoSuchMethodError: ... ManifestEntryVerifier` | The pack is built on a Forge for Minecraft 1.16.5 that is older than 36.2.26. Those cannot run on any Java released since January 2022, and the manager installs a current one. Use a version of the pack that is built on Forge 36.2.26 or newer. |
+| A Forge 1.16.5 modpack ends right away with `NoSuchMethodError: ... ManifestEntryVerifier` | The pack is built on a Forge for Minecraft 1.16.5 older than 36.2.26, which cannot run on a Java 8 newer than 8u312. The manager runs Java 8 servers on 8u312, so the server must have ended up on another Java 8 (the pinned build could not be downloaded: the container log says why, and a Java 8 server picks it up on its next start). Otherwise use a version of the pack that is built on Forge 36.2.26 or newer. |
 | A modpack update was rolled back by itself | The new version did not start, so the backup made before it was restored; the update's history entry says why (the same loader message as above). Nothing was lost. |
-| *"Could not download Java ..."* or a runtime that does not start | The container needs internet access to Adoptium. In the container console, `python -m pumpkin_manager java-install 21` tries it and prints the reason. |
+| *"Could not download Java ..."* or a runtime that does not start | The container needs internet access to Adoptium (and Azul, for Java 8 on Alpine). In the container console, `python -m pumpkin_manager java-install 21` tries it and prints the reason. |
 | A mod does not load and the log mentions a native library | The image uses Alpine Linux (musl); a few mods bring native code for glibc only. Look for a variant of that mod without native code, or report it to the mod's author. |
 | Backups fill the disk | Lower *Keep the newest*, or put `/backups` on a bigger share. Modpack servers are much bigger than Pumpkin servers (mods, libraries and world). |
 | Dashboard unreachable after Unraid reboots | Check that the container is set to autostart; servers come back in the state they were in. |

@@ -90,7 +90,7 @@ def reset_password(user: str | None, password: str | None) -> int:
 def java_install(major: int) -> int:
     """Download a Java runtime the way modpack servers do and start it once: proves that Java runs in this container."""
     from .jvm.net import DownloadError, new_client
-    from .jvm.runtime import AdoptiumSource, JavaRuntimes, run_java_version
+    from .jvm.runtime import JavaDownloads, JavaRuntimes, run_java_version
 
     settings = Settings.from_env()
     _configure_logging(settings.log_level)
@@ -98,7 +98,7 @@ def java_install(major: int) -> int:
     async def run() -> int:
         client = new_client()
         try:
-            source = AdoptiumSource(client)
+            source = JavaDownloads(client)
             runtimes = JavaRuntimes(settings.java_dir, lambda: source)
             shown = {"tenth": -1}
 

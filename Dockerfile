@@ -16,8 +16,8 @@ LABEL org.opencontainers.image.title="Pumpkin Server Manager" \
 # tini    - PID 1 that reaps zombies and forwards SIGTERM, so "docker stop" shuts servers down cleanly
 # su-exec - drops privileges to PUID:PGID after the entrypoint has prepared the folders
 # tzdata  - makes the TZ variable work (the daily backup time is interpreted in this time zone)
-# Modpack servers run on a Java that the manager downloads when it is needed (Temurin builds for Alpine), so Java itself is not
-# in the image. What it needs around it is: zlib and libstdc++ for the JVM, fontconfig and a font for the few mods that use
+# Modpack servers run on a Java that the manager downloads when it is needed (Temurin builds for Alpine, and Azul's Zulu 8u312 for
+# Java 8, which Temurin never built for Alpine), so Java itself is not in the image. What it needs around it is: zlib and libstdc++ for the JVM, fontconfig and a font for the few mods that use
 # AWT, and gcompat so that mods with native libraries built for glibc (zstd, opus, ...) can still load.
 RUN apk add --no-cache tini su-exec tzdata ca-certificates zlib libstdc++ gcompat fontconfig ttf-dejavu
 

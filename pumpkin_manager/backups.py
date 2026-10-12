@@ -42,8 +42,8 @@ PROGRESS_STEP_BYTES = 8 * 1024 * 1024
 # Never part of a backup, whatever the server's own exclusions say: Minecraft recreates session.lock at every start, and Java
 # holds it with a mandatory lock on Windows, so a running server's copy cannot even be read there.
 ALWAYS_EXCLUDED = ("session.lock",)
-# What a Java server prints when it has done what the backup asked of it (vanilla and modded alike).
-_SAVE_OFF_RE = re.compile(r"Automatic saving is now disabled", re.IGNORECASE)
+# What a Java server prints when it has done what the backup asked of it (vanilla and modded alike; the second wording is Minecraft 1.7).
+_SAVE_OFF_RE = re.compile(r"Automatic saving is now disabled|Turned off world auto-saving", re.IGNORECASE)
 _SAVED_RE = re.compile(r"Saved the (game|world)", re.IGNORECASE)
 
 

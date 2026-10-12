@@ -255,6 +255,60 @@ class FakeInternet:
         self.route(link, serve)
         return archive
 
+    def adoptium_release(self, major: int = 8, release: str = "jdk8u312-b07", *, kind: str = "tar.gz", os_name: str | None = None,
+                         arch: str = "x64", corrupt: bool = False) -> bytes:
+        """Offer one exact release, what a pin asks for. Like the real service it answers 404 where it has no such build."""
+        archive = jre_archive(kind, release)
+        name = f"OpenJDK{major}U-jre_{arch}_{os_name or 'any'}_hotspot_{release.replace('jdk', '').replace('-', '')}.{kind}"
+        link = f"https://github.com/adoptium/temurin{major}-binaries/releases/download/{release}/{name}"
+        checksum = "0" * 64 if corrupt else hashlib.sha256(archive).hexdigest()
+
+        def listing(request: httpx.Request) -> httpx.Response:
+            query = parse_qs(request.url.query.decode())
+            if (os_name and query.get("os") != [os_name]) or query.get("architecture") != [arch] or query.get("image_type") != ["jre"]:
+                return httpx.Response(404)
+            package = {"name": name, "link": link, "checksum": checksum, "size": len(archive)}
+            return httpx.Response(200, json={"release_name": release, "binaries": [{"package": package}]})
+
+        def serve(request: httpx.Request) -> httpx.Response:
+            self.java_downloads += 1
+            return httpx.Response(200, content=archive)
+
+        self.route(f"https://api.adoptium.net/v3/assets/release_name/eclipse/{release}", listing)
+        self.route(link, serve)
+        return archive
+
+    def azul(self, version: str = "8.0.312", *, distro: str = "8.58.0.13", kind: str = "tar.gz", os_name: str = "alpine-linux",
+             arch: str = "x64", corrupt: bool = False, missing_hash: bool = False) -> bytes:
+        """Offer one Zulu JRE (as Azul's metadata service lists it, with the hash only when asked for) for one platform."""
+        wanted_os = {"alpine-linux": "linux-musl", "linux": "linux-glibc"}.get(os_name, os_name)
+        folder = f"zulu{distro}-ca-jre{version}-{wanted_os.replace('-', '_')}_{arch}"
+        archive = jre_archive(kind, folder)
+        name = f"{folder}.{kind}"
+        link = f"https://cdn.azul.com/zulu/bin/{name}"
+        checksum = "0" * 64 if corrupt else hashlib.sha256(archive).hexdigest()
+
+        def listing(request: httpx.Request) -> httpx.Response:
+            query = parse_qs(request.url.query.decode())
+            if query.get("java_version") != [version] or query.get("os") != [wanted_os] or query.get("arch") != [arch]:
+                return httpx.Response(200, json=[])
+            entry: dict[str, Any] = {
+                "name": name, "download_url": link, "java_version": [int(n) for n in version.split(".")],
+                "distro_version": [int(n) for n in distro.split(".")],
+                "size": len(archive) + 100 - len(archive) % 100,  # the real service rounds up to the next hundred (43830592 -> 43830600)
+            }
+            if not missing_hash and "sha256_hash" in query.get("include_fields", [""])[0]:
+                entry["sha256_hash"] = checksum
+            return httpx.Response(200, json=[entry])
+
+        def serve(request: httpx.Request) -> httpx.Response:
+            self.java_downloads += 1
+            return httpx.Response(200, content=archive)
+
+        self.route("https://api.azul.com/metadata/v1/zulu/packages/", listing)
+        self.route(link, serve)
+        return archive
+
     # ------------------------------------------------------------------ loaders
     def fabric(self, minecraft: str, loader: str = "0.16.9", installer: str = "1.0.1") -> None:
         self.json("https://meta.fabricmc.net/v2/versions/installer", [

@@ -96,8 +96,10 @@ async def server_list_ping(host: str, port: int, timeout: float = 3.0) -> dict[s
     except (TimeoutError, OSError, asyncio.IncompleteReadError, ValueError) as exc:
         raise PingError(str(exc) or exc.__class__.__name__) from exc
 
-    players = payload.get("players") or {}
-    version = payload.get("version") or {}
+    if not isinstance(payload, dict):  # Forge 1.7.10 answers with a plain message ("Server is still starting!...") while it loads
+        raise PingError(f"the server sent a message instead of its status: {str(payload)[:100]}")
+    players = payload.get("players") if isinstance(payload.get("players"), dict) else {}
+    version = payload.get("version") if isinstance(payload.get("version"), dict) else {}
     return {
         "online": int(players.get("online", 0)),
         "max": int(players.get("max", 0)),
