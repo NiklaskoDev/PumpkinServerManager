@@ -111,7 +111,8 @@ def test_unraid_template_is_consistent():
     assert config["Game ports (Java, TCP)"].get("Mode") == "tcp" and config["Bedrock ports (UDP)"].get("Mode") == "udp"
     assert f":{target['WebUI port']}" in root.findtext("WebUI", ""), "the WebUI link must use the WebUI port"
     assert "--stop-timeout" in root.findtext("ExtraParams", ""), "servers need time to save when the container stops"
-    for secret in ("Admin password", "GitHub token"):
+    assert target["CurseForge API key"] == "CURSEFORGE_API_KEY" and not value["CurseForge API key"], "a key is never shipped in the template"
+    for secret in ("Admin password", "GitHub token", "CurseForge API key"):
         assert config[secret].get("Mask") == "true", f"{secret} must be masked in the Unraid UI"
 
     # defaults of the application match what the template advertises

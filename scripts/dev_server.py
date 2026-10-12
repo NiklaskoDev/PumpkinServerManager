@@ -51,6 +51,23 @@ def main() -> None:
     ):
         packs[slug] = FakeModrinth(world.net, slug=slug, title=title, project_id=slug.replace("-", "")[:8].ljust(8, "x"))
         packs[slug].add_version(version, minecraft=minecraft, loader=loader, mods=mods)
+
+    # A fake CurseForge too. Its API key is "cf-test-key": enter it in Settings > Modpacks to see CurseForge packs (search is not allowed
+    # for this key, like for many real ones, so packs are found in the list or by project number: 2000 and 2001).
+    cf = world.cf
+    cf.search_enabled = False
+    create_mod = FakeMod("mods/create.jar", b"create" * 400)
+    cf.add_mod(5001, 9001, create_mod, name="Create")
+    cf.add_mod(5002, 9002, FakeMod("mods/xaeros-minimap.jar", b"minimap" * 100), name="Xaero's Minimap", client_only=True)
+    cf.add_mod(5003, 9003, FakeMod("mods/secret-sauce.jar", b"secret" * 100), name="Secret Sauce", downloadable=False)
+    cf.add_project(2001, "Kitchen Sink", class_id=4471)
+    cf.add_pack_version(
+        2001, 9500, "3.2.0", mods=((5001, 9001), (5002, 9002), (5003, 9003)), minecraft="1.20.1", loader="forge-47.2.0",
+        overrides={"config/kitchen.toml": b"sink = true\n"},
+    )
+    cf.add_project(2000, "Cobble Adventures", class_id=4471)
+    cobble_files = {"mods/create.jar": create_mod.content, "mods/cobble.jar": b"cobble" * 200, "config/cobble.toml": b"spawns = 12\n", "start.sh": b"#!/bin/sh\n"}
+    cf.add_pack_version(2000, 9600, "1.0.0", server_pack=cobble_files, wrapper="Server-Files-1.0.0", date="2026-09-01T12:00:00.000Z")
     app = create_app(settings, release_source=source, verify_elf=False, stability_seconds=3, **world.app_options())
     ctx = app.state.ctx
     ctx.servers.command_builder = lambda rec, build: [sys.executable, "-u", str(FAKE), str(ctx.builds.binary_path(build.id))]
@@ -64,6 +81,11 @@ def main() -> None:
             overrides={"config/skyblock.toml": b"islands = 4\n"},
         )
         print("[dev] published fake modpack version Skyblock Dreams 2.5.0", flush=True)
+        cf.add_pack_version(
+            2000, 9700, "1.1.0", server_pack={**cobble_files, "config/cobble.toml": b"spawns = 20\n", "mods/waystones.jar": b"waystones" * 100},
+            wrapper="Server-Files-1.1.0", date="2026-09-20T12:00:00.000Z",
+        )
+        print("[dev] published fake CurseForge version Cobble Adventures 1.1.0", flush=True)
 
     threading.Timer(float(os.environ.get("DEV_UPDATE_AFTER", "90")), publish_update).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

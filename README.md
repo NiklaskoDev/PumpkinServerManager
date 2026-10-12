@@ -7,8 +7,9 @@ Pumpkin is a Minecraft server written in Rust. This manager downloads it from th
 as many servers as you like (each with its own port, world and settings), keeps them running, checks for new
 Pumpkin versions on a schedule and **never applies an update without first making a verified backup**.
 
-For modded play it also runs **Java modpack servers**: pick a modpack from [Modrinth](https://modrinth.com) and the
-manager downloads Java, the mods and the mod loader and starts it. See [Modpack servers](#modpack-servers-java).
+For modded play it also runs **Java modpack servers**: pick a modpack from [Modrinth](https://modrinth.com) or
+[CurseForge](https://www.curseforge.com/minecraft/modpacks) and the manager downloads Java, the mods and the mod loader and
+starts it. See [Modpack servers](#modpack-servers-java).
 
 ![The dashboard with three servers](docs/dashboard.jpg)
 
@@ -17,7 +18,7 @@ manager downloads Java, the mods and the mod loader and starts it. See [Modpack 
 | | |
 |---|---|
 | **One-click servers** | Pick a name, a Pumpkin channel and a few settings; the manager downloads the binary, writes `pumpkin.toml`, assigns ports and starts it. |
-| **Modpack servers** | Java servers from Modrinth modpacks (Fabric, Quilt, Forge, NeoForge): the right Java, every mod (checksum-verified), the loader and the pack's configuration are set up for you. Search from the dashboard, paste a link or upload a `.mrpack`. |
+| **Modpack servers** | Java servers from Modrinth and CurseForge modpacks (Fabric, Quilt, Forge, NeoForge): the right Java, every mod (checksum-verified), the loader and the pack's configuration are set up for you. Search from the dashboard, paste a link or upload a `.mrpack` or a CurseForge pack zip. CurseForge needs your own API key. |
 | **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators with individual levels, bans). |
 | **Automatic updates** | Checks GitHub for new Pumpkin builds (stable releases, plus the rolling *nightly* and *canary* builds), per server: install automatically, notify only, or off. Waits until nobody is online. |
 | **Safe by construction** | Download and checksum first, stop gracefully, **verified backup**, switch version, start, watch for crashes. If anything fails the version *and the world* roll back automatically. |
@@ -171,6 +172,7 @@ Everything has a sensible default; the template sets the ones you usually want.
 | `MGMT_PORT_RANGE` | `29000-29999` | Loopback-only ports for the management API. Must not overlap `PORT_RANGE`. |
 | `WEB_PORT` / `WEB_HOST` | `8420` / `0.0.0.0` | Where the dashboard listens. |
 | `GITHUB_TOKEN` | - | Optional. Only needed if GitHub's anonymous rate limit (60 requests/hour) is hit. No scopes required. |
+| `CURSEFORGE_API_KEY` | - | Optional. Only needed for CurseForge modpacks: **your own** API key from [console.curseforge.com](https://console.curseforge.com/) (see [CurseForge modpacks](#curseforge-modpacks)). It can be entered under *Settings → Modpacks* instead, which takes precedence. |
 | `PUBLIC_ADDRESS` | - | Host name shown to players (for example a DynDNS name) and used in the sign-in address handed out with new friend accounts. Defaults to the address in your browser. Can also be set under *Settings*, which takes precedence. |
 | `UPDATE_CHECK_MINUTES` | `360` | Initial check interval; changeable in the dashboard. |
 | `SESSION_HOURS` | `168` | Sign-in lifetime. |
@@ -247,14 +249,15 @@ you notice after playing for a while. That is what the pre-update backup and the
 
 ## Modpack servers (Java)
 
-Besides Pumpkin servers the manager runs **modded Java servers from Modrinth modpacks**. Choose *New server → Modpack
-server*, search Modrinth (or paste a modpack link, or upload a `.mrpack` file), pick a version, set the memory, accept the
-[Minecraft EULA](https://aka.ms/MinecraftEULA) and create. The manager then
+Besides Pumpkin servers the manager runs **modded Java servers from Modrinth and CurseForge modpacks**. Choose *New server →
+Modpack server*, search Modrinth or CurseForge (or paste a modpack link, or upload a `.mrpack` or CurseForge zip), pick a
+version, set the memory, accept the [Minecraft EULA](https://aka.ms/MinecraftEULA) and create. (CurseForge needs an API key
+of your own, see [CurseForge modpacks](#curseforge-modpacks).) The manager then
 
 1. reads the pack and downloads the **Java** its Minecraft version needs (Eclipse Temurin: Java 8, 17, 21 or 25, chosen
    from Mojang's own data and installed in `/data/java`, so it is not part of the image);
-2. downloads every mod, checked against the checksums in the pack (the format only allows Modrinth, GitHub and GitLab as
-   sources), and puts the pack's configuration in place;
+2. downloads every mod, checked against the checksums in the pack (the Modrinth format only allows Modrinth, GitHub and GitLab
+   as sources; for CurseForge packs the checksums come from CurseForge's API), and puts the pack's configuration in place;
 3. installs the **mod loader** (Fabric, Quilt, Forge or NeoForge) with its official installer;
 4. writes `server.properties` and `eula.txt` and starts the server.
 
@@ -275,7 +278,7 @@ Pumpkin servers. What is different:
   *Files* tab and restart. Game settings are in *Settings*, which edits `server.properties`.
 * **Extra ports.** Some mods open their own port (voice chat on UDP 24454, a web map, ...). Add those to the container's
   port mappings yourself; the manager only manages the game port.
-* **Updating the modpack.** The *Modpack* tab asks Modrinth for newer versions (on the same schedule as the Pumpkin update
+* **Updating the modpack.** The *Modpack* tab asks Modrinth or CurseForge for newer versions (on the same schedule as the Pumpkin update
   check, or with *Check now*) and tells you, but never installs one by itself. *Update now* works like a Pumpkin update: the
   new version and its mods are downloaded while the server keeps running, then the server is stopped, a **verified backup**
   is made, the mods and configuration are switched, and the server starts again and is watched; if it does not come up, the
@@ -283,7 +286,8 @@ Pumpkin servers. What is different:
   configuration file you edited stays as it is, with the modpack's new version saved beside it as `<name>.pack-new`, and
   `server.properties` is never replaced. If an update moves to another Minecraft version (or loader), the dashboard warns
   first, and the right Java and loader are installed. *Roll back* restores the backup made before the last update, mods
-  and world included. Modrinth packs only; a server made from an uploaded `.mrpack` has no place to look for updates.
+  and world included. Servers made from a Modrinth or CurseForge pack only; a server made from an uploaded file has no place to
+  look for updates.
 * **Client-only mods are left out.** Packs made for players often list minimaps, menus and shader helpers for the server too
   (in the popular packs it is dozens of mods), and many of those stop a server from starting. The manager asks Modrinth, which
   knows for every mod whether it can run on a server, and does not install the ones that cannot. They are listed under
@@ -292,13 +296,19 @@ Pumpkin servers. What is different:
   cannot tell (a mod it does not know, or one that is wrongly marked) still shows up as a failed start, with the loader's own
   message; see *Troubleshooting*. **Packs made as a player's collection are the usual case**: expect to remove a mod or two by
   hand from the biggest ones, while packs that were prepared for servers (Cobblemon, for one) start without any help.
+* **Packs with the Missing Mods Checker (Better MC).** Mods that are only on CurseForge cannot be part of a Modrinth pack, so Better
+  MC and a few others ship the *Missing Mods Checker* mod and a list of them (`config/missing_mods_checker.json`): when the game
+  starts, a window helps the player download what is missing. A server has no screen, so that mod ends it with *"No X11 DISPLAY
+  variable was set"*. The manager does the window's job instead: it installs the listed mods through CurseForge's API (this needs
+  your [CurseForge API key](#curseforge-modpacks); each file is checked by the checksum CurseForge gives), lists the ones it cannot
+  install under *Modpack → Mods to add yourself* (no key, or the author does not allow downloads), and leaves the mod's list off the
+  server so that the mod finds nothing to ask about. Java servers also start with `-Djava.awt.headless=true`.
 * **Some packs finish their setup on the first start.** Better MC, for one, downloads further mods when it starts for the first
   time and then ends the server on purpose (exit code 0). The manager starts such a server once more by itself; if it still
   does not come up, the message says what the server last wrote.
 * **A server that cannot start is stopped at once.** Forge and NeoForge print *Failed to start the minecraft server* and can
   then keep running without doing anything; the manager acts on that line, stops the server after a short grace period, and
   shows the reason instead of waiting for the startup timeout.
-* **Modrinth packs only.** CurseForge packs are not supported yet.
 * **Which Java and why.** Minecraft 1.20.5 and newer need Java 21, 1.18-1.20.4 need Java 17, older versions Java 8, and the
   year-based versions (26.x) Java 25. The manager takes this from Mojang's metadata and keeps the runtime a server uses.
   *Versions → Java runtimes* lists what is installed and removes what no server needs. On arm64 only Java 21 and 25 exist for
@@ -309,10 +319,53 @@ Pumpkin servers. What is different:
 * **Run for real.** Servers on Fabric, NeoForge, Forge and Quilt, and the Modrinth packs Cobblemon (installed, updated to the next
   version, rolled back) and Better MC (installed, backed up, restored, and an update that could not start was rolled back by
   itself), have been run on Windows and in this image on Linux, with the real Java, Minecraft server and mods;
-  `scripts/real_java_check.py` repeats that whenever you want to see it for your own setup.
+  `scripts/real_java_check.py` repeats that whenever you want to see it for your own setup. CurseForge packs have been run
+  on Windows with a real CurseForge key: Cobblemon Official Modpack [Fabric] (from the author's server files and from the
+  list of mods; created, started, backed up, restored, updated from 1.8 to 1.8.1 and rolled back), All the Mods 10 (461 mods from
+  the author's server files, started in 19 seconds, backed up and restored), Prominence II (its server files hold no mods, so
+  the list of mods was used: 347 mods installed, 5 left to add by hand) and Better MC [FABRIC] BMC2 (the 22 mods its Missing
+  Mods Checker asks for installed through CurseForge, then every check). The Linux image has not run CurseForge packs yet: the key
+  cannot go into the CI.
 
 > **Mods are code.** Every mod runs with the container's access, like Pumpkin plugins would. Only install packs you trust,
 > and give the Admin role of a modpack server only to people you trust (see [Accounts for friends](#accounts-for-friends)).
+
+### CurseForge modpacks
+
+CurseForge hands its modpacks out through an API that needs **an API key of your own**. Ask for one at
+[console.curseforge.com](https://console.curseforge.com/) (the key starts with `$2a$10$`; the *upload token* that the same site
+shows is something else and does not work), then paste it under *Settings → Modpacks* (or set `CURSEFORGE_API_KEY`). The manager
+checks it with CurseForge right away. A new key can take a few minutes before it is accepted. CurseForge's terms make a key
+personal and not to be shared, so the manager ships none: yours is kept in the manager's database, shown nowhere and sent only
+to CurseForge's own servers: its API, and its download servers, which ask for it so that the download is counted for the mod's
+author. It is not passed on to Minecraft, to the mod loader installers or to any other address (a download that is redirected
+anywhere else is refused).
+
+Then *New server → Modpack server → CurseForge* works like the Modrinth tab: search, or enter a pack's **project number** (the
+*Project ID* in the box on its CurseForge page) or a link to its page, choose a version and create. The zip from the pack
+page's *Download* button can be uploaded too. If a key cannot use CurseForge's search, the dialog lists the packs CurseForge
+itself features and takes a project number instead. What differs from Modrinth packs:
+
+* **The author's server files are used when a version has them.** Most big packs come with a ready server pack: the mods and
+  configuration their author tested together. The manager takes its mods, configuration and scripts (the pack's start scripts,
+  loader installer, `user_jvm_args.txt`, player lists and `eula.txt` are not taken over: the manager installs the loader,
+  sets the memory and writes the EULA itself), so nothing is downloaded mod by mod and nothing is "left out": the author's
+  choice is not second-guessed. A switch in the dialog installs from the pack's list of mods instead.
+* **Without server files the pack's list of mods is used.** A CurseForge pack lists only project and file numbers, so the manager
+  asks CurseForge for their addresses and checksums, downloads every mod and checks it against the checksum CurseForge gave
+  (only CurseForge's own download hosts are used). Mods that only work on a client are left out as for Modrinth packs: by
+  CurseForge's own *Client* tag and by the lookup at Modrinth, with the same rule that a mod another mod needs stays.
+* **Mods that their authors do not let programs download.** Some authors switch automatic downloads off. The manager does not
+  work around that (no scraping of CurseForge's website): it lists those mods under *Modpack → Mods to add yourself*, each with
+  a link to its page, creates the server without them and does **not start it**. Download them yourself, put the files into
+  `mods/` (Files tab) and start the server. An update that needs further such mods waits until they are there.
+* **Nothing from CurseForge is cached.** Its terms ask for no copies of what the API hands out. Mods are only held in a temporary
+  folder while an install or update runs (and wiped when the manager starts), and no answer of the API is stored, so a second
+  server from the same pack downloads its mods again. A server of course keeps its own files.
+* **Updates** work as for Modrinth (backup first, switch, start, watch, roll back by itself). A server made from server files is
+  updated from the next version's server files: a mod you replaced stays, a configuration file you changed stays with the
+  pack's new version beside it as `<name>.pack-new`, and `server.properties` is never replaced. A version that does not come
+  the way the server was installed (server files against list of mods) is refused instead of guessed at.
 
 ## Accounts for friends
 
@@ -364,7 +417,8 @@ no role on answers exactly like one that does not exist. Role changes take effec
 * Browsers share cookies between ports of the same host name, so other web apps on your Unraid host *could*
   see (not forge) this one's cookie; the cookie is therefore named uniquely and requests need the CSRF header.
 * The manager needs **no Docker socket** and no privileges; servers run as `PUID:PGID` with a minimal environment
-  (your `ADMIN_PASSWORD` and `GITHUB_TOKEN` are not passed on to Minecraft processes).
+  (your `ADMIN_PASSWORD`, `GITHUB_TOKEN` and `CURSEFORGE_API_KEY` are not passed on to Minecraft processes, mod loader
+  installers or the Java checks).
 * The management API of each server listens on loopback only and uses a per-server random secret.
 * **Do not expose the dashboard directly to the internet.** The dashboard can run console commands and edit files.
   If you need remote access, put it behind a reverse proxy with HTTPS (and set `FORWARDED_ALLOW_IPS` to the proxy's
@@ -381,8 +435,9 @@ no role on answers exactly like one that does not exist. Role changes take effec
 │                                 (a modpack server has server.properties, mods/, config/, world/, ... instead)
 ├── binaries/<build>/pumpkin      downloaded Pumpkin binaries, shared by all servers
 ├── java/<major>/                 Java runtimes for modpack servers, downloaded when needed
-├── cache/mods/                   mod files downloaded for modpacks, kept once by checksum
-├── cache/uploads/                .mrpack files you uploaded, until a server was created from them
+├── cache/mods/                   mod files downloaded for Modrinth packs, kept once by checksum
+│                                 (CurseForge files only live in cache/mods/curseforge-staging while an install runs)
+├── cache/uploads/                pack files you uploaded (or that are being installed), until the server was created
 └── logs/<id>/console.log         console output of the last run (+ console.prev.log)
 /backups/<id>/<date>_<kind>.tar.gz
 ```
@@ -400,6 +455,9 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | Friends cannot connect | Forward the server's **TCP** port on your router to the Unraid IP. The card on the dashboard shows the exact port and warns when it is not published by the container. |
 | *"No free port left in 25565-25575"* | Widen `PORT_RANGE` **and** the template's port mapping (they must match). |
 | Update check says *rate limit* | Add a `GITHUB_TOKEN` (Settings or environment variable). |
+| *"CurseForge did not accept the API key"* | It has to be the API key of console.curseforge.com (starts with `$2a$10$`), not the upload token, copied completely. A key that was just created may need a few minutes. |
+| *"CurseForge does not let this API key search by name"* | Some keys may not use CurseForge's search. Pick a pack from the list, or enter its project number (the *Project ID* on its CurseForge page). |
+| A CurseForge server was created but is not running, and *Modpack* lists *Mods to add yourself* | Those mods' authors do not allow downloads by other programs. Open each mod's page from the list, download the file, upload it into `mods/` (Files tab) and start the server. |
 | Server stops right after starting | Open the console tab for the output. After editing `pumpkin.toml` by hand, use the Advanced editor, which validates it. |
 | Adding a player to the whitelist, operators or bans changes nothing | Those buttons type the command into the running server's console, and the Players tab shows what the server then wrote to its `data/` folder. The dashboard tells you when a list did not change; the console tab has the server's answer (for example *No player was found* when an account name does not exist and online mode is on). The server must be running. |
 | Operators have too few (or too many) rights | New servers give operators **level 1** (moderator: can build inside the spawn protection, almost no commands); levels work as in vanilla (2 game master, 3 admin, 4 owner). Set the default for future operators under *Settings → Operator permission level*, and a single operator's level in the *Players* tab. Pumpkin reads levels only at startup, so changing one on a **running** server restarts it (the dashboard asks first); on a stopped server nothing restarts. Servers created before this default keep their old setting (4) until you change it, and so do operators who already exist. |
@@ -409,6 +467,8 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | A friend sees "No servers yet" or is missing a server | Servers have to be assigned per account: *Accounts → Access*. The change shows up in their browser without a reload. |
 | A modpack server stops while starting, or says it *did not become ready* | Open the console tab: `OutOfMemoryError` means the memory is too small (*Settings → Java*), a mod that complains names itself in the log, and a big modpack may simply need more than the startup timeout (*Settings → Startup timeout*). |
 | A modpack server says *"The server reported that it could not start"* and names a mod (*"X has failed to load correctly"* with `net/minecraft/client/...`, or *"Mod A requires B ... B is not installed"*) | The pack was made for players and lists a mod for the server that only works on a client (or one that the manager left out is needed after all). The message is the loader's own: open the *Files* tab and delete the named jar from `mods/` for the first kind, or find the jar of the second kind (*Modpack → Left out* lists what was skipped; the modpack's page has the file) and upload it to `mods/`, then start again. Packs with a proper server version (a *server pack*) are the other way out. |
+| A modpack server ends with *"No X11 DISPLAY variable was set"* (`HeadlessException`) | A mod wants to open a window, and a server has no screen. The lines before the error name the mod. Better MC's *Missing Mods Checker* is handled by the manager (see *Packs with the Missing Mods Checker* above): if you still see it, put the mods it lists into `mods/` and delete `config/missing_mods_checker.json` in the *Files* tab. |
+| A Forge 1.16.5 modpack ends right away with `NoSuchMethodError: ... ManifestEntryVerifier` | The pack is built on a Forge for Minecraft 1.16.5 that is older than 36.2.26. Those cannot run on any Java released since January 2022, and the manager installs a current one. Use a version of the pack that is built on Forge 36.2.26 or newer. |
 | A modpack update was rolled back by itself | The new version did not start, so the backup made before it was restored; the update's history entry says why (the same loader message as above). Nothing was lost. |
 | *"Could not download Java ..."* or a runtime that does not start | The container needs internet access to Adoptium. In the container console, `python -m pumpkin_manager java-install 21` tries it and prints the reason. |
 | A mod does not load and the log mentions a native library | The image uses Alpine Linux (musl); a few mods bring native code for glibc only. Look for a variant of that mod without native code, or report it to the mod's author. |
@@ -439,6 +499,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
 .venv/bin/python scripts/dev_server.py            # dashboard on :8420 with a fake GitHub + fake Pumpkin (admin / devpassword)
 .venv/bin/python scripts/real_binary_check.py /path/to/pumpkin   # end-to-end check against a REAL Pumpkin binary
 .venv/bin/python scripts/real_java_check.py --accept-eula          # the same for a modpack server (real Java, Mojang, Modrinth, loader)
+CURSEFORGE_API_KEY=... .venv/bin/python scripts/real_java_check.py --accept-eula --curseforge-pack 285109   # a real CurseForge pack (your own key)
 ```
 
 * `scripts/real_binary_check.py` drives the manager's own code against a real Pumpkin executable: create, start,
@@ -456,9 +517,11 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
   `docker exec -it pumpkin-manager python /app/scripts/real_java_check.py --accept-eula --loader all`. With `--pack <name or link>`
   (repeatable) it installs real Modrinth modpacks the way the dashboard does, and `--pack-update` installs the previous release
   first, then updates to the newest and rolls that back; such a pack needs 4 GiB and downloads its mods for real.
+  `--curseforge-pack <project number or link>` does the same for CurseForge packs (with your own key in `CURSEFORGE_API_KEY`;
+  `--no-server-files` installs from the list of mods instead of the author's server files).
 * Layout: `pumpkin_manager/` (backend: `process.py` supervision, `updater.py` the update procedure,
   `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `jvm/` the Java engine for modpack servers: Java runtimes,
-  mod loaders, Modrinth packs, `server.properties`, pack updates; `api/` routers, `static/` the dashboard -
+  mod loaders, Modrinth and CurseForge packs, a pack's own server files, `server.properties`, pack updates; `api/` routers, `static/` the dashboard -
   plain ES modules, no build step), `tests/` (including `fake_pumpkin.py` and `fake_java_server.py`, stand-in servers, and
-  `jvmfakes.py`, a fake internet for Modrinth, Adoptium, Mojang and the loaders), `docker/`, `unraid/`.
+  `jvmfakes.py`, a fake internet for Modrinth, CurseForge, Adoptium, Mojang and the loaders), `docker/`, `unraid/`.
 * The frontend has no dependencies and never uses inline scripts or styles, so the strict CSP stays strict.

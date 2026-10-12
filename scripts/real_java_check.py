@@ -9,9 +9,17 @@ stops it.
     python scripts/real_java_check.py --accept-eula --loader all          # Fabric, NeoForge, Forge and Quilt
     python scripts/real_java_check.py --accept-eula --loader neoforge --memory 3072
     python scripts/real_java_check.py --accept-eula --pack cobblemon-fabric   # a real Modrinth modpack (name or link; repeatable)
+    CURSEFORGE_API_KEY=... python scripts/real_java_check.py --accept-eula --curseforge-pack 715572   # a CurseForge modpack
 
 A real modpack is looked up and installed the way the dashboard does it; its mods are downloaded for real (a few hundred MB) and
 it gets 4096 MiB unless --pack-memory says otherwise. With --pack the generated packs are skipped unless --loader asks for them.
+
+Mods whose authors do not allow automatic downloads are listed and the server is not started; --start-anyway starts it like a person
+who does not need those mods would.
+
+CurseForge packs (--curseforge-pack, a project number or the link to the pack's page) need your own CurseForge API key in the
+environment variable CURSEFORGE_API_KEY; it is only sent to CurseForge's API. A pack's own server files are used when it has them
+(--no-server-files installs from its list of mods instead).
 
 Run it inside the container (Unraid: container icon -> Console) to test the real Linux/Alpine setup, or on a dev machine.
 
@@ -29,6 +37,7 @@ import argparse
 import asyncio
 import io
 import json
+import os
 import sys
 import tempfile
 import time
@@ -185,14 +194,17 @@ async def check_pack_update(ctx: AppContext, label: str, server_id: str, older: 
     check(ctx.pm.runtime(server_id).state == "running", "the server runs again")
 
 
-async def check_pack(ctx: AppContext, reference: str, memory: int, update: bool = False) -> None:
-    """A real modpack from Modrinth, installed the way the dashboard does it: nothing about it is known in advance."""
+async def check_pack(
+    ctx: AppContext, reference: str, memory: int, update: bool = False, source: str = "modrinth", server_files: bool = True, start_anyway: bool = False,
+) -> None:
+    """A real modpack from Modrinth or CurseForge, installed the way the dashboard does it: nothing about it is known in advance."""
     label = reference.rstrip("/").rsplit("/", 1)[-1][:24]
-    section(f"{label}: look the modpack up on Modrinth")
+    site = "CurseForge" if source == "curseforge" else "Modrinth"
+    section(f"{label}: look the modpack up on {site}")
     try:
-        details = await ctx.servers.jvm.pack_details(reference)
+        details = await ctx.servers.jvm.pack_details(reference, source)
     except Exception as exc:  # noqa: BLE001
-        check(False, "Modrinth knows the modpack", repr(exc))
+        check(False, f"{site} knows the modpack", repr(exc))
         return
     newest = details["versions"][0] if details["versions"] else None
     if not check(newest is not None, "the pack has a version that can be installed", f"{details['title']}, {details['downloads']} downloads"):
@@ -201,8 +213,12 @@ async def check_pack(ctx: AppContext, reference: str, memory: int, update: bool 
           f"pack file {newest['size'] / 1048576:.1f} MiB")
     body = {
         "name": f"Real {label}"[:40], "engine": "java", "eula": True, "memory_mb": memory, "start": True,
-        "modpack": {"source": "modrinth", "project": reference}, "settings": SETTINGS, "policy": {"start_timeout": 1800},
+        "modpack": {"source": source, "project": reference}, "settings": SETTINGS, "policy": {"start_timeout": 1800},
     }
+    if source == "curseforge":
+        body["modpack"]["server_pack"] = server_files
+        check(True, "server files", f"{'the newest version has' if newest.get('server_pack') else 'the newest version has no'} server files of its own"
+              f"{'' if server_files else ' (not used: --no-server-files)'}")
     extra = None
     if update:
         releases = [v for v in details["versions"] if v["type"] == "release"]
@@ -215,12 +231,12 @@ async def check_pack(ctx: AppContext, reference: str, memory: int, update: bool 
         async def extra(server_id: str) -> None:
             await check_pack_update(ctx, label, server_id, older, releases[0])
 
-    await check_server(ctx, label, body, mods=[], generated=False, extra=extra)
+    await check_server(ctx, label, body, mods=[], generated=False, extra=extra, start_anyway=start_anyway)
 
 
 async def check_server(
     ctx: AppContext, label: str, body: dict[str, Any], *, mods: list[str], generated: bool,
-    extra: Callable[[str], Awaitable[None]] | None = None,
+    extra: Callable[[str], Awaitable[None]] | None = None, start_anyway: bool = False,
 ) -> None:
     """Create a server from ``body`` and put it through what the dashboard offers: start, talk, back up, restore, stop.
 
@@ -236,6 +252,17 @@ async def check_server(
         print(f"        the modpack ended the server by itself while starting (exit code 0); starting it again, like a user would ({tries}/3)")
         row = await wait_job(ctx, ctx.servers.submit_start(ctx.servers.get(server.id)), timeout=3600)
         show_job(row)
+    if server is not None and row["status"] == "success":
+        manual = ctx.servers.jvm.describe(server)[0]["manual"]
+        if manual:  # CurseForge mods whose authors do not allow automatic downloads: the manager lists them and waits
+            check(True, "mods that have to be added by hand are listed, and the server waits for them", f"{len(manual)}: " + ", ".join(m["name"] for m in manual[:6]))
+            check(all(m["page"].startswith("https://www.curseforge.com/") for m in manual), "each of them links to its CurseForge page")
+            check(ctx.pm.runtime(server.id).state != "running", "the server was not started")
+            if not start_anyway:
+                return
+            print("        starting it anyway, like a person who does not need those mods (--start-anyway)")
+            row = await wait_job(ctx, ctx.servers.submit_start(server), timeout=3600)
+            show_job(row)
     if not check(row["status"] == "success" and server is not None, "server created and started", (row["message"] or "") + f" ({time.monotonic() - started:.0f}s)"):
         if server:
             print("\n".join(console_tail(ctx, server.id, limit=60)))
@@ -318,7 +345,8 @@ async def check_server(
 
 
 async def run(
-    loaders: list[str], packs: list[str], minecraft: str | None, memory: int | None, pack_memory: int | None, keep: bool, update: bool = False
+    loaders: list[str], packs: list[tuple[str, str]], minecraft: str | None, memory: int | None, pack_memory: int | None, keep: bool,
+    update: bool = False, server_files: bool = True, start_anyway: bool = False,
 ) -> int:
     work = Path(tempfile.mkdtemp(prefix="java-real-check-"))
     print(f"Working folder: {work}")
@@ -328,6 +356,7 @@ async def run(
     settings = Settings(
         data_dir=work / "data", backup_dir=work / "backups", web_host="127.0.0.1", web_port=0, port_range=(java, java + 15),
         mgmt_port_range=(mgmt, mgmt + 39), admin_password="real-java-check", timezone="UTC", shutdown_timeout=240,
+        curseforge_api_key=(os.environ.get("CURSEFORGE_API_KEY") or "").strip() or None,
     )
     ctx = AppContext(settings, verify_elf=False, background=False, stability_seconds=8)
     await ctx.startup()
@@ -341,9 +370,9 @@ async def run(
 
                 traceback.print_exc()
                 check(False, f"{loader}: the check ran to completion", repr(exc))
-        for reference in packs:
+        for source, reference in packs:
             try:
-                await check_pack(ctx, reference, pack_memory or memory or 4096, update)
+                await check_pack(ctx, reference, pack_memory or memory or 4096, update, source, server_files, start_anyway)
             except Exception as exc:  # noqa: BLE001
                 import traceback
 
@@ -364,8 +393,12 @@ def main() -> int:
     parser.add_argument("--loader", choices=[*LOADERS, "all", "none"], help="which mod loader to test with a small generated pack (default: fabric, or none when --pack is given)")
     parser.add_argument("--pack", action="append", default=[], metavar="SLUG_OR_LINK",
                         help="also install a real Modrinth modpack, e.g. cobblemon-fabric or its modrinth.com link (repeat for several)")
+    parser.add_argument("--curseforge-pack", action="append", default=[], metavar="PROJECT_OR_LINK",
+                        help="also install a real CurseForge modpack: its project number or the link to its page (needs CURSEFORGE_API_KEY; repeatable)")
+    parser.add_argument("--no-server-files", action="store_true", help="install CurseForge packs from their list of mods even when they have server files")
+    parser.add_argument("--start-anyway", action="store_true", help="start a server even when some of its mods have to be added by hand")
     parser.add_argument("--pack-update", action="store_true",
-                        help="install the previous release of each --pack first, then update it to the newest release and roll that back")
+                        help="install the previous release of each pack first, then update it to the newest release and roll that back")
     parser.add_argument("--minecraft", help="Minecraft version (default: the newest release for Fabric, a well supported one for the others)")
     parser.add_argument("--memory", type=int, help="memory per server in MiB (default 2048 for the generated packs, 4096 for real ones)")
     parser.add_argument("--pack-memory", type=int, help="memory for the real modpacks in MiB (default: --memory, or 4096)")
@@ -375,9 +408,13 @@ def main() -> int:
         print("This check starts real Minecraft servers. Add --accept-eula to confirm that you accept the Minecraft EULA\n"
               "(https://aka.ms/MinecraftEULA) for them.", file=sys.stderr)
         return 2
-    choice = args.loader or ("none" if args.pack else "fabric")
+    if args.curseforge_pack and not (os.environ.get("CURSEFORGE_API_KEY") or "").strip():
+        print("CurseForge packs need your own API key in the environment variable CURSEFORGE_API_KEY.", file=sys.stderr)
+        return 2
+    packs = [("modrinth", p) for p in args.pack] + [("curseforge", p) for p in args.curseforge_pack]
+    choice = args.loader or ("none" if packs else "fabric")
     loaders = list(LOADERS) if choice == "all" else ([] if choice == "none" else [choice])
-    return asyncio.run(run(loaders, args.pack, args.minecraft, args.memory, args.pack_memory, args.keep, args.pack_update))
+    return asyncio.run(run(loaders, packs, args.minecraft, args.memory, args.pack_memory, args.keep, args.pack_update, not args.no_server_files, args.start_anyway))
 
 
 if __name__ == "__main__":
