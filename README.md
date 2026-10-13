@@ -11,7 +11,8 @@ It also runs **Java servers**. [Vanilla, Paper and Fabric servers](#vanilla-pape
 PaperMC and Fabric publish and kept up to date by the manager (the Minecraft version you pick, the newest stable build, the Java it
 needs). For modded play, pick a modpack from [Modrinth](https://modrinth.com) or
 [CurseForge](https://www.curseforge.com/minecraft/modpacks) and the manager downloads Java, the mods and the mod loader and
-starts it. See [Modpack servers](#modpack-servers-java).
+starts it. See [Modpack servers](#modpack-servers-java). The big GregTech pack [GT New Horizons](#gt-new-horizons) has its own
+installer, because its CurseForge page cannot be installed.
 
 ![The dashboard with three servers](docs/dashboard.jpg)
 
@@ -21,6 +22,7 @@ starts it. See [Modpack servers](#modpack-servers-java).
 |---|---|
 | **One-click servers** | Pick a name, a Pumpkin channel and a few settings; the manager downloads the binary, writes `pumpkin.toml`, assigns ports and starts it. |
 | **Vanilla, Paper and Fabric servers** | Java servers without a modpack: Mojang's own server, Paper for plugins, or Fabric for mods (with Fabric API). The manager downloads the software (checksum-verified) and the Java it needs, offers newer builds, and switches to another Minecraft version with a backup first and an automatic rollback. |
+| **GT New Horizons** | The big GregTech expert pack for Minecraft 1.7.10, installed from its official server files (the Java 17+ or the Java 8 build), updated one version at a time with a backup first and an automatic rollback. |
 | **Modpack servers** | Java servers from Modrinth and CurseForge modpacks (Fabric, Quilt, Forge, NeoForge): the right Java, every mod (checksum-verified), the loader and the pack's configuration are set up for you. Search from the dashboard, paste a link or upload a `.mrpack` or a CurseForge pack zip. CurseForge needs your own API key. |
 | **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators with individual levels, bans). |
 | **Automatic updates** | Checks GitHub for new Pumpkin builds (stable releases, plus the rolling *nightly* and *canary* builds), per server: install automatically, notify only, or off. Waits until nobody is online. |
@@ -34,7 +36,7 @@ starts it. See [Modpack servers](#modpack-servers-java).
 
 - [Install on Unraid](#install-on-unraid) · [Docker Compose](#docker-compose) · [First steps](#first-steps)
 - [Ports and networking](#ports-and-networking) · [Configuration](#configuration)
-- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Vanilla, Paper and Fabric](#vanilla-paper-and-fabric-servers) · [Modpack servers](#modpack-servers-java) · [Accounts for friends](#accounts-for-friends)
+- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Vanilla, Paper and Fabric](#vanilla-paper-and-fabric-servers) · [GT New Horizons](#gt-new-horizons) · [Modpack servers](#modpack-servers-java) · [Accounts for friends](#accounts-for-friends)
 - [Security](#security) · [Where things are stored](#where-things-are-stored) · [Troubleshooting](#troubleshooting)
 - [Pumpkin notes](#notes-about-pumpkin) · [Development](#development)
 
@@ -303,6 +305,57 @@ work as for every other server.
   rollback. `scripts/real_java_check.py --accept-eula --software all` (add `--software-update` or `--software-from 1.21.11`) repeats
   that on your own setup.
 
+## GT New Horizons
+
+*New server → GT New Horizons* installs **GT New Horizons** (GTNH), the large expert-mode modpack for Minecraft 1.7.10 built around
+GregTech, from the pack's **official server files** on [gtnewhorizons.com](https://www.gtnewhorizons.com/downloads/). Why not from
+CurseForge: the pack's page there is only a list of 44 of the 200-odd mods its server runs, kept "for reference" (GregTech itself is not among
+them, and the pack's own README says to install from its website). A server made from that list dies in the first mixin that needs
+GregTech (`ClassNotFoundException: gregtech.api.GregTechAPI`), so the manager refuses to create one from it and points here.
+
+Choose a **version** (the newest stable one is suggested; betas and release candidates are marked and are for testing) and the
+**build**: the pack publishes complete server files for **Java 17 and newer** (recommended, and faster; the manager installs the
+newest Java the version is made for, Java 25 for 2.8) and for **Java 8** (older and slower, for where no current Java exists). The zip
+is about 450 MB and holds everything: the mods, the configuration, the libraries and the Forge files. The manager unpacks it as it is
+(leaving out only its start scripts, `eula.txt` and the player lists, which it looks after itself) and starts it the way the pack's own
+start script does, with the memory you choose: **6 GiB** by default, which is what the pack asks for at the least (add 0.5 GiB for
+every further player early in the game and 1 GiB each from the late game on). Console, players, files, backups and accounts for
+friends work as for every other server.
+
+* **Where it comes from.** The site publishes no checksums and has no API. The list of versions is read from its
+  [version history page](https://www.gtnewhorizons.com/version-history/), and only files on `downloads.gtnewhorizons.com` are downloaded
+  (a redirect anywhere else is refused). The zip is checked like every pack: names that point outside the server folder are refused, sizes
+  and counts are capped, and every file is checked against the CRC stored in the zip while it is unpacked.
+* **The first start takes a few minutes** (about 200 mods, a world made with Realistic World Gen), and the startup timeout is 30 minutes. The
+  server keeps the pack's own settings (hard difficulty, command blocks and flying allowed, ...) unless you change them in the dialog.
+  After its *Done* line the pack goes on loading for about half a minute (its quest book, again after every new version) and answers pings with
+  *"Server is still starting!"* meanwhile: a player who tries too early sees that message, and the manager waits for it instead of
+  taking it for a failure.
+* **Backups.** GT New Horizons ships a mod (ServerUtilities) that backs the world up every half hour while players are online and keeps twelve
+  copies in `backups/`. The manager makes backups itself, so it switches that off in `serverutilities/serverutilities.cfg`
+  (`enable_backups`) and leaves `backups/` out of its own backups either way; set it to `true` again if you want both.
+* **Updates.** The *Modpack* tab looks for newer versions on the website: a server on a stable version is offered stable versions, one on a
+  beta also the betas, and nothing is installed without you. *Update now* is the usual procedure (the new files are downloaded while the server
+  runs, then it stops, a **verified backup** is made, the files are switched, it starts and is watched, and if it does not come up the
+  backup is restored). What the pack's own update guide says is done: its **configuration and libraries are replaced** by the new
+  version's, also the files that were changed (many mods rewrite their configuration themselves, so a changed file is not always somebody's
+  work), except `config/JourneyMapServer` (the players' maps); the backup made first has the old files, and the update's log lists the
+  first of them. Mods you added yourself, `server.properties`, `serverutilities/` and the world stay (a changed file in
+  `serverutilities/` stays with the new version beside it as `<name>.pack-new`). GT New Horizons advises updating **one major version at a
+  time** (2.7 to 2.8, not 2.6 to 2.8): the manager warns when an update skips one, or goes back. **Every player's client has to be the same
+  version as the server.** When the new version removes blocks that the world still has, Forge stops at startup and asks for `/fml confirm`
+  (it removes them, after a backup of the world of its own). The manager answers that itself in the restart of an update, because the pack
+  chose what to remove, and the update's log says how many and which; the backup made before the update is the way back. More than a thousand
+  at once is not answered (something else must be wrong, and the update is rolled back), and neither is the same question at any other
+  start: the activity list then says what the server asks, and you type `/fml confirm` (or `/fml cancel`, with the slash) in the *Console* tab.
+* **A server that was made from the CurseForge page** (before the manager refused to) says so in its *Modpack* tab: delete it and create
+  the server again here.
+* **Run for real.** Both builds of version 2.8.4 were created from the website on Windows with the real Java (209 mods on Java 25, 208 on
+  Java 8's 8u312), started, pinged, given commands, backed up while running, restored and stopped, and 2.8.3 was updated to 2.8.4
+  (a verified backup first, the removed block confirmed by the manager) and rolled back. The Linux (Alpine) image has not run GT New
+  Horizons yet; `docker exec -it pumpkin-manager python /app/scripts/real_java_check.py --accept-eula --gtnh --pack-update` does it in
+  your container (add `--gtnh-build legacy` for the Java 8 files; it needs 6 GiB and downloads 450 MB per build).
+
 ## Modpack servers (Java)
 
 Besides Pumpkin servers the manager runs **modded Java servers from Modrinth and CurseForge modpacks**. Choose *New server →
@@ -533,6 +586,9 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | The *Management API* shows "not available" | Normal for stable Pumpkin 0.2.0, which does not have it yet. The manager then uses console commands and server pings. |
 | A friend forgot their password, or cannot sign in | Open *Accounts* and use *New password* for them: they get a new temporary password and choose their own again. After a few wrong attempts a name is locked out for a few minutes. |
 | A friend sees "No servers yet" or is missing a server | Servers have to be assigned per account: *Accounts → Access*. The change shows up in their browser without a reload. |
+| A GT New Horizons server made from CurseForge dies with `ClassNotFoundException: gregtech.api.GregTechAPI` | CurseForge's page for GT New Horizons only lists some of its mods (not GregTech itself), so such a server cannot run. Delete it and use *New server → GT New Horizons*, which installs the pack's official server files. |
+| *"The GT New Horizons website answered ..."* / *"lists no server downloads"* | The manager reads the versions from gtnewhorizons.com and downloads from downloads.gtnewhorizons.com: the container needs internet access to both, and the page may have changed its layout (then the pack cannot be installed from the manager until it is adapted). |
+| A GT New Horizons server says *"Server is still starting!"* long after *Done* | Normal for the first half minute, longer on a slow disk or after an update (the quest book is loaded then). If a player still cannot join after a few minutes, look at the console tab: a server waiting at its question about missing blocks needs `/fml confirm` typed (with the slash), and GT New Horizons wants 6 GiB or more (*Settings → Java*). |
 | A modpack server stops while starting, or says it *did not become ready* | Open the console tab: `OutOfMemoryError` means the memory is too small (*Settings → Java*), a mod that complains names itself in the log, and a big modpack may simply need more than the startup timeout (*Settings → Startup timeout*). |
 | A modpack server says *"The server reported that it could not start"* and names a mod (*"X has failed to load correctly"* with `net/minecraft/client/...`, or *"Mod A requires B ... B is not installed"*) | The pack was made for players and lists a mod for the server that only works on a client (or one that the manager left out is needed after all). The message is the loader's own: open the *Files* tab and delete the named jar from `mods/` for the first kind, or find the jar of the second kind (*Modpack → Left out* lists what was skipped; the modpack's page has the file) and upload it to `mods/`, then start again. Packs with a proper server version (a *server pack*) are the other way out. |
 | A modpack server ends with *"No X11 DISPLAY variable was set"* (`HeadlessException`) | A mod wants to open a window, and a server has no screen. The lines before the error name the mod. Better MC's *Missing Mods Checker* is handled by the manager (see *Packs with the Missing Mods Checker* above): if you still see it, put the mods it lists into `mods/` and delete `config/missing_mods_checker.json` in the *Files* tab. |
@@ -568,6 +624,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
 .venv/bin/python scripts/real_binary_check.py /path/to/pumpkin   # end-to-end check against a REAL Pumpkin binary
 .venv/bin/python scripts/real_java_check.py --accept-eula          # the same for a modpack server (real Java, Mojang, Modrinth, loader)
 .venv/bin/python scripts/real_java_check.py --accept-eula --software all    # ... for Vanilla, Paper and Fabric servers
+.venv/bin/python scripts/real_java_check.py --accept-eula --gtnh --pack-update   # GT New Horizons from its website (450 MB, 6 GiB; updated and rolled back)
 CURSEFORGE_API_KEY=... .venv/bin/python scripts/real_java_check.py --accept-eula --curseforge-pack 285109   # a real CurseForge pack (your own key)
 ```
 
@@ -591,10 +648,12 @@ CURSEFORGE_API_KEY=... .venv/bin/python scripts/real_java_check.py --accept-eula
 * `--software vanilla|paper|fabric|all` does it for servers without a modpack, from what Mojang, PaperMC and Fabric offer right now;
   `--software-update` installs the previous build first, then updates to the newest one and rolls that back, and `--software-from
   <Minecraft version>` starts on an older Minecraft version and switches to the newest (new Java, converted world, Fabric API).
+* `--gtnh` installs GT New Horizons from gtnewhorizons.com (the newest stable version, or `--gtnh-version`; `--gtnh-build legacy` takes the
+  Java 8 files); with `--pack-update` it starts one stable version behind, updates and rolls that back.
 * Layout: `pumpkin_manager/` (backend: `process.py` supervision, `updater.py` the update procedure,
   `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `jvm/` the Java engine: Java runtimes, mod loaders, Modrinth and
-  CurseForge packs, a pack's own server files, `server.properties`, pack updates, and `software.py` / `softwareupdates.py` for Vanilla,
-  Paper and Fabric servers; `api/` routers, `static/` the dashboard -
+  CurseForge packs, a pack's own server files, `server.properties`, pack updates, `software.py` / `softwareupdates.py` for Vanilla,
+  Paper and Fabric servers and `gtnh.py` for GT New Horizons; `api/` routers, `static/` the dashboard -
   plain ES modules, no build step), `tests/` (including `fake_pumpkin.py` and `fake_java_server.py`, stand-in servers, and
-  `jvmfakes.py`, a fake internet for Modrinth, CurseForge, Adoptium, Mojang, PaperMC, Fabric and the loaders), `docker/`, `unraid/`.
+  `jvmfakes.py`, a fake internet for Modrinth, CurseForge, Adoptium, Mojang, PaperMC, Fabric, GT New Horizons' website and the loaders), `docker/`, `unraid/`.
 * The frontend has no dependencies and never uses inline scripts or styles, so the strict CSP stays strict.

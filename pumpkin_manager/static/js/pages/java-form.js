@@ -13,8 +13,9 @@ const DIFFICULTIES = [["peaceful", "Peaceful"], ["easy", "Easy"], ["normal", "No
 const gib = (bytes) => `${(bytes / 1024 ** 3).toFixed(bytes >= 10 * 1024 ** 3 ? 0 : 1)} GiB`;
 
 // `memoryHint` ends the sentence about the machine's memory ("Most modpacks need 4-8 GiB."), `gameHint` introduces the game settings,
-// `onChange` hears about anything that can change whether the dialog may create the server (the EULA).
-export function javaServerForm({ gib: startGib, memoryHint, gameHint, motd = "A Minecraft Server", onChange = () => {} }) {
+// `onChange` hears about anything that can change whether the dialog may create the server (the EULA). `difficulty` is the one the
+// server starts with when nothing is changed (a pack's own: GT New Horizons runs on hard).
+export function javaServerForm({ gib: startGib, memoryHint, gameHint, motd = "A Minecraft Server", difficulty = "easy", onChange = () => {} }) {
   const machine = state.system?.memory;
   const f = { gib: startGib, touched: {}, op: 1, manualPort: false, port: "", autostart: "last", schedule: "daily", keep: 7, eula: false, start: true };
   const setting = (key, value) => { f.touched[key] = value; };
@@ -45,7 +46,7 @@ export function javaServerForm({ gib: startGib, memoryHint, gameHint, motd = "A 
     h("p", { class: "hint" }, gameHint),
     h("div", { class: "form-grid" },
       field("Game mode", selectControl(GAMEMODES, "survival", (v) => setting("gamemode", v))),
-      field("Difficulty", selectControl(DIFFICULTIES, "easy", (v) => setting("difficulty", v))),
+      field("Difficulty", selectControl(DIFFICULTIES, difficulty, (v) => setting("difficulty", v))),
       field("Max players", h("input", { class: "input", type: "number", min: "1", max: "100000", value: "20", oninput: (e) => { if (e.target.value) setting("max-players", Number(e.target.value)); } })),
       field("World seed", h("input", { class: "input", placeholder: "random", maxlength: "64", oninput: (e) => setting("level-seed", e.target.value) })),
       field("Operator level", selectControl(OP_LEVELS.map(({ value, label }) => ({ value, label })), f.op, (v) => { f.op = Number(v); }),

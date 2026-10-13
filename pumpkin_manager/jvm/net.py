@@ -87,6 +87,35 @@ async def get_json(
     raise DownloadError(last[:1].upper() + last[1:] + ".")
 
 
+async def get_text(
+    client: httpx.AsyncClient, url: str, *, what: str = "the server", attempts: int = 3, delay: float = 1.5, max_bytes: int = 2 * 1024 * 1024,
+    allowed_hosts: frozenset[str] | None = None,
+) -> str:
+    """GET ``url`` and return its text (a web page, for instance). At most ``max_bytes`` are read, transient failures are retried."""
+    require_https(url, allowed_hosts)
+    last = ""
+    for attempt in range(attempts):
+        try:
+            async with client.stream("GET", url) as resp:
+                if resp.status_code == 200:
+                    data = bytearray()
+                    async for chunk in resp.aiter_bytes(1 << 16):
+                        data += chunk
+                        if len(data) > max_bytes:
+                            raise BadDownloadError(f"{what} sent a page that is much larger than expected.")
+                    return data.decode("utf-8", "replace")
+                if resp.status_code == 404:
+                    raise _http_error(f"{what} does not know that (HTTP 404).", 404)
+                if resp.status_code not in (429, 500, 502, 503, 504):
+                    raise _http_error(f"{what} answered HTTP {resp.status_code}.", resp.status_code)
+                last = f"{what} answered HTTP {resp.status_code}"
+        except httpx.HTTPError as exc:
+            last = f"could not reach {what}: {exc or exc.__class__.__name__}"
+        if attempt + 1 < attempts:
+            await asyncio.sleep(delay * (attempt + 1))
+    raise DownloadError(last[:1].upper() + last[1:] + ".")
+
+
 async def _open_stream(
     client: httpx.AsyncClient, url: str, headers_for: HeadersFor, allowed_hosts: frozenset[str] | None, timeout: httpx.Timeout
 ) -> httpx.Response:

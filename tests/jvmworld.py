@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from jvmfakes import FakeCurseForge, FakeFabric, FakeFabricApi, FakeInternet, FakeJava, FakeMod, FakeModrinth, FakePaper
+from jvmfakes import FakeCurseForge, FakeFabric, FakeFabricApi, FakeGtnh, FakeInternet, FakeJava, FakeMod, FakeModrinth, FakePaper
 
 FAKE_JAVA = Path(__file__).parent / "fake_java_server.py"
 LITHIUM = FakeMod("mods/lithium.jar", b"lithium" * 100)
@@ -48,6 +48,13 @@ class JavaWorld:
         self.fabric_api.add_version("0.106.0+1.21.1", "1.21.1")
         self.fabric_api.add_version("0.110.0+1.21.4", "1.21.4")
         self.cf = FakeCurseForge(self.net)  # unused unless a test adds CurseForge packs (and gives the app a key)
+        # GT New Horizons: its website lists the versions (newest first), its download site serves the zips of complete servers
+        self.net.adoptium(25, release="jdk-25.0.4.1+1")
+        self.gtnh = FakeGtnh(self.net)
+        for version, beta, date, java_max in (
+            ("2.9.0-RC-2", True, "2026/10/04", 26), ("2.8.4", False, "2025/12/23", 25), ("2.8.3", False, "2025/12/12", 25), ("2.7.4", False, "2025/04/13", 21),
+        ):
+            self.gtnh.add_release(version, beta=beta, date=date, java_max=java_max)
         self.installer = FakeJava()
         self.behavior: dict[str, Any] = {"minecraft": "1.21.1"}  # what the fake Java server does (see fake_java_server.py)
         self.pack = FakeModrinth(self.net, slug="cool-pack", title="Cool Pack", project_id="AbCdEf12")

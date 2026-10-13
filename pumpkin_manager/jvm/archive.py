@@ -5,6 +5,9 @@ author chose its mods, including the ones that may not be downloaded one by one.
 some zips wrap everything in one folder and bring start scripts and a mod loader installer, others are just ``mods/`` and
 ``config/`` at the top. The manager installs the loader itself, so only the content is taken over.
 
+A *whole* server zip (GT New Horizons publishes its server like that) also holds the loader: its libraries and jars. The
+manager then takes those over as well, and only leaves out the start scripts and the files it looks after itself.
+
 The zip is untrusted input like any pack: paths may not leave the server folder, links are ignored, and sizes and counts are
 capped. Nothing is run.
 """
@@ -40,6 +43,9 @@ _ROOT_SKIP_NAMES = frozenset({
 })
 # What an installer or an earlier run leaves behind; the manager's own loader install creates its own.
 _SKIP_DIRS = frozenset({"libraries", "versions", ".fabric", ".mixin.out", "logs", "crash-reports", ".manager", "__macosx"})
+# A whole server zip brings its loader: its libraries are wanted, only the traces of earlier runs are not.
+_WHOLE_SKIP_DIRS = _SKIP_DIRS - {"libraries", "versions", ".fabric"}
+_SCRIPT_SUFFIXES = (".sh", ".bat", ".cmd", ".ps1", ".command")
 _DRIVE = re.compile(r"^[A-Za-z]:")
 Progress = Callable[[float, str], None]
 
@@ -62,29 +68,31 @@ def _wrapper(names: list[str]) -> str:
     return "" if only.lower() in _CONTENT_DIRS else only + "/"
 
 
-def _skipped(rel: str) -> str | None:
+def _skipped(rel: str, whole: bool = False) -> str | None:
     """Why a file is not taken over (None: it is). ``rel`` may not be checked yet: this only looks at the names."""
     parts = [p for p in rel.replace("\\", "/").split("/") if p not in ("", ".")]
     if not parts:
         return None
-    if parts[0].lower() in _SKIP_DIRS:
-        return "the loader installation and logs of a ready server are made again here"
+    if parts[0].lower() in (_WHOLE_SKIP_DIRS if whole else _SKIP_DIRS):
+        return "logs and leftovers of earlier runs" if whole else "the loader installation and logs of a ready server are made again here"
     if "/".join(parts).lower() == "config/missing_mods_checker.json":
         return "the list for the Missing Mods Checker, which would open a window: the mods are in the server files"
     if len(parts) == 1:
         lower = parts[0].lower()
         if lower in _ROOT_SKIP_NAMES:
             return "the manager looks after it"
-        if lower.endswith(_ROOT_SKIP_SUFFIXES):
-            return "a start script or installer: the manager installs the loader and starts the server"
+        if lower.endswith(_SCRIPT_SUFFIXES if whole else _ROOT_SKIP_SUFFIXES):
+            return "a start script: the manager starts the server itself" if whole else "a start script or installer: the manager installs the loader and starts the server"
     return None
 
 
 class ServerPack:
-    """What a server pack zip holds, worked out before anything is written."""
+    """What a server pack zip holds, worked out before anything is written. ``whole``: the zip is a complete server that brings
+    its own loader (libraries and jars), which is then taken over instead of being installed by the manager."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, whole: bool = False):
         self.path = path
+        self.whole = whole
         try:
             with zipfile.ZipFile(path) as zf:
                 infos = zf.infolist()
@@ -104,7 +112,7 @@ class ServerPack:
             if info.is_dir() or not info.filename.startswith(self.prefix) or stat.S_ISLNK(info.external_attr >> 16):
                 continue
             raw = info.filename[len(self.prefix):]
-            reason = _skipped(raw)  # before the path is checked: a server pack may carry the eula.txt the manager writes itself
+            reason = _skipped(raw, whole)  # before the path is checked: a server pack may carry the eula.txt the manager writes itself
             if reason is not None:
                 self.skipped[reason] = self.skipped.get(reason, 0) + 1
                 continue
@@ -182,17 +190,21 @@ def _copy(zf: zipfile.ZipFile, info: zipfile.ZipInfo, dest: Path) -> str:
 
 
 def update(
-    pack: ServerPack, server_dir: Path, old_lock: dict[str, Any], never_replace: frozenset[str], progress: Progress
+    pack: ServerPack, server_dir: Path, old_lock: dict[str, Any], never_replace: frozenset[str], progress: Progress,
+    replace: Callable[[str], bool] | None = None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
     """Bring a server that was installed from an earlier version of the server files up to this one.
 
     The same rule as for every pack update: a file is only replaced or removed when it still is what the old version put there.
-    Whatever somebody changed stays; the new version of such a file is saved next to it with the ending ``.pack-new``.
-    Returns (mods, other files, what happened: added / updated / removed / kept_mods / kept_configs)."""
+    Whatever somebody changed stays; the new version of such a file is saved next to it with the ending ``.pack-new``. A pack that
+    says its files must always be the new version's (``replace`` names them: GT New Horizons tells to replace its whole
+    configuration) gets them replaced even when they were changed, and the files are listed as ``replaced``; the backup made before
+    the update has the old ones.
+    Returns (mods, other files, what happened: added / updated / removed / replaced / kept_mods / kept_configs)."""
     old: dict[str, str] = {}
     for path, recorded in {**(old_lock.get("overrides") or {}), **(old_lock.get("files") or {})}.items():
         old[path] = str(recorded).removeprefix("sha256:")
-    report: dict[str, list[str]] = {"added": [], "updated": [], "removed": [], "kept_mods": [], "kept_configs": []}
+    report: dict[str, list[str]] = {"added": [], "updated": [], "removed": [], "replaced": [], "kept_mods": [], "kept_configs": []}
     mods: dict[str, str] = {}
     others: dict[str, str] = {}
     root = server_dir.resolve()
@@ -224,6 +236,9 @@ def update(
                     elif is_mod(rel):
                         part.unlink()  # somebody replaced the mod: theirs stays
                         report["kept_mods"].append(rel)
+                    elif replace is not None and replace(rel):
+                        os.replace(part, dest)  # the pack wants its own version, whoever changed this one
+                        report["replaced"].append(rel)
                     else:
                         os.replace(part, dest.with_name(dest.name + ".pack-new"))  # somebody changed it: theirs stays
                         report["kept_configs"].append(rel)

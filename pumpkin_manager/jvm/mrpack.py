@@ -94,11 +94,12 @@ class PackIndex:
     files: list[PackFile] = field(default_factory=list)
     client_only: list[str] = field(default_factory=list)  # left out because Modrinth says the mod does not work on a server
     skip_overrides: set[str] = field(default_factory=set)  # mods the pack ships inside overrides/ that are left out for the same reason
-    source: str = "modrinth"  # modrinth | curseforge
+    source: str = "modrinth"  # modrinth | curseforge | gtnh
     stage: str = field(default_factory=lambda: uuid.uuid4().hex)  # names this install's share of the CurseForge staging area
     override_prefixes: tuple[str, ...] = ("overrides/", "server-overrides/")  # the folders of the pack zip that hold configuration
     archive: Any = None  # an archive.ServerPack: the pack's own server files, with the mods and configuration, used instead
     archive_notes: dict[str, int] = field(default_factory=dict)  # what the server files held that was not taken over, and why
+    archive_replace: Callable[[str], bool] | None = None  # the files of the server files that an update replaces even when they were changed
 
     @property
     def server_files(self) -> list[PackFile]:
@@ -392,7 +393,7 @@ class PackInstaller:
         if index.archive is not None:
             self._check_space(index.archive.total_bytes, server_dir)
             mods, others, report = await asyncio.to_thread(
-                archive.update, index.archive, server_dir, old_lock, frozenset({"server.properties"}), progress
+                archive.update, index.archive, server_dir, old_lock, frozenset({"server.properties"}), progress, index.archive_replace
             )
             lock = self._lock_of(index, mods, others)
             atomic_write_text(server_dir / LOCK_DIR / LOCK_NAME, json.dumps(lock, indent=1))

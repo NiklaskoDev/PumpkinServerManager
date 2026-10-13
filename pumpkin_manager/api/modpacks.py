@@ -47,10 +47,11 @@ async def search(
 
 @router.get("/modpacks/project")
 async def project(
-    request: Request, ref: str = Query(min_length=2, max_length=300), source: str = Query("modrinth", pattern="^(modrinth|curseforge)$"),
+    request: Request, ref: str = Query(min_length=2, max_length=300), source: str = Query("modrinth", pattern="^(modrinth|curseforge|gtnh)$"),
     owner: Principal = Depends(require_owner),
 ) -> dict:
-    """One modpack and its versions. ``ref`` is a Modrinth link, id or short name, or a CurseForge project number or link."""
+    """One modpack and its versions. ``ref`` is a Modrinth link, id or short name, or a CurseForge project number or link; for
+    ``source=gtnh`` it is ignored (GT New Horizons is one pack, and its versions come from its own website)."""
     return await get_ctx(request).servers.jvm.pack_details(ref, source)
 
 

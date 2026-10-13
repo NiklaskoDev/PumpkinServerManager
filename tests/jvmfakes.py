@@ -786,3 +786,133 @@ class FakeCurseForge:
             return denied
         wanted = json.loads(request.content)["modIds"]
         return httpx.Response(200, json={"data": [self.mods[i] for i in wanted if i in self.mods]})
+
+
+SERVERUTILITIES_CFG = b"""# Configuration file
+
+afk {
+    # Enables afk timer. [default: true]
+    B:enabled=true
+}
+
+
+backups {
+    # Path to backups folder. [default: ./backups/]
+    S:backup_folder_path=./backups/
+
+    # Time between backups in hours. [default: 0.5]
+    S:backup_timer=0.5
+
+    # Enables backups. [default: true]
+    B:enable_backups=true
+
+    # Backups won't run if no players are online. [default: true]
+    B:need_online_players=true
+}
+
+
+chat {
+    B:add_nickname_tilde=false
+}
+"""
+GTNH_PROPERTIES = (
+    b"generator-settings=\nop-permission-level=2\nallow-nether=true\nlevel-name=World\nallow-flight=true\nserver-port=25565\nlevel-type=rwg\n"
+    b"enable-rcon=false\nwhite-list=true\nonline-mode=true\ndifficulty=3\nenable-command-block=true\nmax-players=20\nmotd=GT:New Horizons\n"
+)
+GTNH_HOST = "downloads.gtnewhorizons.com"
+
+
+def gtnh_server_files(version: str, *, modern: bool = True, changes: dict[str, bytes | None] | None = None) -> dict[str, bytes]:
+    """What a GT New Horizons server zip holds (the real 2.8.4 one, shrunk): the mods, the configuration, the libraries, the Forge files and
+    the scripts of the pack. ``changes`` adds or replaces files; a value of None removes one."""
+    files: dict[str, bytes] = {
+        "mods/gregtech-5.09.jar": f"gregtech {version}".encode() * 30, "mods/NewHorizonsCoreMod.jar": f"core {version}".encode() * 30,
+        "mods/hodgepodge.jar": b"hodgepodge" * 30, "mods/gtnhlib.jar": b"gtnhlib" * 30,
+        "config/GregTech/GregTech.cfg": f"B:Something=true\n# the pack's {version} version\n".encode(), "config/hodgepodge.cfg": b"I:fixes=1\n",
+        "config/JourneyMapServer/world.cfg": b"uuid=the-maps-of-the-players\n",
+        "libraries/org/ow2/asm/asm-all/5.0.3/asm-all-5.0.3.jar": b"asm", "libraries/net/minecraft/launchwrapper/1.12/launchwrapper-1.12.jar": b"lw",
+        "forge-1.7.10-10.13.4.1614-1.7.10-universal.jar": b"forge", "minecraft_server.1.7.10.jar": b"vanilla",
+        "serverutilities/serverutilities.cfg": SERVERUTILITIES_CFG, "serverutilities/server/ranks.txt": b"# ranks\n",
+        "journeymap/config/5.2/journeymap.core.config": b"mapstyle=1\n", "server-icon.png": PNG_HEADER + b"icon",
+        "server.properties": GTNH_PROPERTIES, "eula.txt": b"eula=false\n", f"changelog to {version}.md": b"# what changed\n",
+        "ops.json": b"[]", "whitelist.json": b"[]", "banned-players.json": b"[]", "banned-ips.json": b"[]", "usercache.json": b"[]",
+    }
+    if modern:
+        files.update({
+            "lwjgl3ify-forgePatches.jar": f"patches {version}".encode(), "java9args.txt": b"-Dfile.encoding=UTF-8\n--add-opens\njava.base/java.io=ALL-UNNAMED\n",
+            "startserver-java9.sh": b"#!/bin/bash\njava @java9args.txt -jar lwjgl3ify-forgePatches.jar nogui\n", "startserver-java9.bat": b"java @java9args.txt\n",
+        })
+    else:
+        files.update({"startserver.sh": b"#!/bin/bash\njava -jar forge-1.7.10-10.13.4.1614-1.7.10-universal.jar nogui\n", "startserver.bat": b"java -jar x\n"})
+    for name, data in (changes or {}).items():
+        if data is None:
+            files.pop(name, None)
+        else:
+            files[name] = data
+    return files
+
+
+class FakeGtnh:
+    """GT New Horizons' website (its version history page) and its download site (the zips of complete servers)."""
+
+    PAGE = "https://www.gtnewhorizons.com/version-history/"
+
+    def __init__(self, net: FakeInternet) -> None:
+        self.net = net
+        self.releases: list[dict[str, Any]] = []  # newest first, like the page
+        self.page_status = 200
+        self.downloads: list[str] = []
+        net.route(self.PAGE, self._page)
+
+    def add_release(
+        self, version: str, *, beta: bool = False, date: str = "2025/12/23", java_max: int = 25, modern: bool = True, legacy: bool = True,
+        changes: dict[str, bytes | None] | None = None, legacy_changes: dict[str, bytes | None] | None = None, redirect_to: str | None = None,
+        first: bool = False,
+    ) -> dict[str, Any]:
+        """Offer a version. ``first`` puts it on top of the page (the newest), otherwise below the ones already there."""
+        release = {"version": version, "beta": beta, "date": date, "java_max": java_max, "modern": modern, "legacy": legacy}
+        if first:
+            self.releases.insert(0, release)
+        else:
+            self.releases.append(release)
+        folder = "betas/" if beta else ""
+        for variant, wanted, is_modern, extra in ((f"17-{java_max}", modern, True, changes), ("8", legacy, False, legacy_changes or changes)):
+            if not wanted:
+                continue
+            data = _zip_bytes(gtnh_server_files(version, modern=is_modern, changes=extra))
+            path = f"/ServerPacks/{folder}GT_New_Horizons_{version}_Server_Java_{variant}.zip"
+            release[variant] = data
+            self.net.route(f"https://{GTNH_HOST}{path}", self._serve(data, path, redirect_to))
+        return release
+
+    def _serve(self, data: bytes, path: str, redirect_to: str | None) -> Callable[[httpx.Request], httpx.Response]:
+        def serve(request: httpx.Request) -> httpx.Response:
+            self.downloads.append(path)
+            if redirect_to:
+                return httpx.Response(302, headers={"Location": redirect_to})
+            return httpx.Response(200, content=data, headers={"Content-Type": "application/zip"})
+
+        return serve
+
+    def page(self) -> str:
+        """The version history the way the real page is built: one folding block per version, with its date and its download links."""
+        blocks = []
+        for r in self.releases:
+            folder = "betas/" if r["beta"] else ""
+            base = f"https://{GTNH_HOST}"
+            server = "".join(
+                f'<a href="{base}/ServerPacks/{folder}GT_New_Horizons_{r["version"]}_Server_Java_{variant}.zip" target="_blank"><svg></svg><span>{label} ZIP</span></a>'
+                for variant, label, wanted in ((f"17-{r['java_max']}", f"Java 17-{r['java_max']}", r["modern"]), ("8", "Java 8", r["legacy"])) if wanted
+            )
+            blocks.append(
+                f'<details class="group"><summary class="flex"><div><span class="v">{r["version"]}</span><span>{"Beta" if r["beta"] else "Stable"} release</span></div>'
+                f'<div><span><svg></svg><span>{r["date"]}</span></span></div></summary><div><p><a href="https://github.com/GTNewHorizons/DreamAssemblerXXL/blob/master/releases/changelogs/x.md">'
+                f'Click here to get the changelog</a></p><div><div><h3>MultiMC/Prism ZIPs</h3></div><div><a href="{base}/Multi_mc_downloads/{folder}GT_New_Horizons_{r["version"]}_Java_8.zip">'
+                f'<span>Java 8 ZIP</span></a></div></div><div><div><h3>Server ZIPs</h3></div><div>{server}</div></div></div></details>'
+            )
+        return f"<!DOCTYPE html><html><body><section><h1>Version History</h1><div>{''.join(blocks)}</div></section></body></html>"
+
+    def _page(self, request: httpx.Request) -> httpx.Response:
+        if self.page_status != 200:
+            return httpx.Response(self.page_status, text="unavailable")
+        return httpx.Response(200, text=self.page(), headers={"Content-Type": "text/html; charset=utf-8"})

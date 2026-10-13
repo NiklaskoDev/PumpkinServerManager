@@ -14,10 +14,16 @@ stops it.
     python scripts/real_java_check.py --accept-eula --software fabric --software-from 1.21.11   # ... on an older Minecraft, switched to the newest
     python scripts/real_java_check.py --accept-eula --pack cobblemon-fabric   # a real Modrinth modpack (name or link; repeatable)
     CURSEFORGE_API_KEY=... python scripts/real_java_check.py --accept-eula --curseforge-pack 715572   # a CurseForge modpack
+    python scripts/real_java_check.py --accept-eula --gtnh --pack-memory 6144   # GT New Horizons from its own website (about 450 MB)
+    python scripts/real_java_check.py --accept-eula --gtnh --gtnh-build legacy --gtnh-version 2.8.3 --pack-update   # the Java 8 build, updated
 
 Vanilla, Paper and Fabric servers (--software) are made from what Mojang, PaperMC and Fabric offer right now; --software-update installs
 the previous build (or the previous release, for Vanilla) first, then updates to the newest one and rolls that back. --software-from
 starts on an older Minecraft version instead and switches to the newest one (a version upgrade: new Java, converted world, new Fabric API).
+
+GT New Horizons (--gtnh) is installed from the official server files on gtnewhorizons.com (the newest stable version unless --gtnh-version
+says otherwise), on the Java 17+ build unless --gtnh-build legacy asks for the Java 8 one. It needs 6 GiB; with --pack-update it starts one
+stable version behind, updates and rolls back.
 
 A real modpack is looked up and installed the way the dashboard does it; its mods are downloaded for real (a few hundred MB) and
 it gets 4096 MiB unless --pack-memory says otherwise. With --pack the generated packs are skipped unless --loader asks for them.
@@ -65,7 +71,7 @@ from real_binary_check import check, console_tail, eventually, free_block, repor
 from pumpkin_manager.app import AppContext  # noqa: E402
 from pumpkin_manager.config import Settings  # noqa: E402
 from pumpkin_manager.jvm.net import USER_AGENT  # noqa: E402
-from pumpkin_manager.mcnet import server_list_ping  # noqa: E402
+from pumpkin_manager.mcnet import StillStartingError, server_list_ping  # noqa: E402
 from pumpkin_manager.models import software_label  # noqa: E402
 from pumpkin_manager.util import strip_ansi  # noqa: E402
 
@@ -349,6 +355,47 @@ async def check_pack(
     await check_server(ctx, label, body, mods=[], generated=False, extra=extra, start_anyway=start_anyway)
 
 
+async def check_gtnh(ctx: AppContext, version: str, memory: int | None, update: bool, build: str) -> None:
+    """GT New Horizons from its own website: the official server files of a stable version (or the one asked for)."""
+    label = "GTNH"
+    section("GT New Horizons: look the pack up on its website")
+    try:
+        details = await ctx.servers.jvm.pack_details("gtnh", "gtnh")
+    except Exception as exc:  # noqa: BLE001
+        check(False, "the website lists the versions", repr(exc))
+        return
+    releases = [v for v in details["versions"] if v["type"] == "release"]
+    target = next((v for v in details["versions"] if v["id"] == version), None) if version else (releases[0] if releases else None)
+    if not check(target is not None, "the version to install is listed", f"{len(details['versions'])} versions, newest stable {releases[0]['number'] if releases else '?'}"):
+        return
+    check(True, "builds", ", ".join(f"{b['name']} (runs on Java {b['runs_on']})" for b in target["builds"]))
+    chosen = next((b for b in target["builds"] if b["variant"] == build), None)
+    if not check(chosen is not None, f"the version has the {build} build"):
+        return
+    body: dict[str, Any] = {
+        "name": "Real GTNH", "engine": "java", "eula": True, "start": True, "settings": SETTINGS, "policy": {"start_timeout": 1800},
+        "modpack": {"source": "gtnh", "version": target["id"], "variant": build},
+    }
+    if memory:
+        body["memory_mb"] = memory
+    extra = None
+    if update:
+        older = next((v for v in releases if releases.index(v) > releases.index(target)), None) if target in releases else None
+        if not check(older is not None, "there is an older stable version to update from", str((older or {}).get("number"))):
+            return
+        body["modpack"]["version"] = older["id"]
+        check(True, "installing the previous stable version first", f"{older['number']}, published {older['published']}")
+
+        async def extra(server_id: str) -> None:
+            await check_pack_update(ctx, label, server_id, older, target)
+
+    await check_server(ctx, label, body, mods=[], generated=False, extra=extra)
+    server = next((s for s in ctx.repo.list_servers() if s.name == body["name"]), None)
+    if server is not None:
+        spec = ctx.servers.get(server.id).spec
+        check(ctx.runtimes.get(spec["java"]) is not None, f"Java {spec['java']} is installed for it", str(ctx.runtimes.get(spec["java"]).release))
+
+
 async def check_server(
     ctx: AppContext, label: str, body: dict[str, Any], *, mods: list[str], generated: bool,
     extra: Callable[[str], Awaitable[None]] | None = None, start_anyway: bool = False,
@@ -407,15 +454,23 @@ async def check_server(
     section(f"{label}: talk to the running server")
     info = None
     failure: Exception | None = None
-    for _ in range(15):  # for a moment after "Done" some servers close the first status requests (Vanilla Perfected on 26.3) or
-        try:             # still answer with Forge's empty status (version "", 0/0 players, no motd; Create+ on Forge 1.19.2)
+    waited, patience = 0, 30  # seconds
+    while True:  # for a moment after "Done" some servers close the first status requests (Vanilla Perfected on 26.3) or
+        try:     # still answer with Forge's empty status (version "", 0/0 players, no motd; Create+ on Forge 1.19.2)
             info = await server_list_ping("127.0.0.1", server.java_port, timeout=10)
             if info["version"] and info["max"]:  # Forge fills the status in pieces: the version and motd first, the player limit a moment later
                 break
             failure = RuntimeError("the status is still incomplete")
         except Exception as exc:  # noqa: BLE001
             failure = exc
+        if isinstance(failure, StillStartingError):
+            patience = 300  # Forge 1.7.10 says so until its last mod is done: GT New Horizons loads its quest book for about half a minute after "Done"
+        if waited >= patience:
+            break
         await asyncio.sleep(2)
+        waited += 2
+    if waited >= 6 and info is not None and info["version"]:
+        print(f"        the server needed {waited} seconds after its Done line before it answered with its status")
     if info is None or not (info["version"] and info["max"]):
         check(False, "the server answers the server-list ping", repr(failure))
         info = None
@@ -461,7 +516,7 @@ async def check_server(
 async def run(
     loaders: list[str], packs: list[tuple[str, str]], minecraft: str | None, memory: int | None, pack_memory: int | None, keep: bool,
     update: bool = False, server_files: bool = True, start_anyway: bool = False, loader_version: str | None = None,
-    software: list[str] | None = None, software_update: bool = False, software_from: str | None = None,
+    software: list[str] | None = None, software_update: bool = False, software_from: str | None = None, gtnh_build: str = "modern",
 ) -> int:
     work = Path(tempfile.mkdtemp(prefix="java-real-check-"))
     print(f"Working folder: {work}")
@@ -495,7 +550,10 @@ async def run(
                 check(False, f"{kind}: the check ran to completion", repr(exc))
         for source, reference in packs:
             try:
-                await check_pack(ctx, reference, pack_memory or memory or 4096, update, source, server_files, start_anyway)
+                if source == "gtnh":
+                    await check_gtnh(ctx, reference, pack_memory or memory, update, gtnh_build)
+                else:
+                    await check_pack(ctx, reference, pack_memory or memory or 4096, update, source, server_files, start_anyway)
             except Exception as exc:  # noqa: BLE001
                 import traceback
 
@@ -523,6 +581,9 @@ def main() -> int:
                         help="also install a real Modrinth modpack, e.g. cobblemon-fabric or its modrinth.com link (repeat for several)")
     parser.add_argument("--curseforge-pack", action="append", default=[], metavar="PROJECT_OR_LINK",
                         help="also install a real CurseForge modpack: its project number or the link to its page (needs CURSEFORGE_API_KEY; repeatable)")
+    parser.add_argument("--gtnh", action="store_true", help="also install GT New Horizons from the official server files on gtnewhorizons.com (about 450 MB, needs 6 GiB)")
+    parser.add_argument("--gtnh-version", default="", metavar="VERSION", help="the GT New Horizons version (default: the newest stable one)")
+    parser.add_argument("--gtnh-build", choices=("modern", "legacy"), default="modern", help="the server files for Java 17 and newer (default) or for Java 8")
     parser.add_argument("--no-server-files", action="store_true", help="install CurseForge packs from their list of mods even when they have server files")
     parser.add_argument("--start-anyway", action="store_true", help="start a server even when some of its mods have to be added by hand")
     parser.add_argument("--pack-update", action="store_true",
@@ -540,7 +601,7 @@ def main() -> int:
     if args.curseforge_pack and not (os.environ.get("CURSEFORGE_API_KEY") or "").strip():
         print("CurseForge packs need your own API key in the environment variable CURSEFORGE_API_KEY.", file=sys.stderr)
         return 2
-    packs = [("modrinth", p) for p in args.pack] + [("curseforge", p) for p in args.curseforge_pack]
+    packs = [("modrinth", p) for p in args.pack] + [("curseforge", p) for p in args.curseforge_pack] + ([("gtnh", args.gtnh_version)] if args.gtnh else [])
     choice = args.loader or ("none" if packs or args.software else "fabric")
     loaders = list(LOADERS) if choice == "all" else ([] if choice == "none" else [choice])
     if args.loader_version and len(loaders) != 1:
@@ -549,7 +610,7 @@ def main() -> int:
     software = list(SOFTWARE) if args.software == "all" else ([args.software] if args.software else [])
     return asyncio.run(run(
         loaders, packs, args.minecraft, args.memory, args.pack_memory, args.keep, args.pack_update, not args.no_server_files, args.start_anyway,
-        args.loader_version, software, args.software_update, args.software_from,
+        args.loader_version, software, args.software_update, args.software_from, args.gtnh_build,
     ))
 
 

@@ -77,6 +77,10 @@ class Runtime:
     clean_exit_hint: str = ""  # what to say when it ends by itself (exit code 0) while starting
     strict_ping: bool = False  # a server-list reply only counts as "up" when it names a version (Forge answers early with none)
     fail_re: re.Pattern[str] | None = None  # the console line that says the server could not start (and will not come up)
+    # a console line that says the server waits for an answer typed into its console (Forge: "/fml confirm"), and who says what to type
+    prompt_re: re.Pattern[str] | None = None
+    on_prompt: Callable[[list[str]], Awaitable[str | None]] | None = None
+    prompt_seen: bool = False
     log: deque = field(default_factory=lambda: deque(maxlen=BACKLOG_LINES))
     seq: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -154,6 +158,8 @@ class ProcessManager:
         strict_ping: bool = False,
         clean_exit_hint: str = "",
         fail_re: re.Pattern[str] | None = None,
+        prompt_re: re.Pattern[str] | None = None,
+        on_prompt: Callable[[list[str]], Awaitable[str | None]] | None = None,
     ) -> None:
         rt = self.runtime(server_id)
         if rt.is_active:
@@ -165,6 +171,7 @@ class ProcessManager:
         rt.strict_ping = strict_ping
         rt.clean_exit_hint = clean_exit_hint
         rt.fail_re = fail_re
+        rt.prompt_re, rt.on_prompt, rt.prompt_seen = prompt_re, on_prompt, False
         self._open_logfile(rt)
         self._sys(rt, f"Starting: {' '.join(argv)}")
         creation: dict[str, Any] = {}
@@ -326,6 +333,24 @@ class ProcessManager:
                 rt.ready.set()
             elif rt.fail_re is not None and rt.state == "starting" and not rt.failed.is_set() and rt.fail_re.search(plain):
                 rt.failed.set()
+            if rt.prompt_re is not None and rt.state == "starting" and not rt.prompt_seen and rt.prompt_re.search(plain):
+                rt.prompt_seen = True
+                rt._tasks.append(asyncio.create_task(self._answer(rt), name=f"answer-{rt.server_id}"))
+
+    async def _answer(self, rt: Runtime) -> None:
+        """The server asked a question on its console: let the owner of ``on_prompt`` look at what it said and decide what to type."""
+        if rt.on_prompt is None:
+            return
+        lines = [strip_ansi(entry["m"]) for entry in list(rt.log)[-120:] if entry["s"] == "out"]
+        try:
+            answer = await rt.on_prompt(lines)
+            if answer:
+                await self._write_stdin(rt, answer)
+                self._sys(rt, f"The server asked a question on its console; the manager answered it with '{answer}'.")
+        except ProcessError:
+            pass  # the server is gone already
+        except Exception:
+            log.exception("Answering the prompt of %s failed", rt.server_id)
 
     async def _watch(self, rt: Runtime, proc: asyncio.subprocess.Process, pump: asyncio.Task) -> None:
         code = await proc.wait()
@@ -396,8 +421,9 @@ class ProcessManager:
                 except PingError:
                     pass
             if loop.time() > deadline:
+                asked = " It stopped to ask a question on its console that nobody answered (the activity list says which)." if rt.prompt_seen else ""
                 raise ProcessError(
-                    f"The server did not become ready within {int(timeout)} seconds. Check the console output"
+                    f"The server did not become ready within {int(timeout)} seconds.{asked} Check the console output"
                     f"{'; ' + rt.timeout_hint if rt.timeout_hint else '.'}"
                 )
             await self._pause(rt, pause)

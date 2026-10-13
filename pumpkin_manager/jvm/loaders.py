@@ -16,6 +16,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -95,12 +96,14 @@ async def run_process(argv: list[str], cwd: Path, on_line: Callable[[str], None]
     return code, list(tail)
 
 
-def launch_arguments(launch: dict[str, str]) -> list[str]:
-    """The ``java`` arguments that start the installed loader (after the memory options)."""
+def launch_arguments(launch: dict[str, Any]) -> list[str]:
+    """The ``java`` arguments that start the installed loader (after the memory options). ``before`` holds options that go ahead of
+    ``-jar`` (GT New Horizons starts with ``@java9args.txt`` and a Forge timeout, as its own start script does)."""
+    before = [str(arg) for arg in launch.get("before") or []]
     if launch.get("argfile"):
-        return [f"@{launch['argfile']}"]
+        return [*before, f"@{launch['argfile']}"]
     if launch.get("jar"):
-        return ["-jar", launch["jar"]]
+        return [*before, "-jar", launch["jar"]]
     raise LoaderError("This server has no launch information; reinstall the modpack.")
 
 

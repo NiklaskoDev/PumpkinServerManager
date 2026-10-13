@@ -15,13 +15,13 @@ from typing import Any
 
 from ..backups import BackupError
 from ..jobs import JobContext
-from ..mcnet import PingError, server_list_ping
+from ..mcnet import PingError, StillStartingError, server_list_ping
 from ..models import ServerRecord
 from ..servers import ServerError
 from ..updater import retry_delay_minutes
 from ..util import iso
+from . import gtnh
 from .loaders import LoaderError
-from .mojang import available_java
 from .mrpack import PackDownloadError, PackError
 from .net import BadDownloadError, DownloadError
 from .service import JavaServerService, OpenedPack
@@ -30,10 +30,14 @@ from .software import SoftwareError
 log = logging.getLogger(__name__)
 
 PREVIOUS_FIELDS = ("minecraft", "loader", "java", "launch", "pack")  # what a rollback puts back besides the files
+PACK_SOURCES = ("modrinth", "curseforge", gtnh.PROJECT)  # the places a server's modpack can be looked up again
 # A modded server can close a status request for a while after it says "Done" (hundreds of mods still finishing their start, Forge filling
 # in its status in pieces): the new version only counts as broken when it stays silent for this many tries.
 PING_ATTEMPTS = 6
 PING_PAUSE = 5.0
+# Forge 1.7.10 answers "still starting" instead of its status until the last mod has finished (GT New Horizons: about half a minute after
+# "Done", longer on a slow disk, and its quest book is loaded again after every update). That is a server that works, so it gets longer.
+STARTING_PATIENCE = 600.0
 
 
 def pending_of(rec: ServerRecord) -> dict[str, Any] | None:
@@ -83,18 +87,25 @@ class JavaUpdates:
                 raise ServerError(f"The updated server stopped by itself ({rt.last_error or rt.state}).")
             await asyncio.sleep(1)
         last: PingError | None = None
-        for attempt in range(PING_ATTEMPTS):
+        silent, starting_since = 0, None
+        while True:
             try:
                 await server_list_ping("127.0.0.1", self.svc.get(rec.id).java_port, timeout=5)
                 return
+            except StillStartingError as exc:  # it answers, and says that it is not done: patience, but not forever
+                last, silent = exc, 0
+                starting_since = loop.time() if starting_since is None else starting_since
+                if loop.time() - starting_since > STARTING_PATIENCE:
+                    raise ServerError(f"The updated server still says that it is starting, {int(STARTING_PATIENCE // 60)} minutes after it was ready.") from None
             except PingError as exc:
                 last = exc
+                silent += 1
+                if silent >= PING_ATTEMPTS:
+                    raise ServerError(f"The updated server no longer answers on its port ({last}).") from None
             rt = self.svc.pm.runtime(rec.id)
             if rt.state != "running":
                 raise ServerError(f"The updated server stopped by itself ({rt.last_error or rt.state}).")
-            if attempt + 1 < PING_ATTEMPTS:
-                await asyncio.sleep(PING_PAUSE)
-        raise ServerError(f"The updated server no longer answers on its port ({last}).")
+            await asyncio.sleep(PING_PAUSE)
 
     async def _handle_failure(
         self, rec: ServerRecord, old_spec: dict[str, Any], update_id: str, backup_row: dict[str, Any] | None,
@@ -231,12 +242,15 @@ class PackUpdater(JavaUpdates):
     # ----------------------------------------------------------------- checking
     @staticmethod
     def updatable(rec: ServerRecord) -> bool:
-        return rec.is_java and (rec.spec.get("pack") or {}).get("source") in ("modrinth", "curseforge")
+        return rec.is_java and (rec.spec.get("pack") or {}).get("source") in PACK_SOURCES
 
     async def check(self, only: ServerRecord | None = None) -> dict[str, Any]:
-        """Ask Modrinth and CurseForge whether the modpacks of the servers have a newer version and flag the servers to update."""
+        """Ask Modrinth, CurseForge and GT New Horizons' website whether the modpacks of the servers have a newer version and flag
+        the servers to update."""
         svc = self.svc
         servers = [only] if only is not None else [r for r in svc.repo.list_servers() if self.updatable(r)]
+        if only is not None and (only.spec.get("pack") or {}).get("source") == gtnh.PROJECT:
+            self.jvm.gtnh.invalidate()  # somebody asked: do not answer from the list read an hour ago
         versions: dict[str, list[dict[str, Any]]] = {}
         errors: dict[str, str] = {}
         flagged = 0
@@ -264,10 +278,12 @@ class PackUpdater(JavaUpdates):
         pack = rec.spec.get("pack") or {}
         kinds = ("release",) if pack.get("version_type", "release") == "release" else ("release", "beta", "alpha")
         newest = next((v for v in versions if v.get("type") in kinds), None)  # newest first
-        newer = (
-            newest is not None and newest["id"] != pack.get("version_id") and (newest.get("published") or "") > (pack.get("published") or "")
-            and self.svc.repo.get_kv(f"skip:{rec.id}") != newest["id"]
-        )
+        position = {v["id"]: i for i, v in enumerate(versions)}
+        if newest is not None and pack.get("version_id") in position:
+            later = position[newest["id"]] < position[pack["version_id"]]  # listed above the installed one (two versions can share a day)
+        else:
+            later = newest is not None and (newest.get("published") or "") > (pack.get("published") or "")
+        newer = newest is not None and newest["id"] != pack.get("version_id") and later and self.svc.repo.get_kv(f"skip:{rec.id}") != newest["id"]
         if not newer:
             self._store(rec, None)
             return False
@@ -301,8 +317,8 @@ class PackUpdater(JavaUpdates):
 
     async def available(self, rec: ServerRecord) -> dict[str, Any]:
         pack = rec.spec.get("pack") or {}
-        if pack.get("source") not in ("modrinth", "curseforge"):
-            raise ServerError("Only modpacks from Modrinth or CurseForge have versions to choose from.", 409)
+        if pack.get("source") not in PACK_SOURCES:
+            raise ServerError("Only modpacks from Modrinth, CurseForge or GT New Horizons have versions to choose from.", 409)
         try:
             versions = await self.jvm.pack_versions(pack["source"], pack["project"], str(pack.get("title") or ""))
         except DownloadError as exc:
@@ -312,8 +328,8 @@ class PackUpdater(JavaUpdates):
     # ----------------------------------------------------------------- applying
     def submit_update(self, rec: ServerRecord, version_id: str | None = None, *, trigger: str = "manual") -> dict[str, Any]:
         pack = rec.spec.get("pack") or {}
-        if pack.get("source") not in ("modrinth", "curseforge"):
-            raise ServerError("Only modpacks from Modrinth or CurseForge can be updated from here.", 409)
+        if pack.get("source") not in PACK_SOURCES:
+            raise ServerError("Only modpacks from Modrinth, CurseForge or GT New Horizons can be updated from here.", 409)
         target = version_id or (pack.get("pending") or {}).get("id")
         if not target:
             raise ServerError("There is no newer version to install. Check for updates first.", 409)
@@ -363,13 +379,17 @@ class PackUpdater(JavaUpdates):
                     f"automatic downloads: {', '.join(f.name or f.path for f in missing[:6])}. Add them to the server's mods folder (the "
                     "Modpack tab links to each), then update again."
                 )
-            major = available_java(await jvm.mojang.java_major(index.minecraft))
+            bundled = opened.info.get("source") == gtnh.PROJECT  # the server files bring their own loader
+            new_launch = gtnh.launch_of(index.archive, opened.info["variant"]) if bundled else None  # fails here, before anything changes
+            major = await jvm.java_for_pack(index, opened.info)
             java = await jvm.runtimes.ensure(major, jvm._java_progress(ctx, major))
             ctx.step("Downloading the new mods (the server keeps running meanwhile)")
             await jvm.packs.prefetch(index, lambda fraction, message: ctx.progress(0.1 + 0.4 * fraction, message))
-            loader_changed = (index.loader.kind, index.loader.version, index.minecraft) != (
+            loader_changed = not bundled and (index.loader.kind, index.loader.version, index.minecraft) != (
                 (old_spec.get("loader") or {}).get("kind"), (old_spec.get("loader") or {}).get("version"), old_spec.get("minecraft"),
             )
+            if bundled and (warning := gtnh.jump_warning(str(old_pack.get("version_number") or ""), index.version_id)):
+                ctx.warn(warning)
             if index.minecraft != old_spec.get("minecraft"):
                 ctx.warn(
                     f"This update changes Minecraft from {old_spec.get('minecraft')} to {index.minecraft}. The world is converted when "
@@ -409,13 +429,25 @@ class PackUpdater(JavaUpdates):
                     "These mods were added by hand for the old version, and the new version does not use them under that name. If they are "
                     "out of date, delete them from the mods folder: " + ", ".join(gone[:8])
                 )
+            if bundled and gtnh.SERVERUTILITIES_CONFIG in {*report["added"], *report["updated"], *report.get("replaced", [])}:
+                if gtnh.switch_off_own_backups(directory):  # the new version of the file is the pack's, with its own backups on again
+                    ctx.step("Switched off the backups of ServerUtilities again: the manager looks after the backups")
+            if report.get("replaced"):
+                ctx.warn(
+                    f"{len(report['replaced'])} configuration and library file(s) that differed from what the old version shipped were "
+                    "replaced by the new version's, as the pack's own update guide says (the mods rewrite many of their configuration files "
+                    "themselves). The backup made before the update has the old files: " + ", ".join(report["replaced"][:6])
+                    + ("…" if len(report["replaced"]) > 6 else "")
+                )
             if report["kept_configs"]:
                 ctx.warn(
                     f"{len(report['kept_configs'])} configuration file(s) you changed were kept; the modpack's new version of each is "
                     "saved next to it with the ending .pack-new: " + ", ".join(report["kept_configs"][:8])
                 )
             launch = old_spec.get("launch")
-            if loader_changed:
+            if bundled:
+                launch = new_launch
+            elif loader_changed:
                 ctx.step(f"Installing {index.loader.label}")
                 launch = await jvm.loaders.install(index.loader, directory, java.java, lambda message: ctx.progress(None, message))
             fresh = {k: v for k, v in old_pack.items() if k != "pending"}
@@ -432,7 +464,21 @@ class PackUpdater(JavaUpdates):
             # 5. Bring it back up and make sure it stays up.
             if was_running:
                 ctx.step("Starting the updated server (a big modpack takes a few minutes)")
-                await svc._do_start(svc.get(rec.id), ctx)
+                if index.archive is not None:  # the author's own server files: what the new version removed from the world is meant to go
+                    jvm.confirm_missing.add(rec.id)
+                    jvm.prompts.pop(rec.id, None)
+                try:
+                    await svc._do_start(svc.get(rec.id), ctx)
+                finally:
+                    jvm.confirm_missing.discard(rec.id)
+                if asked := jvm.prompts.pop(rec.id, None):
+                    if asked["answered"]:
+                        shown = ", ".join(asked["names"][:5]) + ("…" if asked["count"] and asked["count"] > 5 else "")
+                        ctx.warn(
+                            f"The new version removed {asked['count']} block(s) or item(s) that the world still had ({shown}): the server asked "
+                            "for a confirmation at startup and the manager gave it, as the pack's own update guide does. Forge made a backup of the "
+                            "world first, and the backup made before the update is the way back."
+                        )
                 await self._watch_stability(rec, ctx)
         except asyncio.CancelledError:
             raise

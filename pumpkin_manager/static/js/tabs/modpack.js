@@ -8,7 +8,8 @@ import { busy, confirmDialog, field, fmtMemoryMb, jobDialog, notifyError, packIc
 const LOADERS = { fabric: "Fabric", forge: "Forge", neoforge: "NeoForge", quilt: "Quilt" };
 const STATUS = { success: "success", rolled_back: "warning", failed: "error", interrupted: "warning", running: "info" };
 const STATUS_LABEL = { success: "done", rolled_back: "rolled back", failed: "failed", interrupted: "interrupted", running: "running" };
-const SOURCE_NAMES = { modrinth: "Modrinth", curseforge: "CurseForge" };
+const SOURCE_NAMES = { modrinth: "Modrinth", curseforge: "CurseForge", gtnh: "GT New Horizons" };
+const BUILD_NAMES = { modern: "Java 17 and newer", legacy: "Java 8" };
 const versionLabel = (v, current) => `${v.number}${v.type !== "release" ? ` (${v.type})` : ""} · Minecraft ${v.minecraft.join(", ")} · ${v.loaders.map((l) => LOADERS[l] || l).join(", ")}${v.server_pack ? " · server files" : ""}${v.id === current ? " · installed" : ""}`;
 // The address of a mod's page comes from CurseForge's API: only a page on CurseForge itself becomes a link.
 const curseforgePage = (url) => (/^https:\/\/(www\.)?curseforge\.com\//.test(url || "") ? url : null);
@@ -40,13 +41,16 @@ export function render({ id, getServer }) {
     const link = (url, label) => h("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, `${label} `, icon("external", "sm"));
     const source = m.source === "modrinth" && m.slug ? link(`https://modrinth.com/modpack/${encodeURIComponent(m.slug)}`, "Modrinth")
       : m.source === "curseforge" ? (m.slug ? link(`https://www.curseforge.com/minecraft/modpacks/${encodeURIComponent(m.slug)}`, "CurseForge") : "CurseForge")
-        : (m.source === "upload" ? "an uploaded modpack file" : "unknown");
+        : m.source === "gtnh" ? link("https://www.gtnewhorizons.com/downloads/", "gtnewhorizons.com")
+          : (m.source === "upload" ? "an uploaded modpack file" : "unknown");
     return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Modpack")),
+      m.notice ? h("div", { class: "notice danger" }, icon("alert", "sm"), m.notice) : null,
       h("div", { class: "row" }, packIcon(m.icon, 52), h("div", { class: "grow" }, h("strong", { class: "big" }, m.title || "Modpack"),
         h("div", { class: "muted" }, m.version_number ? `Version ${m.version_number}` : ""))),
       h("dl", { class: "kv" },
         h("dt", {}, "Source"), h("dd", {}, source),
-        m.server_pack ? h("dt", {}, "Installed from") : null, m.server_pack ? h("dd", {}, "the pack author's own server files") : null,
+        m.server_pack ? h("dt", {}, "Installed from") : null,
+        m.server_pack ? h("dd", {}, m.source === "gtnh" ? `the pack's official server files (${BUILD_NAMES[m.variant] || "Java"} build)` : "the pack author's own server files") : null,
         h("dt", {}, "Minecraft"), h("dd", {}, m.minecraft || "–"),
         h("dt", {}, "Mod loader"), h("dd", {}, m.loader?.label || "–"),
         h("dt", {}, "Mods"), h("dd", {}, `${info.mod_count}`),
@@ -127,7 +131,9 @@ export function render({ id, getServer }) {
         title: `Update to ${label}?`, confirmLabel: "Back up and update",
         message: h("div", { class: "stack-sm" },
           h("p", {}, "The server is stopped, a verified backup is made, then the mods and configuration are switched and the server starts again. If the new version does not start, the backup is restored automatically."),
-          h("p", {}, "Files you changed by hand are kept (a configuration file gets the modpack's new version saved next to it)."),
+          m.source === "gtnh"
+            ? h("p", {}, "GT New Horizons replaces its configuration with the new version's, as its own update guide says; the backup made first has your old files. Mods you added yourself stay, and so do the players' maps. Every player's client has to be updated to the same version.")
+            : h("p", {}, "Files you changed by hand are kept (a configuration file gets the modpack's new version saved next to it)."),
           changes ? h("p", { class: "field-error" }, `This changes Minecraft from ${m.minecraft} to ${minecraft.join(", ")}.`) : null,
           s.state === "running" ? h("p", { class: "muted" }, "Players who are online are told 30 seconds before the restart.") : null),
       });

@@ -16,6 +16,11 @@ class PingError(Exception):
     pass
 
 
+class StillStartingError(PingError):
+    """The server answered, but with a message that it is still starting instead of its status: Forge 1.7.10 does that until every
+    mod has finished starting (GT New Horizons goes on for half a minute after its "Done" line). Not the same as a silent server."""
+
+
 def _encode_varint(value: int) -> bytes:
     value &= 0xFFFFFFFF
     out = bytearray()
@@ -97,7 +102,7 @@ async def server_list_ping(host: str, port: int, timeout: float = 3.0) -> dict[s
         raise PingError(str(exc) or exc.__class__.__name__) from exc
 
     if not isinstance(payload, dict):  # Forge 1.7.10 answers with a plain message ("Server is still starting!...") while it loads
-        raise PingError(f"the server sent a message instead of its status: {str(payload)[:100]}")
+        raise StillStartingError(f"the server sent a message instead of its status: {str(payload)[:100]}")
     players = payload.get("players") if isinstance(payload.get("players"), dict) else {}
     version = payload.get("version") if isinstance(payload.get("version"), dict) else {}
     return {

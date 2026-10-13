@@ -28,6 +28,7 @@ from .errors import UserError
 from .events import EventBus
 from .jobs import JobService
 from .jvm.curseforge import CurseForgeClient
+from .jvm.gtnh import GtnhCatalog
 from .jvm.loaders import LoaderInstaller, Runner, run_process
 from .jvm.modrinth import ModrinthClient
 from .jvm.mojang import MojangMeta
@@ -150,9 +151,10 @@ class AppContext:
         self.packs = PackInstaller(self.java_http, self.mod_cache, headers_for=self.curseforge.download_headers)
         self.software = SoftwareCatalog(self.java_http, self.mojang)
         self.software_installer = SoftwareInstaller(self.java_http, self.loader_installer, self.modrinth)
+        self.gtnh = GtnhCatalog(self.java_http)
         self.servers.jvm = JavaServerService(
             self.servers, self.runtimes, self.mojang, self.modrinth, self.loader_installer, self.packs, self.settings.cache_dir / "uploads",
-            self.curseforge, self.software, self.software_installer,
+            self.curseforge, self.software, self.software_installer, self.gtnh,
         )
 
     # ----------------------------------------------------------------- settings

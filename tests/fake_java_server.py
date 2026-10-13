@@ -26,6 +26,8 @@ ARGV = sys.argv[2:]
 players: list[str] = []
 KEEP_ALIVE: list[object] = []
 stop_event: asyncio.Event
+fml_answer: asyncio.Event  # set when somebody types "/fml confirm" or "/fml cancel" (Forge's question about missing blocks)
+fml_choice: list[str] = []
 loop: asyncio.AbstractEventLoop
 
 
@@ -137,6 +139,9 @@ def handle_command(line: str) -> None:
         if BEHAVIOR.get("hang_on_stop"):
             return
         stop_event.set()
+    elif cmd == "/fml" and args[:1] in (["confirm"], ["cancel"]):  # Forge's startup query reads exactly these, slash included
+        fml_choice.append(args[0])
+        fml_answer.set()
     elif cmd == "save-all":
         old = bool(BEHAVIOR.get("old_save_messages"))  # Minecraft 1.7 words these differently
         log("Saving..." if old else "Saving the game (this may take a moment!)")
@@ -209,10 +214,16 @@ def eula_accepted() -> bool:
     return any(line.strip().lower() == "eula=true" for line in path.read_text(encoding="utf-8").splitlines())
 
 
+def end_loading() -> None:
+    global loading
+    loading = False
+
+
 async def main() -> int:
-    global stop_event, loop, loading
+    global stop_event, fml_answer, loop, loading
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
+    fml_answer = asyncio.Event()
     Path("fake-java.json").write_text(json.dumps({"argv": ARGV, "java_home": os.environ.get("JAVA_HOME"), "path": os.environ.get("PATH", ""), "cwd": os.getcwd()}))
     log("Starting minecraft server version " + str(BEHAVIOR.get("minecraft", "1.21.1")), thread="main")
     await asyncio.sleep(float(BEHAVIOR.get("startup_delay", 0.05)))
@@ -290,6 +301,22 @@ async def main() -> int:
         KEEP_ALIVE.append(await asyncio.start_server(slp_client, "0.0.0.0", port))
     threading.Thread(target=stdin_reader, daemon=True).start()
     log(f"Starting Minecraft server on *:{port}")  # answers_without_done: from here on it answers, and never says Done
+    if BEHAVIOR.get("fml_prompt") and (not BEHAVIOR.get("fml_prompt_if_present") or Path(BEHAVIOR["fml_prompt_if_present"]).exists()):
+        # Forge 1.7.10 and 1.12: blocks of the world are gone from the mods (here: when the file is there that stands for the new version's
+        # change); it waits for "/fml confirm" or "/fml cancel"
+        missing = int(BEHAVIOR["fml_prompt"])
+        log("Forge Mod Loader detected missing blocks/items.", "WARN")
+        for text in ("", f"There are {missing} missing blocks and items in this save.", "If you continue the missing blocks/items will get removed.",
+                     "A world backup will be automatically created in your saves directory.", "", "Missing Blocks/Items:",
+                     *[f"witchery:block{i}" for i in range(min(missing, 3))], "", "",
+                     "Run the command /fml confirm or or /fml cancel to proceed.",
+                     "Alternatively start the server with -Dfml.queryResult=confirm or -Dfml.queryResult=cancel to preselect the answer."):
+            print(text, flush=True)
+        await fml_answer.wait()
+        if fml_choice[-1] != "confirm":
+            log("The server was told to cancel", "ERROR")
+            return 1
+        log("Removing the missing blocks and items")
     if BEHAVIOR.get("early_empty_status"):
         loading = True
         log('Preparing level "world"')
@@ -300,6 +327,9 @@ async def main() -> int:
         await asyncio.sleep(float(BEHAVIOR["early_full_status"]))
     if not BEHAVIOR.get("no_done_line") and not BEHAVIOR.get("answers_without_done"):
         log('Done (1.234s)! For help, type "help"')
+        if BEHAVIOR.get("still_starting_after_done"):  # GT New Horizons: its mods go on (the quest book) for half a minute after "Done"
+            loading = True
+            loop.call_later(float(BEHAVIOR["still_starting_after_done"]), end_loading)
     await stop_event.wait()
     log("Stopping the server", thread="Server thread")
     log("Saving worlds")

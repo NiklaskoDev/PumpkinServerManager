@@ -318,7 +318,7 @@ async def test_an_uploaded_curseforge_pack_cannot_be_updated_from_here(cfjvm):
     }))
     assert row["status"] == "success", row["message"]
     rec = next(s for s in ctx.repo.list_servers() if s.name == "Uploaded")
-    with pytest.raises(ServerError, match="Only modpacks from Modrinth or CurseForge"):
+    with pytest.raises(ServerError, match="Only modpacks from Modrinth, CurseForge or GT New Horizons"):
         ctx.pack_updates.submit_update(rec, "5100")
     assert (await ctx.pack_updates.check())["servers_with_updates"] == 0
 
