@@ -389,7 +389,7 @@ class BackupService:
 
         consistent = True
         saved_off = False
-        if rt.state == "running":
+        if rt.state == "running" and not rec.is_proxy:  # a proxy has no world to save: its files are read as they are
             ctx.step("Flushing the world to disk (hot backup)")
             consistent, saved_off = await self._quiesce(rec, ctx)
 

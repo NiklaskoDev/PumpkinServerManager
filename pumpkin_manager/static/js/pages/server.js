@@ -38,7 +38,8 @@ export async function render([id, tabId]) {
     notifyError(err);
   }
   const getServer = () => state.servers.get(id);
-  const tabs = TABS.filter((t) => can(getServer(), t.perm));
+  // a proxy (BungeeCord) has no whitelist, operators or bans of its own: nothing to show in the players tab
+  const tabs = TABS.filter((t) => can(getServer(), t.perm) && !(t.id === "players" && getServer().proxy));
   const tab = tabs.find((t) => t.id === tabId) || tabs[0];
 
   const title = h("h1", { class: "truncate" });
@@ -62,7 +63,7 @@ export async function render([id, tabId]) {
     }
   }
 
-  // A Java server's version tab is about its modpack, or about its software when it runs Vanilla, Paper or Fabric on its own.
+  // A Java server's version tab is about its modpack, or about its software when it runs Vanilla, Paper, Fabric, Spigot or BungeeCord on its own.
   const versionTabOf = (server) => (server.engine !== "java" ? { label: "Version", mod: versionTab } : server.software ? { label: "Version", mod: softwareTab } : { label: "Modpack", mod: modpackTab });
   const tabsNav = h("div", { class: "tabs", role: "tablist" }, tabs.map((t) =>
     h("a", { href: `#/server/${id}/${t.id}`, role: "tab", class: t.id === tab.id ? "active" : "", "aria-selected": String(t.id === tab.id) }, icon(t.icon, "sm"),

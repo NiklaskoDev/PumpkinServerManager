@@ -65,7 +65,9 @@ export function render({ id, getServer }) {
         body.appendChild(h("div", { class: "section-title" }, group));
         body.appendChild(h("div", { class: "form-grid" }, fields.map((f) => h("div", { class: f.type === "string" && f.key === "motd" ? "span-2" : "" }, control(f)))));
       }
-      body.appendChild(h("div", {}, h("button", { class: "btn ghost sm", onclick: () => { showAdvanced = !showAdvanced; draw(); } }, icon(showAdvanced ? "chevronDown" : "chevronRight", "sm"), showAdvanced ? "Hide advanced settings" : "Show advanced settings")));
+      if (cfg.schema.some((f) => f.advanced)) {
+        body.appendChild(h("div", {}, h("button", { class: "btn ghost sm", onclick: () => { showAdvanced = !showAdvanced; draw(); } }, icon(showAdvanced ? "chevronDown" : "chevronRight", "sm"), showAdvanced ? "Hide advanced settings" : "Show advanced settings")));
+      }
     }
 
     saveBar.append(icon("info", "sm"), h("span", { class: "count grow" }, ""),
@@ -89,7 +91,7 @@ export function render({ id, getServer }) {
         }
       } }, icon("save", "sm"), "Save changes"));
     draw();
-    return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Game settings")),
+    return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, cfg.title || "Game settings")),
       cfg.error ? h("div", { class: "notice danger" }, icon("alert", "sm"), cfg.error) : null, body, saveBar);
   }
 
@@ -133,7 +135,7 @@ export function render({ id, getServer }) {
     return h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Java")),
       h("div", { class: "form-grid" },
         field("Memory for the server (GiB)", h("input", { class: "input", type: "number", min: "1", max: "1024", step: "0.5", value: String(gib), oninput: (e) => { gib = Number(e.target.value) || 0; } }),
-          `Now ${fmtMemoryMb(s.java.memory_mb)}. Java ${s.java.major} is used for Minecraft ${(s.modpack || s.software)?.minecraft || ""}.`),
+          `Now ${fmtMemoryMb(s.java.memory_mb)}. Java ${s.java.major} is used${(s.modpack || s.software)?.minecraft ? ` for Minecraft ${(s.modpack || s.software).minecraft}` : ""}.`),
         field("Extra Java options", h("input", { class: "input", value: options, placeholder: "for example -Dfml.readTimeout=90", spellcheck: "false", maxlength: "2000", oninput: (e) => { options = e.target.value; } }),
           "Optional. Only options that start with - are accepted; they are added to the command that starts Java.")),
       h("div", {}, h("button", { class: "btn primary sm", onclick: async () => {
@@ -147,7 +149,8 @@ export function render({ id, getServer }) {
   // ---- raw config ----------------------------------------------------------------------------------------
   function buildRaw() {
     const java = getServer().engine === "java";
-    const file = java ? "server.properties" : "pumpkin.toml";
+    const proxy = !!getServer().proxy; // BungeeCord keeps its settings in config.yml
+    const file = proxy ? "config.yml" : java ? "server.properties" : "pumpkin.toml";
     const area = h("textarea", { class: "input", rows: "18", spellcheck: "false", "aria-label": file });
     const info = h("div", {});
     const details = h("details", { ontoggle: async (e) => {
@@ -161,9 +164,11 @@ export function render({ id, getServer }) {
     } },
       h("summary", {}, `Advanced: edit ${file} directly`),
       h("div", { class: "stack-sm", style: { marginTop: "12px" } },
-        java
-          ? h("div", { class: "notice" }, icon("info", "sm"), "The server rewrites this file when it starts. Settings that are not listed above (such as spawn-monsters or pause-when-empty-seconds) can be changed here.")
-          : h("div", { class: "notice warning" }, icon("alert", "sm"), "If Pumpkin cannot read this file it silently falls back to default settings. The dashboard checks the syntax before saving, but not every value."),
+        proxy
+          ? h("div", { class: "notice" }, icon("info", "sm"), "BungeeCord rewrites this file when it starts. The servers it sends players to (under servers), who may use which command, and everything else that is not listed above are changed here. It is YAML: the indentation matters, and a mistake keeps the proxy from starting (the backup of the file before your change is config.yml.manager-bak).")
+          : java
+            ? h("div", { class: "notice" }, icon("info", "sm"), "The server rewrites this file when it starts. Settings that are not listed above (such as spawn-monsters or pause-when-empty-seconds) can be changed here.")
+            : h("div", { class: "notice warning" }, icon("alert", "sm"), "If Pumpkin cannot read this file it silently falls back to default settings. The dashboard checks the syntax before saving, but not every value."),
         info, area,
         h("div", {}, h("button", { class: "btn primary sm", onclick: async () => {
           try {

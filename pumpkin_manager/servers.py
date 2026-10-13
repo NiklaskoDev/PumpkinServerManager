@@ -139,6 +139,7 @@ class ServerService:
             "exit_code": rt.exit_code,
             "last_error": rt.last_error,
             "engine": rec.engine,
+            "proxy": rec.is_proxy,
             "modpack": None,
             "software": None,
             "java": None,
@@ -349,6 +350,7 @@ class ServerService:
             return
         directory = self.server_dir(rec.id)
         ready_re = timeout_hint = fail_re = prompt_re = on_prompt = None
+        stop_command = "stop"
         if rec.is_java:
             if self.jvm is None:
                 raise ServerError("Java servers are not available in this installation.")
@@ -356,7 +358,7 @@ class ServerService:
                 raise ServerError("The server folder is missing.")
             launch = await self.jvm.prepare_start(rec, ctx)
             argv, env, label, ready_re, timeout_hint, fail_re = launch.argv, launch.env, launch.label, launch.ready_re, JAVA_START_HINT, launch.fail_re
-            prompt_re, on_prompt = launch.prompt_re, launch.on_prompt
+            prompt_re, on_prompt, stop_command = launch.prompt_re, launch.on_prompt, launch.stop_command
         else:
             build = self.repo.get_build(rec.build_id)
             if build is None:
@@ -382,6 +384,7 @@ class ServerService:
                     rec.id, argv, directory, env, ready_port=rec.java_port, ready_timeout=rec.policy.start_timeout,
                     ready_re=ready_re, timeout_hint=timeout_hint, strict_ping=rec.is_java, fail_re=fail_re,
                     clean_exit_hint=JAVA_CLEAN_EXIT_HINT if rec.is_java else "", prompt_re=prompt_re, on_prompt=on_prompt,
+                    stop_command=stop_command,
                 )
                 break
             except ProcessError as exc:

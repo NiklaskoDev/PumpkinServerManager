@@ -15,14 +15,18 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 
 BEHAVIOR = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
 ARGV = sys.argv[2:]
+JAR = Path(ARGV[ARGV.index("-jar") + 1]).name if "-jar" in ARGV else ""
+PROXY = JAR == "BungeeCord.jar"  # a proxy: no EULA and no world, config.yml instead of server.properties, "end" instead of "stop"
 players: list[str] = []
 KEEP_ALIVE: list[object] = []
 stop_event: asyncio.Event
@@ -47,6 +51,18 @@ def properties() -> dict[str, str]:
 
 
 PROPS = properties()
+
+
+def proxy_settings() -> dict[str, str]:
+    """What BungeeCord reads from config.yml (the first listener): where it listens, what the server list says."""
+    path = Path("config.yml")
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    found = {}
+    for key in ("host", "motd", "max_players"):
+        match = re.search(rf"^(?:- |  )?{key}:[ \t]*(?:'((?:[^']|'')*)'|(\S.*?))[ \t]*$", text, re.MULTILINE)
+        if match:
+            found[key] = (match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2)) or ""
+    return found
 
 
 def offline_uuid(name: str) -> str:
@@ -92,6 +108,13 @@ loading = False  # Forge listens long before the world is loaded and answers pin
 
 
 def status_json() -> str:
+    if PROXY:
+        settings = proxy_settings()
+        return json.dumps({
+            "version": {"name": "BungeeCord 1.8.x-26.x", "protocol": 777},
+            "players": {"max": int(settings.get("max_players", "1")), "online": len(players)},
+            "description": {"text": settings.get("motd", "&1Another Bungee server")},
+        })
     if loading and BEHAVIOR.get("loading_message"):  # Forge 1.7.10 answers with a bare JSON string, not a status object
         return json.dumps("Server is still starting! Please wait before reconnecting.")
     if loading:
@@ -128,7 +151,31 @@ async def slp_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
         writer.close()
 
 
+def handle_proxy_command(line: str) -> None:
+    """BungeeCord's console: it knows ``end`` (not ``stop``), ``alert``, ``glist`` and the like; anything else is "Command not found"."""
+    parts = line.strip().split()
+    if not parts:
+        return
+    cmd, args = parts[0], parts[1:]
+    if cmd == "end":
+        if BEHAVIOR.get("hang_on_stop"):
+            return
+        stop_event.set()
+    elif cmd == "alert":
+        print(f"{time.strftime('%H:%M:%S')} [INFO] [Alert] {' '.join(args)}", flush=True)
+    elif cmd == "glist":
+        print(f"{time.strftime('%H:%M:%S')} [INFO] Total players online: {len(players)}", flush=True)
+    elif cmd == "fakejoin" and args:
+        players.append(args[0])
+    elif cmd == "fakeleave" and args and args[0] in players:
+        players.remove(args[0])
+    else:
+        print(f"{time.strftime('%H:%M:%S')} [INFO] Command not found", flush=True)
+
+
 def handle_command(line: str) -> None:
+    if PROXY:
+        return handle_proxy_command(line)
     parts = line.strip().split()
     if not parts:
         return
@@ -219,12 +266,55 @@ def end_loading() -> None:
     loading = False
 
 
+def stamp_line(level: str, text: str) -> None:
+    print(f"{time.strftime('%H:%M:%S')} [{level}] {text}", flush=True)
+
+
+async def proxy_main() -> int:
+    """BungeeCord: no EULA, no world. It reads config.yml (and, with no server in it, dies with an exception but stays alive), says
+    "Listening on", answers the server-list ping, and ends on ``end``."""
+    await asyncio.sleep(float(BEHAVIOR.get("startup_delay", 0.05)))
+    config = Path("config.yml")
+    if not config.exists():  # what BungeeCord does: write its own, on its own port
+        config.write_text("listeners:\n- host: 0.0.0.0:25577\n  motd: '&1Another Bungee server'\n  max_players: 1\nservers:\n  lobby:\n    address: localhost:25565\n", encoding="utf-8")
+    text = config.read_text(encoding="utf-8")
+    build = "unknown"
+    if Path(JAR).is_file():
+        with zipfile.ZipFile(JAR) as jar:
+            names = jar.namelist()
+            build = str(json.loads(jar.read("bungee.json"))["build"]) if "bungee.json" in names else build
+            if BEHAVIOR.get("crash_if_jar_contains") and "BROKEN" in names:
+                print('Exception in thread "main" java.lang.UnsupportedClassVersionError: simulated broken build of BungeeCord', flush=True)
+                return 1
+    if BEHAVIOR.get("crash_on_start"):
+        print('Exception in thread "main" java.lang.IllegalStateException: simulated crash', flush=True)
+        return 1
+    if re.search(r"^servers:\s*\{\}\s*$", text, re.MULTILINE) or not re.search(r"^servers:\s*$", text, re.MULTILINE):
+        stamp_line("SEVERE", 'Exception in thread "main"')
+        stamp_line("SEVERE", "java.lang.IllegalArgumentException: No servers defined")
+        await asyncio.sleep(3600)  # the real one stays alive doing nothing
+        return 1
+    stamp_line("INFO", f"Enabled BungeeCord version git:BungeeCord-Bootstrap:26.1-R0.1-SNAPSHOT:c2f28c7:{build}")
+    host = proxy_settings().get("host", "0.0.0.0:25577")
+    port = int(host.rsplit(":", 1)[-1])
+    Path("modules").mkdir(exist_ok=True)
+    KEEP_ALIVE.append(await asyncio.start_server(slp_client, "0.0.0.0", port))
+    threading.Thread(target=stdin_reader, daemon=True).start()
+    stamp_line("INFO", f"Listening on /0.0.0.0:{port}")
+    await stop_event.wait()
+    stamp_line("INFO", "Closing listener")
+    stamp_line("INFO", "Thank you and goodbye")
+    return 0
+
+
 async def main() -> int:
     global stop_event, fml_answer, loop, loading
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     fml_answer = asyncio.Event()
     Path("fake-java.json").write_text(json.dumps({"argv": ARGV, "java_home": os.environ.get("JAVA_HOME"), "path": os.environ.get("PATH", ""), "cwd": os.getcwd()}))
+    if PROXY:
+        return await proxy_main()
     log("Starting minecraft server version " + str(BEHAVIOR.get("minecraft", "1.21.1")), thread="main")
     await asyncio.sleep(float(BEHAVIOR.get("startup_delay", 0.05)))
     if not eula_accepted():

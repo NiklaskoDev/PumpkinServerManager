@@ -96,6 +96,18 @@ export async function render() {
           } }, icon("trash", "sm")))))))) : h("p", { class: "muted", style: { padding: "0 18px 14px" } }, "No Java downloaded yet."),
       missing.length ? h("div", { class: "card-section row" }, h("span", { class: "muted small" }, "Download in advance:"),
         ...missing.map((major) => h("button", { class: "btn sm", onclick: () => jobDialog(post(`/api/java/runtimes/${major}`), { title: `Downloading Java ${major}`, successToast: "Downloaded" }).then(drawJava) }, icon("download", "sm"), `Java ${major}`))) : null,
+      // the kits that compile Spigot: only a build uses one, so they can go whenever no build runs
+      info.jdks?.length ? h("div", {},
+        h("div", { class: "card-section" }, h("div", { class: "row" }, h("h3", { class: "grow" }, "Java development kits"), h("span", { class: "muted small" }, `${fmtBytes(info.jdk_disk_bytes)} on disk`)),
+          h("p", { class: "muted small" }, "Spigot is made with these: a development kit has the compiler that a runtime lacks. One is only used while a Spigot build runs, and it is downloaded again when the next build needs it.")),
+        h("div", { class: "table-wrap" }, h("table", { class: "table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Java"), h("th", {}, "Build"), h("th", {}, "Size"), h("th", {}, ""))),
+          h("tbody", {}, info.jdks.map((j) => h("tr", {},
+            h("td", {}, h("strong", {}, `Java ${j.major}`)), h("td", { class: "mono small" }, j.release || "–"), h("td", { class: "nowrap" }, fmtBytes(j.size)),
+            h("td", { class: "actions-cell" }, h("button", { class: "btn ghost sm icon-only", title: "Remove from disk", "aria-label": `Remove the Java ${j.major} development kit`, onclick: async () => {
+              if (!(await confirmDialog({ title: `Remove the Java ${j.major} development kit?`, message: "It is downloaded again (about 200 MB) when the next Spigot build needs it.", confirmLabel: "Remove", danger: true }))) return;
+              try { await del(`/api/java/jdks/${j.major}`); await drawJava(); } catch (err) { notifyError(err); }
+            } }, icon("trash", "sm"))))))))) : null,
       info.mods_cache_bytes ? h("div", { class: "card-section muted small" }, `Mods that were downloaded for modpacks stay in a shared cache (${fmtBytes(info.mods_cache_bytes)}), so a mod that several servers or versions use is fetched only once.`) : null));
   }
 

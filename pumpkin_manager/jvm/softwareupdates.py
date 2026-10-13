@@ -1,12 +1,12 @@
-"""Updating a server that runs Vanilla, Paper or Fabric: finding newer builds, switching to another version, going back.
+"""Updating a server that runs Vanilla, Paper, Fabric, Spigot or BungeeCord: finding newer builds, switching to another version, going back.
 
 The order is the same as for modpacks and Pumpkin: fetch everything while the server keeps running, stop it, make a verified backup,
 switch the files, start it and watch it, and if it does not come up restore the backup.
 
-Two kinds of news are told apart. A newer *build* of the Minecraft version the server runs (a Paper build, a Fabric loader) is a small
-step that plugins and mods are made for, so it can be installed automatically. A newer *Minecraft version* converts the world and
+Two kinds of news are told apart. A newer *build* of the Minecraft version the server runs (a Paper or Spigot build, a Fabric loader) is a
+small step that plugins and mods are made for, so it can be installed automatically. A newer *Minecraft version* converts the world and
 breaks plugins and mods until their makers catch up, so it is only ever offered, never installed by itself. Vanilla has no builds: a
-newer release is its update, and it too waits for a person.
+newer release is its update, and it too waits for a person. BungeeCord has only builds (it is a proxy: no world, no Minecraft version).
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from ..models import ServerRecord, software_label, software_tag
 from ..servers import ServerError
 from ..updater import retry_delay_minutes
 from ..util import iso, parse_iso, utcnow
-from .mojang import available_java
 from .net import DownloadError
 from .packupdates import JavaUpdates
 from .service import JavaServerService
@@ -93,7 +92,7 @@ class SoftwareUpdater(JavaUpdates):
     def _software(self, rec: ServerRecord) -> dict[str, Any]:
         software = software_of(rec)
         if software is None:
-            raise ServerError("This server does not run Vanilla, Paper or Fabric that the manager installed.", 404)
+            raise ServerError("This server does not run server software that the manager installed.", 404)
         return software
 
     # ----------------------------------------------------------------------------------------------- checking
@@ -149,8 +148,10 @@ class SoftwareUpdater(JavaUpdates):
     def _build_is_newer(kind: str, candidate: str, current: str) -> bool:
         if not current:
             return True
-        if kind == "paper":
+        if kind in ("paper", "bungeecord"):
             return candidate.isdigit() and current.isdigit() and int(candidate) > int(current)
+        if kind == "spigot":
+            return candidate != current  # SpigotMC names a build with a number and sometimes a letter, and offers only the newest one
         return version_key(candidate) > version_key(current)
 
     @staticmethod
@@ -244,13 +245,16 @@ class SoftwareUpdater(JavaUpdates):
             if build.kind != old["kind"]:
                 raise ServerError("The software of a server cannot be changed by an update. Create a new server instead.")
             options = await self.catalog.options(build.kind, build.minecraft)
-            major = available_java(max(await jvm.mojang.java_major(build.minecraft), options.java_minimum or 0))
+            major = await jvm.java_for_software(build, options)
             java = await jvm.runtimes.ensure(major, jvm._java_progress(ctx, major))
             staging.mkdir(parents=True)
-            ctx.step(f"Downloading {build.label} (the server keeps running meanwhile)")
+            if build.kind == "spigot":
+                ctx.step(f"Building {build.label} (the server keeps running meanwhile; this takes five to fifteen minutes)")
+            else:
+                ctx.step(f"Downloading {build.label} (the server keeps running meanwhile)")
             launch = await self.installer.fetch(
-                build, staging, java.java, lambda text: ctx.progress(None, text),
-                lambda done, total: ctx.progress(0.1 + 0.4 * (done / total if total else 0)),
+                build, staging, java.java, lambda text: ctx.progress(None, text), jvm.fetch_progress(ctx, build, 0.1, 0.4),
+                java_major=major, jdk_progress=jvm._java_progress(ctx, major, kit=True),
             )
             minecraft_changed = build.minecraft != old["minecraft"]
             api_plan = await self._plan_fabric_api(old, build, directory, staging, minecraft_changed, ctx) if build.kind == "fabric" else None
@@ -265,7 +269,8 @@ class SoftwareUpdater(JavaUpdates):
             # 2. Tell players what is about to happen, then stop gracefully so the world is saved.
             if rt.state == "running" and announce_seconds > 0 and rt.players_online > 0:
                 ctx.step(f"Warning {rt.players_online} player(s): restarting in {announce_seconds}s for an update")
-                await svc.pm.send_command(rec.id, f"say The server is being updated and restarts in {announce_seconds} seconds.", echo=False)
+                notice = f"The server is being updated and restarts in {announce_seconds} seconds."
+                await svc.pm.send_command(rec.id, f"alert {notice}" if rec.is_proxy else f"say {notice}", echo=False)  # BungeeCord has no "say"
                 await asyncio.sleep(announce_seconds)
             if rt.is_active:
                 await svc._do_stop(rec, ctx)

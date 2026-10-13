@@ -12,15 +12,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 Channel = Literal["stable", "nightly", "canary"]
 CHANNELS: tuple[str, ...] = ("stable", "nightly", "canary")
 
-# Java servers that are not made from a modpack: the manager downloads and updates the software itself.
-SOFTWARE_NAMES = {"vanilla": "Vanilla", "paper": "Paper", "fabric": "Fabric"}
-_SOFTWARE_BUILD_WORD = {"paper": "build", "fabric": "loader"}
+# Java servers that are not made from a modpack: the manager downloads and updates the software itself (Spigot it builds with
+# SpigotMC's BuildTools, which is the only way SpigotMC allows it to be distributed).
+SOFTWARE_NAMES = {"vanilla": "Vanilla", "paper": "Paper", "fabric": "Fabric", "spigot": "Spigot", "bungeecord": "BungeeCord"}
+_SOFTWARE_BUILD_WORD = {"paper": "build", "fabric": "loader", "spigot": "build", "bungeecord": "build"}
+# Software that is a proxy in front of other servers rather than a server: no world, no Minecraft version of its own, no EULA, no
+# player lists, and the console command that stops it is "end".
+PROXY_KINDS = frozenset({"bungeecord"})
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 def software_label(software: dict[str, Any]) -> str:
-    """'Paper 1.21.8 (build 60)', 'Fabric 1.21.8 (loader 0.19.5)' or 'Vanilla 1.21.8': what a server's software is, in a few words."""
+    """'Paper 1.21.8 (build 60)', 'Fabric 1.21.8 (loader 0.19.5)', 'Vanilla 1.21.8' or 'BungeeCord (build 2104)': what a server's software
+    is, in a few words."""
     kind = str(software.get("kind") or "")
     name = SOFTWARE_NAMES.get(kind, kind.capitalize() or "Software")
     label = f"{name} {software.get('minecraft') or ''}".strip()
@@ -186,6 +191,12 @@ class ServerRecord:
     @property
     def is_java(self) -> bool:
         return self.engine == "java"
+
+    @property
+    def is_proxy(self) -> bool:
+        """A proxy (BungeeCord) in front of other servers: nothing is played on it itself."""
+        software = self.spec.get("software") if self.is_java else None
+        return bool(software) and software.get("kind") in PROXY_KINDS
 
     @property
     def java_tag(self) -> str | None:

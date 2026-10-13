@@ -38,7 +38,7 @@ class DownloadBody(BaseModel):
 def _java_server(rec: ServerRecord) -> ServerError:
     """The answer to Pumpkin's update routes for a Java server: where its updates are."""
     if rec.spec.get("software"):
-        return ServerError("This server runs Vanilla, Paper or Fabric: update it from its Version tab.", 409)
+        return ServerError("This server runs software the manager installed (Vanilla, Paper, Fabric, Spigot or BungeeCord): update it from its Version tab.", 409)
     return ServerError("This is a modpack server: update it from its Modpack tab.", 409)
 
 

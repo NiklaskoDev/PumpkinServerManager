@@ -119,6 +119,8 @@ async def runtimes(request: Request, owner: Principal = Depends(require_owner)) 
     return {
         "installed": ctx.servers.jvm.runtime_overview(), "available": list(AVAILABLE_JAVA),
         "disk_bytes": await asyncio.to_thread(ctx.runtimes.disk_usage), "mods_cache_bytes": await asyncio.to_thread(ctx.mod_cache.disk_usage),
+        # the development kits only Spigot's builds use (a compiler is what a JRE lacks)
+        "jdks": [j.public() for j in ctx.jdks.installed()], "jdk_disk_bytes": await asyncio.to_thread(ctx.jdks.disk_usage),
     }
 
 
@@ -148,4 +150,17 @@ async def remove_runtime(request: Request, major: int, owner: Principal = Depend
             raise ServerError(f"'{rec.name}' runs on Java {major}, so it cannot be removed.", 409)
     ctx.updater.ensure_builds_not_in_flight()  # a server that is being created may be about to use it
     await asyncio.to_thread(ctx.runtimes.remove, major)
+    return {"ok": True}
+
+
+@router.delete("/java/jdks/{major}")
+async def remove_jdk(request: Request, major: int, owner: Principal = Depends(require_owner)) -> dict[str, Any]:
+    """Remove a development kit: it is downloaded again when the next Spigot build needs it."""
+    ctx = get_ctx(request)
+    if ctx.jdks.get(major) is None:
+        raise ServerError("That development kit is not installed.", 404)
+    if ctx.spigot_builder.busy:
+        raise ServerError("A Spigot build is running with it right now. Try again when it has finished.", 409)
+    ctx.updater.ensure_builds_not_in_flight()  # a server that is being created or updated may be about to build with it
+    await asyncio.to_thread(ctx.jdks.remove, major)
     return {"ok": True}

@@ -9,7 +9,8 @@ Pumpkin versions on a schedule and **never applies an update without first makin
 
 It also runs **Java servers**. [Vanilla, Paper and Fabric servers](#vanilla-paper-and-fabric-servers) are set up from what Mojang,
 PaperMC and Fabric publish and kept up to date by the manager (the Minecraft version you pick, the newest stable build, the Java it
-needs). For modded play, pick a modpack from [Modrinth](https://modrinth.com) or
+needs); so are [Spigot servers and BungeeCord proxies](#spigot-and-bungeecord) (Spigot is built for you with SpigotMC's BuildTools).
+For modded play, pick a modpack from [Modrinth](https://modrinth.com) or
 [CurseForge](https://www.curseforge.com/minecraft/modpacks) and the manager downloads Java, the mods and the mod loader and
 starts it. See [Modpack servers](#modpack-servers-java). The big GregTech pack [GT New Horizons](#gt-new-horizons), listed under
 *Large expert modpacks* in the New server dialog, has its own installer, because its CurseForge page cannot be installed.
@@ -22,6 +23,7 @@ starts it. See [Modpack servers](#modpack-servers-java). The big GregTech pack [
 |---|---|
 | **One-click servers** | Pick a name, a Pumpkin channel and a few settings; the manager downloads the binary, writes `pumpkin.toml`, assigns ports and starts it. |
 | **Vanilla, Paper and Fabric servers** | Java servers without a modpack: Mojang's own server, Paper for plugins, or Fabric for mods (with Fabric API). The manager downloads the software (checksum-verified) and the Java it needs, offers newer builds, and switches to another Minecraft version with a backup first and an automatic rollback. |
+| **Spigot and BungeeCord** | Spigot, the original plugin server, which the manager builds for you with SpigotMC's BuildTools (a JDK and git are handled for you; five to fifteen minutes), and BungeeCord, a proxy that joins several servers into one network (no world, no EULA, set up with the servers the manager runs). Both get backups first and automatic rollback on updates. |
 | **Large expert modpacks** | GT New Horizons, the big GregTech expert pack for Minecraft 1.7.10, installed from its official server files (the Java 17+ or the Java 8 build), updated one version at a time with a backup first and an automatic rollback. Packs like it have a heading of their own in the New server dialog. |
 | **Modpack servers** | Java servers from Modrinth and CurseForge modpacks (Fabric, Quilt, Forge, NeoForge): the right Java, every mod (checksum-verified), the loader and the pack's configuration are set up for you. Search from the dashboard, paste a link or upload a `.mrpack` or a CurseForge pack zip. CurseForge needs your own API key. |
 | **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators with individual levels, bans). |
@@ -36,7 +38,7 @@ starts it. See [Modpack servers](#modpack-servers-java). The big GregTech pack [
 
 - [Install on Unraid](#install-on-unraid) · [Docker Compose](#docker-compose) · [First steps](#first-steps)
 - [Ports and networking](#ports-and-networking) · [Configuration](#configuration)
-- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Vanilla, Paper and Fabric](#vanilla-paper-and-fabric-servers) · [GT New Horizons](#gt-new-horizons) · [Modpack servers](#modpack-servers-java) · [Accounts for friends](#accounts-for-friends)
+- [How updates work](#how-updates-work) · [How backups work](#how-backups-work) · [Vanilla, Paper and Fabric](#vanilla-paper-and-fabric-servers) · [Spigot and BungeeCord](#spigot-and-bungeecord) · [GT New Horizons](#gt-new-horizons) · [Modpack servers](#modpack-servers-java) · [Accounts for friends](#accounts-for-friends)
 - [Security](#security) · [Where things are stored](#where-things-are-stored) · [Troubleshooting](#troubleshooting)
 - [Pumpkin notes](#notes-about-pumpkin) · [Development](#development)
 
@@ -305,6 +307,81 @@ work as for every other server.
   rollback. `scripts/real_java_check.py --accept-eula --software all` (add `--software-update` or `--software-from 1.21.11`) repeats
   that on your own setup.
 
+## Spigot and BungeeCord
+
+*New server → Spigot or BungeeCord server* offers the two projects of SpigotMC. Both are set up the way the other Java servers are
+(Java installed for you, console, files, backups, updates with a backup first and an automatic rollback, accounts for friends), with
+the differences below.
+
+### Spigot
+
+The original plugin server (Bukkit and Spigot plugins). SpigotMC does **not publish the server to download**: it is made from Mojang's
+code, so SpigotMC publishes a tool, **BuildTools**, that makes it on the machine that runs it. The manager does that for you:
+
+1. It downloads a **Java development kit** (JDK: the compiler that the Java runtimes the servers run on do not have; about 200 MB,
+   once per Java version, in `/data/jdk/`; *Versions → Java runtimes* lists them and removes them, and they are downloaded again when
+   a build needs one).
+2. It downloads BuildTools from SpigotMC and runs it in a temporary folder of its own, with a home of its own (Maven's repository and
+   git's settings land there and go with it) and an identity for git. BuildTools fetches SpigotMC's sources from `hub.spigotmc.org`,
+   Mojang's server from Mojang, and Maven and its libraries from the Maven repositories, so the container needs internet access to
+   those, and it needs **git** (the container image has it; on Windows BuildTools brings its own).
+3. It keeps the one jar that comes out (`spigot.jar`, about 80 MB) and deletes everything else.
+
+A build takes **five to fifteen minutes** (the job dialog says where it is: sources, Minecraft, decompiling, patching, compiling) and
+needs about **2 GB of free disk space** while it runs; the manager refuses to start one without. Only one build runs at a time (it
+uses all processors); a build that hangs for twenty quiet minutes, or is cancelled, is stopped with everything it started.
+Which Java builds a Minecraft version, and which one the server then runs on, comes from what SpigotMC says about that version (1.21
+needs Java 21, 26.1 and later Java 25, 1.16 and older Java 8).
+
+* **One build per Minecraft version.** SpigotMC names the build for each Minecraft version (a number, sometimes with a letter: `4458`,
+  `3096a`) and offers only the newest, so there is nothing to choose, and a **newer build** of the version a server runs is its update.
+  Every update is another build run: the server keeps running meanwhile and is only stopped when the new jar is ready; then it is
+  backed up, switched and watched like every update. Spigot servers start on *notify only*, because a build takes so long; *build new
+  builds automatically* is one click away. A newer Minecraft version is shown, never installed by itself, as for Paper and Fabric.
+* **Backups** leave out `bundler/`, where Spigot unpacks its libraries each time it starts. If the jar is deleted, it is built again
+  before the server starts (the newest build of that version: SpigotMC keeps no older ones).
+* **Spigot or Paper?** Paper is a faster fork of Spigot that runs the same plugins and needs no build; it stays the recommended choice.
+  Spigot is for plugins that want the original, or when you simply prefer SpigotMC's own.
+* **Run for real.** On Windows, with the real services: the manager built Spigot 1.21.1 (Java 21) with the real BuildTools (about 7
+  minutes on a fast 16-core desktop, a 73 MiB jar), started it (*Done* after 14 seconds), pinged it, gave it commands, backed it up
+  while it ran (a consistent backup of 74 MiB) and restored it; then updated it to Minecraft 26.3 (Java 25: a second build, made while
+  the old server kept running), and rolled that back. `scripts/real_java_check.py --accept-eula --software spigot --software-from
+  1.21.1` repeats it (about 15 minutes, 2 GB free). Not run yet: the Alpine image on Unraid (it needs git there, which the image now
+  has) and arm64 (Adoptium builds no Alpine JDK 17 or 8 for it, so older Minecraft versions cannot be built there).
+
+### BungeeCord
+
+A **proxy**: players connect to it and it passes them on to your other servers, so one address can lead to several of them (a lobby,
+a survival world, a creative world, ...). It has **no world, no Minecraft version and no EULA** to accept, and needs very little memory
+(512 MiB is the start; hundreds of players fit in it). SpigotMC's build server publishes every successful build of it; the manager
+downloads the newest (or the one you choose) and runs it on Java 21. The first start downloads BungeeCord's libraries and modules.
+
+* **What it is set up with.** The proxy's `config.yml` is written with the port the manager chose, the message and player number you
+  entered, and **the servers this manager runs** (Pumpkin and Java alike, by their address on this machine; the oldest is where players
+  land). Servers you create later are added by hand: *Files → config.yml*, under `servers:`. BungeeCord does not start without at
+  least one server, so a proxy made before any other server exists gets a placeholder named `lobby` to replace. *Settings* has the
+  message, the player number, *online mode* and *pass players' addresses on*; everything else is in the raw `config.yml` editor
+  (YAML: the indentation matters). The port is the manager's and is put right again before every start.
+* **The servers behind it must be set up for it, and kept private.** A proxy checks players' Minecraft accounts and passes them on;
+  the servers behind it then have to trust it: `online-mode=false` in their `server.properties`, and proxy support turned on in their
+  own settings (`bungeecord: true` under `settings:` in `spigot.yml` for Spigot and Paper). **Such a server accepts anybody who claims to
+  be anybody**, so nobody must be able to reach it except through the proxy: forward only the proxy's port on your router (the container
+  publishes the whole port range to your network, which is fine as long as only the proxy's port is forwarded), or, stronger, let the
+  server listen on the loopback address only (`server-ip=127.0.0.1` in its `server.properties`): the proxy runs in the same container
+  and reaches it there, and nothing outside can. The manager does not change other servers by itself; this is the one thing to get right.
+* **It is stopped with `end`**, because BungeeCord has no `stop` (the console tab shows the same: *Command not found*). Its own
+  commands are there: `glist`, `server`, `alert`, `end`, ...
+* **Updates** are builds only (many are small changes of libraries): *Version* lists the newest ones, the update procedure is the usual
+  one (an `alert` warns the players first), and the default is *notify only*. **Backups** leave out `libraries/` and the log. There is
+  no *Players* tab: a proxy has no whitelist, operators or bans of its own.
+* **A broken `config.yml`** (BungeeCord logs an exception and then stays alive doing nothing) is reported at once, not after the
+  startup timeout, with the lines it printed; the previous file is kept as `config.yml.manager-bak` after every change made in the
+  dashboard.
+* **Run for real.** On Windows, with SpigotMC's real build server: builds 2103 and 2104 were downloaded, a proxy was created and
+  started on Java 21 (up after 9 seconds), pinged, given commands (`glist` answers; `stop` is refused, as it should), backed up
+  while it ran and restored, updated from 2103 to 2104 with a backup first, rolled back, and stopped with `end` (31 checks in 44
+  seconds): `scripts/real_java_check.py --accept-eula --software bungeecord --software-update`. Not run yet: the Alpine image.
+
 ## GT New Horizons
 
 *New server → GT New Horizons* (under the heading *Large expert modpacks*, which is where packs that come with server files of
@@ -553,9 +630,11 @@ no role on answers exactly like one that does not exist. Role changes take effec
 │                                 (a modpack server has server.properties, mods/, config/, world/, ... instead)
 ├── binaries/<build>/pumpkin      downloaded Pumpkin binaries, shared by all servers
 ├── java/<major>/                 Java runtimes for modpack servers, downloaded when needed
+├── jdk/<major>/                  Java development kits (compilers) that only the Spigot builds use, downloaded when needed
 ├── cache/mods/                   mod files downloaded for Modrinth packs, kept once by checksum
 │                                 (CurseForge files only live in cache/mods/curseforge-staging while an install runs)
 ├── cache/uploads/                pack files you uploaded (or that are being installed), until the server was created
+├── cache/spigot-build/           the folder of a Spigot build while it runs (about 1 GB); empty the rest of the time
 └── logs/<id>/console.log         console output of the last run (+ console.prev.log)
 /backups/<id>/<date>_<kind>.tar.gz
 ```
@@ -579,6 +658,10 @@ A few keys (ports, the management secret, console mode) belong to the manager an
 | Server stops right after starting | Open the console tab for the output. After editing `pumpkin.toml` by hand, use the Advanced editor, which validates it. |
 | A Paper or Fabric server says *"Paper's download service could not be reached"* (or Fabric's, or Mojang's) when it is created, checked or updated | The container needs internet access to `fill.papermc.io`, `meta.fabricmc.net`, `piston-meta.mojang.com` and `api.modrinth.com` (and the hosts they send files from). The *Version* tab and the new-server dialog show the reason; nothing is changed by a failed lookup. |
 | A Paper or Fabric update was rolled back by itself | The new build did not start, so the backup made before it was restored; the history in the *Version* tab says why, and that exact build is not offered again (the next one is). Nothing was lost. |
+| Creating a Spigot server fails with *"BuildTools failed (exit code ...)"* or *"git is not installed here"* | The last lines BuildTools printed are in the message, and the whole run is in the job's log. The container needs internet access to `hub.spigotmc.org`, `piston-data.mojang.com`, `repo.maven.apache.org`, `libraries.minecraft.net` and `archive.apache.org`, and a container older than the version that added Spigot has no `git` (update it). *"Not enough free disk space to build Spigot"*: a build needs about 2 GB in `/data` while it runs, and gives it back. |
+| A Spigot build is very slow | Normal on a small machine: decompiling Minecraft and compiling Spigot use every processor and a few GB of memory for five to fifteen minutes (about 7 on a fast desktop). The job dialog says which stage it is at. A build that prints nothing for twenty minutes is stopped as hung (usually a stalled connection); start it again. |
+| A BungeeCord proxy starts, but players land nowhere or get *"Could not connect to a default or fallback server"* | Its `servers:` in `config.yml` (*Files* tab) names where players go. The servers it lists have to be running, on the address and port given there, and set up for a proxy (`online-mode=false`, proxy support on); see *Spigot and BungeeCord* above. The manager lists the servers that existed when the proxy was made. |
+| A BungeeCord proxy says *"Command not found"* to `stop` | BungeeCord has no `stop`: it is stopped with `end`, which is what the manager sends. |
 | The Version tab says *"Minecraft X is older than ..."* | Switching to an older Minecraft version has to be confirmed: a world that a newer version has opened usually cannot be opened by an older one. Restore from a backup made with that version, or keep the newer one. |
 | *"Paper has no builds for Minecraft X"* / *"Fabric does not support Minecraft X"* | PaperMC builds Paper for Minecraft 1.7.10 and newer only, and Fabric supports 1.14 and newer; the version list shows what exists. A version with only experimental builds can be chosen on purpose under *Choose a specific build → Include experimental builds*. |
 | Adding a player to the whitelist, operators or bans changes nothing | Those buttons type the command into the running server's console, and the Players tab shows what the server then wrote to its `data/` folder. The dashboard tells you when a list did not change; the console tab has the server's answer (for example *No player was found* when an account name does not exist and online mode is on). The server must be running. |
@@ -625,6 +708,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt      # Win
 .venv/bin/python scripts/real_binary_check.py /path/to/pumpkin   # end-to-end check against a REAL Pumpkin binary
 .venv/bin/python scripts/real_java_check.py --accept-eula          # the same for a modpack server (real Java, Mojang, Modrinth, loader)
 .venv/bin/python scripts/real_java_check.py --accept-eula --software all    # ... for Vanilla, Paper and Fabric servers
+.venv/bin/python scripts/real_java_check.py --accept-eula --software spigot --software-from 1.21.1   # Spigot, built with BuildTools (two builds, 15-30 minutes)
+.venv/bin/python scripts/real_java_check.py --accept-eula --software bungeecord --software-update    # a BungeeCord proxy, updated one build and rolled back
 .venv/bin/python scripts/real_java_check.py --accept-eula --gtnh --pack-update   # GT New Horizons from its website (450 MB, 6 GiB; updated and rolled back)
 CURSEFORGE_API_KEY=... .venv/bin/python scripts/real_java_check.py --accept-eula --curseforge-pack 285109   # a real CurseForge pack (your own key)
 ```
@@ -649,12 +734,16 @@ CURSEFORGE_API_KEY=... .venv/bin/python scripts/real_java_check.py --accept-eula
 * `--software vanilla|paper|fabric|all` does it for servers without a modpack, from what Mojang, PaperMC and Fabric offer right now;
   `--software-update` installs the previous build first, then updates to the newest one and rolls that back, and `--software-from
   <Minecraft version>` starts on an older Minecraft version and switches to the newest (new Java, converted world, Fabric API).
+  `--software spigot` is not part of `all` (a build takes a quarter of an hour and about 2 GB; SpigotMC has one build per Minecraft
+  version, so the update is tested with `--software-from`), and `--software bungeecord` checks the proxy with its own commands
+  (`glist`, and `end` to stop it).
 * `--gtnh` installs GT New Horizons from gtnewhorizons.com (the newest stable version, or `--gtnh-version`; `--gtnh-build legacy` takes the
   Java 8 files); with `--pack-update` it starts one stable version behind, updates and rolls that back.
 * Layout: `pumpkin_manager/` (backend: `process.py` supervision, `updater.py` the update procedure,
   `backups.py`, `releases.py` GitHub, `pumpkin_config.py` TOML handling, `jvm/` the Java engine: Java runtimes, mod loaders, Modrinth and
   CurseForge packs, a pack's own server files, `server.properties`, pack updates, `software.py` / `softwareupdates.py` for Vanilla,
-  Paper and Fabric servers and `gtnh.py` for GT New Horizons; `api/` routers, `static/` the dashboard -
+  Paper, Fabric, Spigot and BungeeCord servers, `spigot.py` for SpigotMC (its version list, the BuildTools runner, BungeeCord's builds),
+  `proxy.py` for BungeeCord's `config.yml` and `gtnh.py` for GT New Horizons; `api/` routers, `static/` the dashboard -
   plain ES modules, no build step), `tests/` (including `fake_pumpkin.py` and `fake_java_server.py`, stand-in servers, and
   `jvmfakes.py`, a fake internet for Modrinth, CurseForge, Adoptium, Mojang, PaperMC, Fabric, GT New Horizons' website and the loaders), `docker/`, `unraid/`.
 * The frontend has no dependencies and never uses inline scripts or styles, so the strict CSP stays strict.

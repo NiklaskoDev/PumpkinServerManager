@@ -7,15 +7,19 @@ difference.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
+import os
 import re
+import stat
 import tarfile
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -25,13 +29,16 @@ JRE_RELEASE = "jdk-21.0.12.1+1"
 PNG_HEADER = bytes([0x89]) + b"PNG\r\n" + bytes([0x1A, 0x0A])  # what every PNG file starts with
 
 
-def jre_archive(kind: str = "tar.gz", release: str = JRE_RELEASE, *, evil_member: str | None = None) -> bytes:
-    """What an Adoptium JRE archive looks like inside: one folder with bin/java (and java.exe, so any OS can use it)."""
-    top = f"{release}-jre"
+def jre_archive(kind: str = "tar.gz", release: str = JRE_RELEASE, *, evil_member: str | None = None, image: str = "jre") -> bytes:
+    """What an Adoptium JRE archive looks like inside: one folder with bin/java (and java.exe, so any OS can use it). A JDK
+    (``image="jdk"``) is the same folder under another name and has a compiler too."""
+    top = f"{release}-jre" if image == "jre" else release
     files = {
         f"{top}/bin/java": b"#!/bin/sh\necho fake java\n", f"{top}/bin/java.exe": b"MZ fake java",
         f"{top}/release": b'JAVA_VERSION="21.0.12"\n', f"{top}/lib/modules": b"\0" * 2048,
     }
+    if image == "jdk":
+        files.update({f"{top}/bin/javac": b"#!/bin/sh\necho fake javac\n", f"{top}/bin/javac.exe": b"MZ fake javac"})
     if evil_member:
         files[evil_member] = b"gotcha"
     buf = io.BytesIO()
@@ -166,6 +173,8 @@ class FakeInternet:
         self.curseforge: FakeCurseForge | None = None
         self.offline = False
         self.java_downloads = 0
+        self.jdk_downloads = 0  # how many of them were development kits (Spigot is built with one)
+        self.adoptium_handlers: dict[str, dict[str, Callable[[httpx.Request], httpx.Response]]] = {}
         self.server_jar_downloads = 0  # Minecraft server jars fetched from Mojang
         self.mod_downloads: dict[str, int] = {}
         self.modrinth_projects: list[FakeModrinth] = []
@@ -238,11 +247,25 @@ class FakeInternet:
         self.route(url, lambda request: httpx.Response(200, content=content, headers={"Content-Type": content_type}))
 
     # ----------------------------------------------------------------- Adoptium
+    def _adoptium_listing(
+        self, url: str, image: str, handler: Callable[[httpx.Request], httpx.Response], default: httpx.Response, param: str = "image_type",
+    ) -> None:
+        """One address answers for JREs and JDKs alike (the query says which): the handlers of both are kept and told apart."""
+        handlers = self.adoptium_handlers.setdefault(url, {})
+        handlers[image] = handler
+
+        def dispatch(request: httpx.Request) -> httpx.Response:
+            wanted = (parse_qs(request.url.query.decode()).get(param) or ["jre"])[0]
+            found = handlers.get(wanted)
+            return found(request) if found else default
+
+        self.route(url, dispatch)
+
     def adoptium(self, major: int = 21, *, kind: str = "tar.gz", os_name: str | None = None, arch: str = "x64", release: str = JRE_RELEASE,
-                 corrupt: bool = False, evil_member: str | None = None) -> bytes:
-        """Offer a JRE; ``os_name`` limits it to one platform (any when None). Returns the archive bytes."""
-        archive = jre_archive(kind, release, evil_member=evil_member)
-        name = f"OpenJDK{major}U-jre_{arch}_{os_name or 'any'}_hotspot_{release.replace('jdk-', '').replace('+', '_')}.{kind}"
+                 corrupt: bool = False, evil_member: str | None = None, image: str = "jre") -> bytes:
+        """Offer a JRE (``image="jdk"``: a JDK); ``os_name`` limits it to one platform (any when None). Returns the archive bytes."""
+        archive = jre_archive(kind, release, evil_member=evil_member, image=image)
+        name = f"OpenJDK{major}U-{image}_{arch}_{os_name or 'any'}_hotspot_{release.replace('jdk-', '').replace('+', '_')}.{kind}"
         link = f"https://github.com/adoptium/temurin{major}-binaries/releases/download/{release}/{name}"
         checksum = hashlib.sha256(archive).hexdigest()
         if corrupt:
@@ -250,48 +273,52 @@ class FakeInternet:
 
         def listing(request: httpx.Request) -> httpx.Response:
             query = parse_qs(request.url.query.decode())
-            if (os_name and query.get("os") != [os_name]) or query.get("architecture") != [arch] or query.get("image_type") != ["jre"]:
+            if (os_name and query.get("os") != [os_name]) or query.get("architecture") != [arch] or query.get("image_type") != [image]:
                 return httpx.Response(200, json=[])
             entry = {"release_name": release, "binary": {"package": {"name": name, "link": link, "checksum": checksum, "size": len(archive)}}}
             return httpx.Response(200, json=[entry])
 
         def serve(request: httpx.Request) -> httpx.Response:
             self.java_downloads += 1
+            if image == "jdk":
+                self.jdk_downloads += 1
             return httpx.Response(200, content=archive)
 
-        self.route(f"https://api.adoptium.net/v3/assets/latest/{major}/hotspot", listing)
+        self._adoptium_listing(f"https://api.adoptium.net/v3/assets/latest/{major}/hotspot", image, listing, httpx.Response(200, json=[]))
         self.route(link, serve)
         return archive
 
     def adoptium_release(self, major: int = 8, release: str = "jdk8u312-b07", *, kind: str = "tar.gz", os_name: str | None = None,
-                         arch: str = "x64", corrupt: bool = False) -> bytes:
+                         arch: str = "x64", corrupt: bool = False, image: str = "jre") -> bytes:
         """Offer one exact release, what a pin asks for. Like the real service it answers 404 where it has no such build."""
-        archive = jre_archive(kind, release)
-        name = f"OpenJDK{major}U-jre_{arch}_{os_name or 'any'}_hotspot_{release.replace('jdk', '').replace('-', '')}.{kind}"
+        archive = jre_archive(kind, release, image=image)
+        name = f"OpenJDK{major}U-{image}_{arch}_{os_name or 'any'}_hotspot_{release.replace('jdk', '').replace('-', '')}.{kind}"
         link = f"https://github.com/adoptium/temurin{major}-binaries/releases/download/{release}/{name}"
         checksum = "0" * 64 if corrupt else hashlib.sha256(archive).hexdigest()
 
         def listing(request: httpx.Request) -> httpx.Response:
             query = parse_qs(request.url.query.decode())
-            if (os_name and query.get("os") != [os_name]) or query.get("architecture") != [arch] or query.get("image_type") != ["jre"]:
+            if (os_name and query.get("os") != [os_name]) or query.get("architecture") != [arch] or query.get("image_type") != [image]:
                 return httpx.Response(404)
             package = {"name": name, "link": link, "checksum": checksum, "size": len(archive)}
             return httpx.Response(200, json={"release_name": release, "binaries": [{"package": package}]})
 
         def serve(request: httpx.Request) -> httpx.Response:
             self.java_downloads += 1
+            if image == "jdk":
+                self.jdk_downloads += 1
             return httpx.Response(200, content=archive)
 
-        self.route(f"https://api.adoptium.net/v3/assets/release_name/eclipse/{release}", listing)
+        self._adoptium_listing(f"https://api.adoptium.net/v3/assets/release_name/eclipse/{release}", image, listing, httpx.Response(404))
         self.route(link, serve)
         return archive
 
     def azul(self, version: str = "8.0.312", *, distro: str = "8.58.0.13", kind: str = "tar.gz", os_name: str = "alpine-linux",
-             arch: str = "x64", corrupt: bool = False, missing_hash: bool = False) -> bytes:
-        """Offer one Zulu JRE (as Azul's metadata service lists it, with the hash only when asked for) for one platform."""
+             arch: str = "x64", corrupt: bool = False, missing_hash: bool = False, image: str = "jre") -> bytes:
+        """Offer one Zulu JRE (``image="jdk"``: JDK; as Azul's metadata service lists it, with the hash only when asked for) for one platform."""
         wanted_os = {"alpine-linux": "linux-musl", "linux": "linux-glibc"}.get(os_name, os_name)
-        folder = f"zulu{distro}-ca-jre{version}-{wanted_os.replace('-', '_')}_{arch}"
-        archive = jre_archive(kind, folder)
+        folder = f"zulu{distro}-ca-{image}{version}-{wanted_os.replace('-', '_')}_{arch}"
+        archive = jre_archive(kind, folder, image=image)
         name = f"{folder}.{kind}"
         link = f"https://cdn.azul.com/zulu/bin/{name}"
         checksum = "0" * 64 if corrupt else hashlib.sha256(archive).hexdigest()
@@ -311,9 +338,11 @@ class FakeInternet:
 
         def serve(request: httpx.Request) -> httpx.Response:
             self.java_downloads += 1
+            if image == "jdk":
+                self.jdk_downloads += 1
             return httpx.Response(200, content=archive)
 
-        self.route("https://api.azul.com/metadata/v1/zulu/packages/", listing)
+        self._adoptium_listing("https://api.azul.com/metadata/v1/zulu/packages/", image, listing, httpx.Response(200, json=[]), param="java_package_type")
         self.route(link, serve)
         return archive
 
@@ -916,3 +945,164 @@ class FakeGtnh:
         if self.page_status != 200:
             return httpx.Response(self.page_status, text="unavailable")
         return httpx.Response(200, text=self.page(), headers={"Content-Type": "text/html; charset=utf-8"})
+
+
+class FakeSpigot:
+    """SpigotMC's hub: the list of Minecraft versions it has a build for (a file each, naming the build that is current), BuildTools, and a
+    stand-in for running BuildTools (``runner``) that prints what the real one prints and leaves a jar behind."""
+
+    HOST = "hub.spigotmc.org"
+    BUILDTOOLS = "/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar"
+
+    def __init__(self, net: FakeInternet) -> None:
+        self.net = net
+        self.versions: dict[str, dict[str, Any]] = {}  # Minecraft version -> {"name", "java", "date", "broken"}
+        self.pre_releases = ["1.13-pre7", "1.14.3-pre4", "1.18-rc3"]  # the real index lists these too
+        self.calls: list[dict[str, Any]] = []  # what BuildTools was started with: argv, folder, environment
+        self.buildtools_downloads = 0
+        self.index_status = 200
+        self.fail: str | None = None  # when set, a build prints this and ends with exit code 1
+        self.delay = 0.0  # seconds each line of a build takes (to have two builds overlap)
+        self.on_build: Callable[[str], None] | None = None  # called with the Minecraft version when a build starts (to look at the world then)
+        self.leave_read_only = False  # a build leaves git's objects behind, which are read-only (on Windows such files cannot be deleted)
+        self.running = 0
+        self.max_running = 0
+        net.route_pattern(self.HOST, r"/versions/", self._index)
+        net.route_pattern(self.HOST, r"/versions/[^/]+\.json", self._version)
+        net.route(f"https://{self.HOST}{self.BUILDTOOLS}", self._buildtools)
+
+    def add_version(self, version: str, name: str = "4458", *, java: tuple[int, int] | None = (65, 68), date: str = "04-Oct-2026 02:43",
+                    broken: bool = False) -> None:
+        """Offer a Minecraft version. ``java`` is the range of class-file versions SpigotMC lists (65 is Java 21); the oldest versions list
+        none. A ``broken`` build is one whose jar the fake Java server refuses to run."""
+        self.versions[version] = {"name": name, "java": java, "date": date, "broken": broken}
+
+    def new_build(self, version: str, name: str, *, broken: bool = False) -> None:
+        """SpigotMC publishes a newer build for a Minecraft version it already had."""
+        self.versions[version] = {**self.versions[version], "name": name, "broken": broken, "date": "10-Oct-2026 09:00"}
+
+    @staticmethod
+    def jar(version: str, name: str, broken: bool = False) -> bytes:
+        files = {
+            "META-INF/MANIFEST.MF": b"Main-Class: org.bukkit.craftbukkit.bootstrap.Main\n",
+            "spigot.json": json.dumps({"version": version, "build": name}).encode(),
+        }
+        if broken:
+            files["BROKEN"] = b"this build does not start"
+        return _zip_bytes(files)
+
+    def _index(self, request: httpx.Request) -> httpx.Response:
+        if self.index_status != 200:
+            return httpx.Response(self.index_status, text="unavailable")
+        rows = [("latest", "15-Sep-2026 15:15")] + [(v, i["date"]) for v, i in self.versions.items()] + [(v, "28-Sep-2025 01:01") for v in self.pre_releases]
+        lines = "".join(f'<a href="{name}.json">{name}.json</a>{" " * (50 - len(name))}{date}                 534\n' for name, date in rows)
+        return httpx.Response(200, text=f"<html><head><title>Index of /versions/</title></head><body><h1>Index of /versions/</h1><hr><pre>\n{lines}</pre><hr></body></html>")
+
+    def _version(self, request: httpx.Request) -> httpx.Response:
+        version = request.url.path.rsplit("/", 1)[-1].removesuffix(".json")
+        info = self.versions.get(version)
+        if info is None:
+            return httpx.Response(404, text="Not Found")
+        data: dict[str, Any] = {
+            "name": info["name"], "description": f"Jenkins build {info['name']}",
+            "refs": {"BuildData": "b" * 40, "Bukkit": "a" * 40, "CraftBukkit": "c" * 40, "Spigot": "d" * 40}, "toolsVersion": 197,
+        }
+        if info["java"]:
+            data["javaVersions"] = list(info["java"])
+        return httpx.Response(200, json=data)
+
+    def _buildtools(self, request: httpx.Request) -> httpx.Response:
+        self.buildtools_downloads += 1
+        return httpx.Response(200, content=_zip_bytes({"META-INF/MANIFEST.MF": b"Main-Class: org.spigotmc.builder.Bootstrap\n"}))
+
+    async def runner(self, argv: list[str], cwd, env: dict[str, str], on_line) -> tuple[int, list[str]]:
+        """``java -jar BuildTools.jar --rev <version> --nogui --compile SPIGOT --final-name <jar> -o <folder>``"""
+        self.calls.append({"argv": list(argv), "cwd": str(cwd), "env": dict(env)})
+        self.running += 1
+        self.max_running = max(self.max_running, self.running)
+        try:
+            version = argv[argv.index("--rev") + 1]
+            out = Path(argv[argv.index("-o") + 1])
+            final = argv[argv.index("--final-name") + 1]
+            info = self.versions[version]
+            if self.on_build:
+                self.on_build(version)
+            lines = [
+                "Loading BuildTools version: git-BuildTools-5fc1010-201 (#201)", "Java Version: Java 21",
+                "Starting clone of https://hub.spigotmc.org/stash/scm/spigot/bukkit.git to Bukkit",
+                "Cloned git repository https://hub.spigotmc.org/stash/scm/spigot/bukkit.git to Bukkit. Current HEAD: 29025a7",
+                "Maven does not exist, downloading. Please wait.", "Extracted: .\\apache-maven-3.9.6\\README.txt",
+                "Picked up JAVA_TOOL_OPTIONS: -Duser.home=x", f"Attempting to build Minecraft with details: VersionInfo(minecraftVersion={version})",
+                "Final mapped jar: work\\mapped.a0531ed8.jar does not exist, creating (please wait)!", "INFO:  Decompiling class net/minecraft/SharedConstants",
+                "INFO:  Decompiling class net/minecraft/DetectedVersion", "Applying CraftBukkit Patches", "Patching net\\minecraft\\advancements\\AdvancementHolder.java",
+                "  Rebuilding Forked projects.... ", f"[INFO] Building Spigot-API {version}-R0.1-SNAPSHOT                           [1/3]",
+                f"[INFO] Building Spigot {version}-R0.1-SNAPSHOT                               [3/3]",
+                "Success! Everything completed successfully. Copying final .jar files now.",
+            ]
+            for line in lines:
+                on_line(line)
+                if self.delay:
+                    await asyncio.sleep(self.delay)
+                if self.fail and line.startswith("Maven"):
+                    on_line(self.fail)
+                    return 1, ["Maven does not exist, downloading. Please wait.", self.fail]
+            if self.leave_read_only:
+                objects = Path(cwd) / "Bukkit" / ".git" / "objects" / "pack"
+                objects.mkdir(parents=True, exist_ok=True)
+                for name in ("pack-1.pack", "pack-1.idx"):
+                    (objects / name).write_bytes(b"x" * 100)
+                    os.chmod(objects / name, stat.S_IREAD)
+            (out / final).write_bytes(self.jar(version, info["name"], info.get("broken", False)))
+            return 0, lines[-4:]
+        finally:
+            self.running -= 1
+
+
+class FakeBungee:
+    """SpigotMC's build server as it lists the builds of BungeeCord (newest first, with a result) and serves their jars."""
+
+    HOST = "hub.spigotmc.org"
+    JOB = "/jenkins/job/BungeeCord"
+
+    def __init__(self, net: FakeInternet) -> None:
+        self.net = net
+        self.builds: list[dict[str, Any]] = []
+        self.corrupt: set[int] = set()  # builds whose download is not a jar
+        self.broken: set[int] = set()  # builds whose jar the fake Java server refuses to run
+        self.downloads: list[int] = []
+        self.api_status = 200
+        net.route_pattern(self.HOST, rf"{self.JOB}/api/json", self._api)
+        net.route_pattern(self.HOST, rf"{self.JOB}/\d+/artifact/bootstrap/target/BungeeCord\.jar", self._jar)
+
+    def add_build(self, number: int, result: str = "SUCCESS", *, corrupt: bool = False, broken: bool = False) -> None:
+        """Publish a build (they are listed newest first). Only a SUCCESS one is offered by the manager."""
+        self.builds.append({"number": number, "result": result, "timestamp": 1790000000000 + number * 3600_000})
+        self.builds.sort(key=lambda b: b["number"], reverse=True)
+        if corrupt:
+            self.corrupt.add(number)
+        if broken:
+            self.broken.add(number)
+
+    @staticmethod
+    def jar(number: int, broken: bool = False) -> bytes:
+        files = {"META-INF/MANIFEST.MF": b"Main-Class: net.md_5.bungee.Bootstrap\n", "bungee.json": json.dumps({"build": number}).encode()}
+        if broken:
+            files["BROKEN"] = b"this build does not start"
+        return _zip_bytes(files)
+
+    def _api(self, request: httpx.Request) -> httpx.Response:
+        if self.api_status != 200:
+            return httpx.Response(self.api_status, text="unavailable")
+        tree = (parse_qs(request.url.query.decode()).get("tree") or [""])[0]
+        match = re.search(r"\{0,(\d+)\}", tree)
+        shown = self.builds[: int(match.group(1))] if match else self.builds
+        return httpx.Response(200, json={"_class": "hudson.maven.MavenModuleSet", "builds": shown})
+
+    def _jar(self, request: httpx.Request) -> httpx.Response:
+        number = int(request.url.path.split("/")[-5])
+        self.downloads.append(number)
+        if number in self.corrupt:
+            return httpx.Response(200, content=b"<html>this is not a jar</html>")
+        if not any(b["number"] == number for b in self.builds):
+            return httpx.Response(404, text="Not Found")
+        return httpx.Response(200, content=self.jar(number, number in self.broken))

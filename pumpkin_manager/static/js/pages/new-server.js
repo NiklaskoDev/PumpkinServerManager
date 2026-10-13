@@ -1,11 +1,11 @@
-// "New server": which kind? A Pumpkin server (fast, light, no mods), a Vanilla, Paper or Fabric server, or a Java modpack server.
-// The large expert modpacks that come with server files of their own (GT New Horizons) are listed together below them.
+// "New server": which kind? A Pumpkin server (fast, light, no mods), a Vanilla, Paper or Fabric server, a Java modpack server, or Spigot
+// or BungeeCord. The large expert modpacks that come with server files of their own (GT New Horizons) are listed together below them.
 
 import { h, icon } from "../dom.js";
 import { modal } from "../ui.js";
 import { openCreateGtnhServer } from "./create-gtnh.js";
 import { openCreateModpackServer } from "./create-modpack.js";
-import { openCreateSoftwareServer } from "./create-software.js";
+import { CLASSIC, SPIGOT_FAMILY, openCreateSoftwareServer } from "./create-software.js";
 import { openCreateServer } from "./create.js";
 
 export function openNewServer() {
@@ -20,10 +20,12 @@ export function openNewServer() {
       h("div", { class: "option-cards kinds" },
         card(openCreateServer, "server", "Pumpkin server", h("span", { class: "badge success" }, "light"),
           "Minecraft written in Rust. Starts in seconds and needs very little memory. Vanilla gameplay: no mods or plugins."),
-        card(openCreateSoftwareServer, "layers", "Vanilla, Paper or Fabric server", h("span", { class: "badge accent" }, "Java"),
+        card(() => openCreateSoftwareServer({ kinds: CLASSIC }), "layers", "Vanilla, Paper or Fabric server", h("span", { class: "badge accent" }, "Java"),
           "Java Edition without a modpack: Mojang's own server, Paper for plugins, or Fabric for mods. The manager downloads the software and the Java it needs, and keeps it up to date."),
         card(openCreateModpackServer, "layers", "Modpack server", h("span", { class: "badge accent" }, "Java"),
-          "Java Edition with mods. Pick a modpack from Modrinth or CurseForge, or upload one: Java, the mod loader and the mods are set up for you. Needs several GB of memory.")),
+          "Java Edition with mods. Pick a modpack from Modrinth or CurseForge, or upload one: Java, the mod loader and the mods are set up for you. Needs several GB of memory."),
+        card(() => openCreateSoftwareServer({ kinds: SPIGOT_FAMILY, title: "New Spigot or BungeeCord server" }), "layers", "Spigot or BungeeCord server", h("span", { class: "badge accent" }, "Java"),
+          "Spigot, the original plugin server, built for you with SpigotMC's tools. Or BungeeCord, a proxy that joins several servers into one network.")),
       // packs of this size are not found by the search of the modpack server: the manager installs them from the pack's own server files
       h("div", { class: "stack-sm" },
         h("div", { class: "section-title" }, "Large expert modpacks"),

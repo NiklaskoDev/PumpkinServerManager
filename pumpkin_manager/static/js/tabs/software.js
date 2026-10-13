@@ -1,9 +1,10 @@
-// Version tab of a Vanilla, Paper or Fabric server: what is installed, updates, switching to another version, undoing an update.
+// Version tab of a server that runs software the manager installed (Vanilla, Paper, Fabric, Spigot, BungeeCord): what is installed,
+// updates, switching to another version, undoing an update. A proxy (BungeeCord) has builds and no Minecraft version.
 
 import { PERM, can } from "../access.js";
 import { get, patch, post } from "../api.js";
 import { clear, fmtDate, fmtDateTime, fmtRelative, h, icon } from "../dom.js";
-import { BUILD_WORD, EXTRAS, UPDATE_MODES, buildChoices, supportNotices, versionOption } from "../software.js";
+import { BUILD_WORD, EXTRAS, UPDATE_MODES, buildChoices, buildName, supportNotices, updateHint, versionOption } from "../software.js";
 import { busy, confirmDialog, field, jobDialog, notifyError, selectControl, switchControl, toast } from "../ui.js";
 
 const STATUS = { success: "success", rolled_back: "warning", failed: "error", interrupted: "warning", running: "info" };
@@ -31,8 +32,8 @@ export function render({ id, getServer }) {
       h("div", { class: "row" }, icon("layers"), h("strong", { class: "big grow" }, sw.label)),
       h("dl", { class: "kv" },
         h("dt", {}, "Software"), h("dd", {}, sw.name, maintained ? [" ", maintained] : null),
-        h("dt", {}, "Minecraft"), h("dd", {}, sw.minecraft || "–"),
-        sw.build ? [h("dt", {}, word === "build" ? "Paper build" : "Fabric loader"), h("dd", {}, `${sw.build}${sw.channel && sw.channel !== "stable" ? ` (${sw.channel})` : ""}`)] : null,
+        sw.minecraft ? [h("dt", {}, "Minecraft"), h("dd", {}, sw.minecraft)] : null,
+        sw.build ? [h("dt", {}, word === "loader" ? "Fabric loader" : `${sw.name} build`), h("dd", {}, `${sw.build}${sw.channel && sw.channel !== "stable" ? ` (${sw.channel})` : ""}`)] : null,
         sw.fabric_api ? [h("dt", {}, "Fabric API"), h("dd", {}, sw.fabric_api.number)] : null,
         h("dt", {}, "Java"), h("dd", {}, `Java ${info.java.major}${info.java.runtime ? ` (${info.java.runtime})` : " (downloaded when the server starts)"}`),
         sw.installed_at ? [h("dt", {}, "Installed"), h("dd", {}, fmtDateTime(sw.installed_at))] : null),
@@ -55,6 +56,7 @@ export function render({ id, getServer }) {
         message: h("div", { class: "stack-sm" },
           h("p", {}, "The server is stopped, a verified backup is made, then the new version is installed and the server starts again. If it does not start, the backup is restored automatically."),
           converts ? h("p", { class: "field-error" }, `This changes Minecraft from ${sw.minecraft} to ${minecraft}. The world is converted when the server starts and the old version cannot open it again; the backup made first is the way back.${sw.kind === "vanilla" ? "" : " Plugins and mods have to support the new version as well."}`) : null,
+          sw.kind === "spigot" ? h("p", { class: "muted" }, "The new build is made first, while the server keeps running: that takes five to fifteen minutes. The server is only stopped when it is ready.") : null,
           s.state === "running" ? h("p", { class: "muted" }, "Players who are online are told 30 seconds before the restart.") : null),
       });
       if (ok) await run(`/api/servers/${id}/software/update`, request, `Updating ${s.name} to ${label}`);
@@ -65,9 +67,10 @@ export function render({ id, getServer }) {
         h("div", { class: "grow" }, "Update available: ", h("strong", {}, pending.label),
           h("div", { class: "small muted" }, pending.kind === "minecraft"
             ? `A new Minecraft release${pending.published ? `, published ${fmtRelative(pending.published)}` : ""}. It converts the world, so it is only installed when you say so.`
-            : `A newer ${word} for Minecraft ${sw.minecraft}${pending.published ? ` · published ${fmtRelative(pending.published)}` : ""}`)),
+            : `A newer ${word}${sw.minecraft ? ` for Minecraft ${sw.minecraft}` : ""}${pending.published ? ` · published ${fmtRelative(pending.published)}` : ""}`)),
         h("button", { class: "btn primary sm", disabled: working, onclick: () => applyUpdate({}, pending.label, pending.minecraft) }, "Update now"))
-      : h("p", { class: "muted" }, sw.kind === "vanilla" ? "This is the newest Minecraft release." : `This is the newest stable ${word} for Minecraft ${sw.minecraft}.`);
+      : h("p", { class: "muted" }, sw.kind === "vanilla" ? "This is the newest Minecraft release."
+        : !sw.minecraft ? `This is the newest ${word}.` : `This is the newest ${sw.kind === "spigot" ? "" : "stable "}${word} for Minecraft ${sw.minecraft}.`);
 
     const news = upgrade
       ? h("div", { class: "notice" }, icon("info", "sm"), h("span", {}, `Minecraft ${upgrade.minecraft} is out${upgrade.published ? ` (${fmtRelative(upgrade.published)})` : ""}. Plugins or mods must support it before you switch, and the world is converted. `,
@@ -89,8 +92,7 @@ export function render({ id, getServer }) {
     };
     drawWait();
     const policy = h("div", { class: "stack-sm" },
-      field("New versions", selectControl(UPDATE_MODES[sw.kind], mode, (v) => { mode = v; drawWait(); }),
-        sw.kind === "vanilla" ? "A new Minecraft version changes the world, so it is never installed without you." : "A new Minecraft version is never installed by itself: it can break plugins or mods."),
+      field("New versions", selectControl(UPDATE_MODES[sw.kind], mode, (v) => { mode = v; drawWait(); }), updateHint(sw.kind)),
       waitHost,
       h("div", {}, h("button", { class: "btn sm", onclick: async () => {
         try {
@@ -131,7 +133,8 @@ export function render({ id, getServer }) {
     const s = getServer();
     const sw = info.software;
     const word = BUILD_WORD[sw.kind];
-    const f = { minecraft: sw.minecraft, build: "", snapshots: false, experimental: false };
+    const proxy = !!sw.proxy; // a proxy has builds and no Minecraft version
+    const f = { minecraft: proxy ? "" : sw.minecraft, build: "", snapshots: false, experimental: false };
     let versions = null;
     let ticket = 0;
     const versionHost = h("div", {});
@@ -141,6 +144,7 @@ export function render({ id, getServer }) {
     const actionHost = h("div", {});
 
     async function loadVersions() {
+      if (proxy) { versions = { versions: [], current: "" }; return loadBuilds(); }
       const mine = ++ticket;
       clear(versionHost).appendChild(h("p", { class: "muted" }, "Looking up the versions…"));
       try { versions = await get(`/api/servers/${id}/software/versions${f.snapshots ? "?snapshots=true" : ""}`); } catch (err) { return void clear(versionHost).appendChild(h("div", { class: "notice danger" }, icon("alert", "sm"), err.message)); }
@@ -155,7 +159,7 @@ export function render({ id, getServer }) {
       if (!options.some((o) => o.value === sw.minecraft)) options.unshift({ value: sw.minecraft, label: `${sw.minecraft} · installed` });
       clear(versionHost).appendChild(field("Minecraft version", selectControl(options, f.minecraft, (v) => { f.minecraft = v; f.build = ""; loadBuilds(); })));
       clear(snapshotHost);
-      if (sw.kind !== "paper") {
+      if (sw.kind === "vanilla" || sw.kind === "fabric") {
         snapshotHost.appendChild(switchControl({ label: "Show snapshots", hint: "Test versions of the next Minecraft release.", checked: f.snapshots, onChange: (on) => { f.snapshots = on; loadVersions(); } }));
       }
     }
@@ -186,9 +190,10 @@ export function render({ id, getServer }) {
         noticeHost.appendChild(h("div", { class: "notice danger" }, icon("alert", "sm"),
           `Minecraft ${f.minecraft} is older than the ${sw.minecraft} this server runs. A world that was opened by a newer version usually cannot be opened by an older one. The backup made first is the only way back.`));
       }
-      if (options && sw.kind !== "vanilla") {
+      // Vanilla has no builds, and SpigotMC offers one build for a Minecraft version: there is nothing to choose
+      if (options && sw.kind !== "vanilla" && sw.kind !== "spigot") {
         const list = buildChoices(sw.kind, options).map((c) => ({ ...c, label: c.value === sw.build && f.minecraft === sw.minecraft ? `${c.label} · installed` : c.label }));
-        buildHost.appendChild(field(sw.kind === "paper" ? "Paper build" : "Fabric loader version", selectControl(list, f.build, (v) => { f.build = v; })));
+        buildHost.appendChild(field(buildName(sw.kind), selectControl(list, f.build, (v) => { f.build = v; })));
         if (options.has_experimental) {
           buildHost.appendChild(switchControl({ label: "Include experimental builds", hint: "Alpha and beta builds are not meant for servers that matter.", checked: f.experimental,
             onChange: (on) => { f.experimental = on; f.build = ""; loadBuilds(); } }));
@@ -196,23 +201,23 @@ export function render({ id, getServer }) {
       }
       actionHost.appendChild(h("button", { class: "btn sm primary", disabled: !!s.busy, onclick: () => {
         const sameVersion = f.minecraft === sw.minecraft && (sw.kind === "vanilla" || f.build === sw.build || (f.build === "" && options?.default === sw.build));
-        if (sameVersion) return toast("That version is already installed.", "info");
-        const request = { minecraft: f.minecraft };
+        if (sameVersion) return toast(proxy ? "That build is already installed." : "That version is already installed.", "info");
+        const request = proxy ? {} : { minecraft: f.minecraft };
         if (f.build) request.build = f.build;
         if (isOlder()) request.confirm_downgrade = true;
-        const label = `${sw.name} ${f.minecraft}${f.build ? ` (${word} ${f.build})` : ""}`;
+        const label = proxy ? `${sw.name}${f.build ? ` (${word} ${f.build})` : " (the newest build)"}` : `${sw.name} ${f.minecraft}${f.build ? ` (${word} ${f.build})` : ""}`;
         applyUpdate(request, label, f.minecraft);
-      } }, "Install this version"));
+      } }, proxy ? "Install this build" : "Install this version"));
     }
 
     const details = h("details", {},
-      h("summary", {}, "Switch to another version"),
+      h("summary", {}, proxy ? "Switch to another build" : "Switch to another version"),
       h("div", { class: "stack-sm", style: { marginTop: "10px" } },
-        h("p", { class: "hint" }, "A verified backup is made first, and the server is restored if the new version does not start."),
+        h("p", { class: "hint" }, `A verified backup is made first, and the ${proxy ? "proxy" : "server"} is restored if the new ${proxy ? "build" : "version"} does not start.`),
         versionHost, snapshotHost, buildHost, noticeHost, actionHost));
     details.addEventListener("toggle", () => { if (details.open && !versions) loadVersions(); });
     return {
-      el: h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, "Change version")), details),
+      el: h("div", { class: "card stack" }, h("div", { class: "card-head" }, h("h2", {}, proxy ? "Change build" : "Change version")), details),
       choose(minecraft) {
         f.minecraft = minecraft;
         f.build = "";

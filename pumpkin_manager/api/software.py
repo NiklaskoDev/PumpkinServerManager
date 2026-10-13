@@ -1,4 +1,5 @@
-"""Servers that run Vanilla, Paper or Fabric: what can be installed, and updating, switching and rolling back the ones that do."""
+"""Servers that run Vanilla, Paper, Fabric, Spigot or BungeeCord: what can be installed, and updating, switching and rolling back the ones
+that do."""
 
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ class SoftwareUpdateBody(BaseModel):
 
 def _managed(rec: ServerRecord) -> ServerRecord:
     if not (rec.is_java and rec.spec.get("software")):
-        raise ServerError("This server does not run Vanilla, Paper or Fabric that the manager installed.", 404)
+        raise ServerError("This server does not run server software that the manager installed.", 404)
     return rec
 
 
@@ -44,17 +45,18 @@ async def versions(
 
 @router.get("/software/{kind}/builds")
 async def builds(
-    request: Request, kind: str, minecraft: str = Query(min_length=1, max_length=64), experimental: bool = False,
+    request: Request, kind: str, minecraft: str = Query("", max_length=64), experimental: bool = False,
     principal: Principal = Depends(any_server_perm(VERSIONS)),
 ) -> dict[str, Any]:
-    """The builds of one Minecraft version (Paper builds, Fabric loader versions), newest first, with what the maker says about it."""
+    """The builds of one Minecraft version (Paper builds, Fabric loader versions), newest first, with what the maker says about it. A proxy
+    (BungeeCord) has no Minecraft version: its builds are listed whatever is asked."""
     return (await get_ctx(request).software.options(kind, minecraft)).public(experimental)
 
 
 # ------------------------------------------------------------------------------------------------------- one server
 @router.get("/servers/{server_id}/software")
 async def server_software(request: Request, rec: ServerRecord = Depends(server_perm(VERSIONS))) -> dict[str, Any]:
-    """What a Vanilla, Paper or Fabric server runs: the software, its version, what was found newer, and how Java is set up."""
+    """What a server with software the manager installed runs: the software, its version, what was found newer, and how Java is set up."""
     jvm = get_ctx(request).servers.jvm
     _, java = jvm.describe(_managed(rec))
     return {"software": jvm.describe_software(rec), "java": java}
@@ -68,7 +70,7 @@ async def server_versions(request: Request, snapshots: bool = False, rec: Server
 
 @router.get("/servers/{server_id}/software/builds")
 async def server_builds(
-    request: Request, minecraft: str = Query(min_length=1, max_length=64), experimental: bool = False,
+    request: Request, minecraft: str = Query("", max_length=64), experimental: bool = False,
     rec: ServerRecord = Depends(server_perm(VERSIONS)),
 ) -> dict[str, Any]:
     return await get_ctx(request).software_updates.builds(_managed(rec), minecraft, experimental)

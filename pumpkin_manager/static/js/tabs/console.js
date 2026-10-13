@@ -90,7 +90,8 @@ export function render({ id, getServer }) {
 
   // Moderators can read the console but not type into it: neither the box nor the shortcut buttons are offered to them.
   const canType = can(getServer(), PERM.CONSOLE_COMMAND);
-  const quick = canType ? ["list", "tps", "save-all"].map((c) => h("button", { class: "btn", type: "button", onclick: () => send(c) }, c)) : [];
+  // the commands a person types most: a proxy (BungeeCord) has its own, and none of the world's
+  const quick = canType ? (getServer().proxy ? ["glist", "server"] : ["list", "tps", "save-all"]).map((c) => h("button", { class: "btn", type: "button", onclick: () => send(c) }, c)) : [];
   const box = h("div", { class: "console-box" },
     h("div", { class: "console-bar" }, status, filterInput, wrapBtn, clearBtn, ...quick),
     out, jump,

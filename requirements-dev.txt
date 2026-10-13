@@ -1,4 +1,5 @@
 -r requirements.txt
 pytest==9.1.1
 pytest-asyncio==1.4.0
+PyYAML==6.0.3  # only the tests: they read back the config.yml that the manager writes for BungeeCord, with a real YAML parser
 ruff==0.17.0

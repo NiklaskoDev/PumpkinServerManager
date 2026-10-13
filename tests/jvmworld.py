@@ -7,7 +7,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from jvmfakes import FakeCurseForge, FakeFabric, FakeFabricApi, FakeGtnh, FakeInternet, FakeJava, FakeMod, FakeModrinth, FakePaper
+from jvmfakes import (
+    FakeBungee,
+    FakeCurseForge,
+    FakeFabric,
+    FakeFabricApi,
+    FakeGtnh,
+    FakeInternet,
+    FakeJava,
+    FakeMod,
+    FakeModrinth,
+    FakePaper,
+    FakeSpigot,
+)
 
 FAKE_JAVA = Path(__file__).parent / "fake_java_server.py"
 LITHIUM = FakeMod("mods/lithium.jar", b"lithium" * 100)
@@ -55,6 +67,15 @@ class JavaWorld:
             ("2.9.0-RC-2", True, "2026/10/04", 26), ("2.8.4", False, "2025/12/23", 25), ("2.8.3", False, "2025/12/12", 25), ("2.7.4", False, "2025/04/13", 21),
         ):
             self.gtnh.add_release(version, beta=beta, date=date, java_max=java_max)
+        # Spigot is built with a JDK (a runtime with a compiler) by SpigotMC's BuildTools; BungeeCord is a download of SpigotMC's build server
+        for major, release in ((21, "jdk-21.0.12.1+1"), (17, "jdk-17.0.20.1+1"), (25, "jdk-25.0.4.1+1"), (8, "jdk8u312-b07")):
+            self.net.adoptium(major, release=release, image="jdk")
+        self.spigot = FakeSpigot(self.net)
+        for version, name, java in (("1.21.4", "4458", (65, 68)), ("1.21.1", "4205", (65, 66)), ("1.20.4", "4023", (61, 65)), ("1.16.5", "3096a", (52, 60))):
+            self.spigot.add_version(version, name, java=java)
+        self.bungee = FakeBungee(self.net)
+        for number, result in ((2105, "UNSTABLE"), (2104, "SUCCESS"), (2103, "SUCCESS"), (2102, "FAILURE"), (2101, "SUCCESS"), (2100, "SUCCESS")):
+            self.bungee.add_build(number, result)
         self.installer = FakeJava()
         self.behavior: dict[str, Any] = {"minecraft": "1.21.1"}  # what the fake Java server does (see fake_java_server.py)
         self.pack = FakeModrinth(self.net, slug="cool-pack", title="Cool Pack", project_id="AbCdEf12")
@@ -65,7 +86,7 @@ class JavaWorld:
 
     def app_options(self) -> dict[str, Any]:
         """Keyword arguments that make an ``AppContext`` / ``create_app`` use this world instead of the real one."""
-        return {"http_client": self.net.client(), "java_runner": self.installer, "verify_java": False}
+        return {"http_client": self.net.client(), "java_runner": self.installer, "verify_java": False, "build_runner": self.spigot.runner}
 
     def attach(self, ctx: Any) -> None:
         """Start the fake Java server wherever the manager would start the real Java."""

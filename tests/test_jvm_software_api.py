@@ -177,7 +177,7 @@ async def test_other_servers_have_nothing_to_do_with_the_software_routes(jvm_liv
     for sid in (pumpkin["id"], packed["id"]):
         for method, path in (("GET", "software"), ("GET", "software/versions"), ("POST", "software/check"), ("POST", "software/update"), ("POST", "software/rollback")):
             resp = await api.call(method, f"/api/servers/{sid}/{path}", json={} if method == "POST" else None)
-            assert resp.status_code == 404 and "does not run Vanilla, Paper or Fabric" in resp.json()["detail"], (sid, path)
+            assert resp.status_code == 404 and "does not run server software" in resp.json()["detail"], (sid, path)
     software = await create(api, "Software")
     resp = await api.call("GET", f"/api/servers/{software['id']}/modpack")
     assert resp.status_code == 404 and "does not run a modpack" in resp.json()["detail"]

@@ -12,6 +12,8 @@ stops it.
     python scripts/real_java_check.py --accept-eula --software all                 # Vanilla, Paper and Fabric servers, newest stable
     python scripts/real_java_check.py --accept-eula --software paper --software-update   # ... one step behind, updated, then rolled back
     python scripts/real_java_check.py --accept-eula --software fabric --software-from 1.21.11   # ... on an older Minecraft, switched to the newest
+    python scripts/real_java_check.py --accept-eula --software spigot   # Spigot, built with SpigotMC's BuildTools (5-15 minutes, 2 GB free)
+    python scripts/real_java_check.py --accept-eula --software bungeecord --software-update   # a BungeeCord proxy, updated a build and rolled back
     python scripts/real_java_check.py --accept-eula --pack cobblemon-fabric   # a real Modrinth modpack (name or link; repeatable)
     CURSEFORGE_API_KEY=... python scripts/real_java_check.py --accept-eula --curseforge-pack 715572   # a CurseForge modpack
     python scripts/real_java_check.py --accept-eula --gtnh --pack-memory 6144   # GT New Horizons from its own website (about 450 MB)
@@ -20,6 +22,12 @@ stops it.
 Vanilla, Paper and Fabric servers (--software) are made from what Mojang, PaperMC and Fabric offer right now; --software-update installs
 the previous build (or the previous release, for Vanilla) first, then updates to the newest one and rolls that back. --software-from
 starts on an older Minecraft version instead and switches to the newest one (a version upgrade: new Java, converted world, new Fabric API).
+
+Spigot (--software spigot) is not downloaded but built: SpigotMC's BuildTools runs on this machine with a Java development kit that the
+manager downloads first (about 200 MB), needs git (on Windows BuildTools brings its own), takes five to fifteen minutes and about 2 GB of
+temporary space; it is left out of --software all for that reason. SpigotMC has one build per Minecraft version, so --software-update has
+nothing to update from: --software-from VERSION (two builds) tests the update. BungeeCord (--software bungeecord) is a proxy: a plain
+download, no EULA and no world; the check talks to it with its own console commands.
 
 GT New Horizons (--gtnh) is installed from the official server files on gtnewhorizons.com (the newest stable version unless --gtnh-version
 says otherwise), on the Java 17+ build unless --gtnh-build legacy asks for the Java 8 one. It needs 6 GiB; with --pack-update it starts one
@@ -76,7 +84,8 @@ from pumpkin_manager.models import software_label  # noqa: E402
 from pumpkin_manager.util import strip_ansi  # noqa: E402
 
 LOADERS = ("fabric", "neoforge", "forge", "quilt")
-SOFTWARE = ("vanilla", "paper", "fabric")
+SOFTWARE = ("vanilla", "paper", "fabric", "spigot", "bungeecord")
+EVERYDAY_SOFTWARE = SOFTWARE[:3]  # what "--software all" means: the others take a quarter of an hour (Spigot) or have no world (BungeeCord)
 DEFAULT_MINECRAFT = {"fabric": None, "neoforge": "1.21.1", "forge": "1.20.1", "quilt": "1.21.1"}  # None: the newest release
 MODS = {"fabric": ("fabric-api", "lithium")}
 SETTINGS = {"online-mode": False, "view-distance": 4, "simulation-distance": 4, "max-players": 5, "motd": "real java check"}
@@ -162,6 +171,11 @@ def said(ctx: AppContext, server_id: str, text: str, since: int = 0) -> bool:
     return any(text in strip_ansi(line["m"]) for line in ctx.pm.backlog(server_id, 4000) if line["n"] > since)
 
 
+def ready_line(ctx: AppContext, server_id: str) -> str:
+    """What the server prints when it is up: a Minecraft server says 'Done (12.3s)!', BungeeCord says 'Listening on /0.0.0.0:25577'."""
+    return "Listening on" if ctx.servers.get(server_id).is_proxy else "Done ("
+
+
 def said_since_start(ctx: AppContext, server_id: str, text: str) -> bool:
     """Whether the current run of the server said ``text``: asks the console file, which keeps everything since the last start (the
     manager's own console window holds the last 3000 lines, and a big modpack prints more than that within a minute of saying Done)."""
@@ -214,7 +228,7 @@ async def check_software_update(ctx: AppContext, label: str, server_id: str, old
     check(row["status"] == "success" and latest.get("status") == "success", "the update was applied", f"{row['message'] or ''} {latest.get('message') or ''}".strip())
     check(server.spec["software"]["build"] == newest.build and server.spec["minecraft"] == newest.minecraft and ctx.pm.runtime(server_id).state == "running",
           "the server runs the new version", f"Java {server.spec['java']}" + (f", Fabric API {server.spec['software']['fabric_api']['number']}" if server.spec["software"].get("fabric_api") else ""))
-    check(said_since_start(ctx, server_id, "Done ("), "the server printed its 'Done (...)!' line again after the update")
+    check(said_since_start(ctx, server_id, ready_line(ctx, server_id)), f"the server printed its '{ready_line(ctx, server_id).strip(' (')}' line again after the update")
     safety = [b for b in ctx.repo.list_backups(server_id) if b.get("kind") == "pre-update"]
     check(bool(safety) and bool(safety[0]["verified"]), "a verified backup was taken before the update", safety[0]["build_tag"] if safety else "")
     check(bool(ctx.servers.jvm.describe_software(server)["can_roll_back"]), "the update can be rolled back")
@@ -240,11 +254,14 @@ async def check_software(ctx: AppContext, kind: str, minecraft: str | None, memo
         check(False, f"{kind}: the maker's service answers", repr(exc))
         return
     check(True, "what is offered", f"{len(listed)} Minecraft versions (newest {listed[0]['id']}); {build.label} ({build.channel}), Java {options.java_minimum or '?'} at least, "
-          f"{build.size / 1048576:.1f} MiB" if build.size else f"{len(listed)} Minecraft versions; {build.label}")
+          f"{build.size / 1048576:.1f} MiB" if build.size else f"{build.label}, a proxy: it has no Minecraft version, only builds ({len(options.builds)} listed)" if not listed
+          else f"{len(listed)} Minecraft versions; {build.label}, Java {options.java_minimum or '?'} at least")
     body = {
         "name": f"Real {kind}", "engine": "java", "eula": True, "memory_mb": memory, "start": True, "software": {"kind": kind, "minecraft": mc},
         "settings": SETTINGS,
     }
+    if kind == "bungeecord":  # a proxy: no EULA, settings of its own, and little memory
+        body = {**{k: v for k, v in body.items() if k != "eula"}, "memory_mb": 512, "settings": {"motd": SETTINGS["motd"], "max_players": 5}}
     extra = None
     if start_from:
         try:
@@ -434,20 +451,36 @@ async def check_server(
     print("        console after start:")
     for line in console_tail(ctx, server.id, limit=12):
         print(f"        > {line}")
+    proxy = server.is_proxy
+    kind = (server.spec.get("software") or {}).get("kind")
     check(rt.state == "running", "the manager reports the server as running")
-    check(said(ctx, server.id, "Done ("), "the server printed its 'Done (...)!' line")
+    check(said(ctx, server.id, ready_line(ctx, server.id)), f"the server printed its '{ready_line(ctx, server.id).strip(' (')}' line")
     check(ctx.runtimes.get(server.spec["java"]) is not None, f"Java {server.spec['java']} was downloaded and works", str(ctx.runtimes.get(server.spec["java"]).release))
     lock = ctx.servers.jvm.lock_of(server) or {}
     files = sorted(lock.get("files", {}))
     check(all((directory / name).is_file() for name in files) and all((directory / "mods" / name).is_file() for name in mods),
           "every file of the pack is in the server folder", f"{len(files)} files in the lock, {sum(f.startswith('mods/') for f in files)} of them mods")
-    props = (directory / "server.properties").read_text(encoding="utf-8")
-    check(f"server-port={server.java_port}" in props and "online-mode=false" in props and "enable-rcon=false" in props,
-          "server.properties has the manager's port, RCON off and the chosen settings")
-    if generated:
-        check((directory / "config" / "real-check.txt").is_file(), "the pack's configuration was applied")
-        check("allow-flight=true" in props, "the pack's own server.properties setting is there")
-    check((directory / "eula.txt").read_text(encoding="utf-8").count("eula=true") == 1, "eula.txt was written")
+    if proxy:  # BungeeCord keeps its settings in config.yml and has no EULA
+        config = (directory / "config.yml").read_text(encoding="utf-8")
+        check(f":{server.java_port}" in config and "real java check" in config and "max_players: 5" in config and "online_mode: true" in config,
+              "config.yml has the manager's port and the chosen settings")
+        check(not (directory / "eula.txt").exists() and not (directory / "server.properties").exists(), "no eula.txt and no server.properties: it is a proxy")
+        check("lobby" in config, "config.yml lists a server to send players to (BungeeCord does not start without one)")
+        check(not (ctx.settings.cache_dir / "spigot-build").exists() or not list((ctx.settings.cache_dir / "spigot-build").iterdir()), "no build folder is left behind")
+    else:
+        props = (directory / "server.properties").read_text(encoding="utf-8")
+        check(f"server-port={server.java_port}" in props and "online-mode=false" in props and "enable-rcon=false" in props,
+              "server.properties has the manager's port, RCON off and the chosen settings")
+        if generated:
+            check((directory / "config" / "real-check.txt").is_file(), "the pack's configuration was applied")
+            check("allow-flight=true" in props, "the pack's own server.properties setting is there")
+        check((directory / "eula.txt").read_text(encoding="utf-8").count("eula=true") == 1, "eula.txt was written")
+    if kind == "spigot":  # built, not downloaded: with a JDK, by BuildTools, and nothing but the jar stays
+        jdk = ctx.jdks.get(server.spec["java"])
+        check(jdk is not None and (jdk.path / "bin" / ("javac.exe" if os.name == "nt" else "javac")).is_file(), f"a Java {server.spec['java']} development kit was downloaded for the build", str(jdk.release if jdk else ""))
+        check((directory / "spigot.jar").is_file() and (directory / "spigot.jar").stat().st_size > 20 * 1048576, "spigot.jar was built", f"{(directory / 'spigot.jar').stat().st_size / 1048576:.0f} MiB")
+        check(not (ctx.settings.cache_dir / "spigot-build").exists() or not list((ctx.settings.cache_dir / "spigot-build").iterdir()), "the folder of the build (sources, Maven repository) is gone")
+        check(said_since_start(ctx, server.id, "-Spigot-"), "the server says that it runs Spigot", next((strip_ansi(line["m"]).split("]: ")[-1] for line in ctx.pm.backlog(server.id, 400) if "-Spigot-" in strip_ansi(line["m"])), ""))
     what = software_label(server.spec["software"]) if server.spec.get("software") else f"{server.spec['loader']['kind']} {server.spec['loader']['version']}, Minecraft {server.spec['minecraft']}"
     print(f"        {what}, Java {server.spec['java']}, {dir_megabytes(directory):.0f} MB on disk after the first start")
 
@@ -478,11 +511,18 @@ async def check_server(
         check(True, "the server answers the server-list ping", f"{info['version']!r}, {info['online']}/{info['max']} players, motd {info['motd']!r}")
         check(info["max"] == 5 and "real java check" in info["motd"], "max players and motd are the ones chosen")
     mark = max((line["n"] for line in ctx.pm.backlog(server.id, 4000)), default=0)
-    await ctx.pm.send_command(server.id, "list")
-    check(await eventually(lambda: said(ctx, server.id, "players online", mark), 15), "the console answers 'list'")
-    await ctx.pm.send_command(server.id, "whitelist add Notch")
-    await eventually(lambda: bool(ctx.servers.read_player_lists(server)["whitelist"]), 20)
-    check(any(e.get("name") for e in ctx.servers.read_player_lists(server)["whitelist"]), "whitelist add works and the list shows in the server folder")
+    if proxy:  # BungeeCord's own commands: it has glist (not list), and no whitelist
+        await ctx.pm.send_command(server.id, "glist")
+        check(await eventually(lambda: said(ctx, server.id, "Total players online", mark), 15), "the console answers 'glist'")
+        await ctx.pm.send_command(server.id, "stop")
+        check(await eventually(lambda: said(ctx, server.id, "Command not found", mark), 15) and ctx.pm.runtime(server.id).state == "running",
+              "'stop' is no BungeeCord command (that is why the manager sends 'end')")
+    else:
+        await ctx.pm.send_command(server.id, "list")
+        check(await eventually(lambda: said(ctx, server.id, "players online", mark), 15), "the console answers 'list'")
+        await ctx.pm.send_command(server.id, "whitelist add Notch")
+        await eventually(lambda: bool(ctx.servers.read_player_lists(server)["whitelist"]), 20)
+        check(any(e.get("name") for e in ctx.servers.read_player_lists(server)["whitelist"]), "whitelist add works and the list shows in the server folder")
 
     section(f"{label}: hot backup and restore")
     marker = directory / "real-check-marker.txt"
@@ -510,7 +550,10 @@ async def check_server(
     row = await wait_job(ctx, ctx.servers.submit_stop(ctx.servers.get(server.id)), timeout=300)
     check(row["status"] == "success" and ctx.pm.runtime(server.id).state == "stopped", "the server stops gracefully", f"exit code {ctx.pm.runtime(server.id).exit_code}")
     check(ctx.pm.runtime(server.id).exit_code == 0, "its exit code is 0")
-    check((directory / "world").is_dir() or any(p.is_dir() for p in directory.glob("*/region")), "a world was saved")
+    if not proxy:
+        check((directory / "world").is_dir() or any(p.is_dir() for p in directory.glob("*/region")), "a world was saved")
+    elif proxy:
+        check(said(ctx, server.id, "Thank you and goodbye"), "BungeeCord said goodbye: it was stopped with 'end', not killed")
 
 
 async def run(
@@ -572,7 +615,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--accept-eula", action="store_true", help="accept the Minecraft EULA for the throw-away servers (required)")
     parser.add_argument("--loader", choices=[*LOADERS, "all", "none"], help="which mod loader to test with a small generated pack (default: fabric, or none when --pack is given)")
-    parser.add_argument("--software", choices=[*SOFTWARE, "all"], help="also test Vanilla, Paper or Fabric servers (made without a modpack) from what their makers offer")
+    parser.add_argument("--software", choices=[*SOFTWARE, "all"], help="also test Vanilla, Paper, Fabric, Spigot (built with BuildTools) or BungeeCord (a proxy) servers, made without a modpack, from what "
+                        "their makers offer; 'all' is Vanilla, Paper and Fabric")
     parser.add_argument("--software-update", action="store_true",
                         help="install the previous build (the previous release for Vanilla) of each --software first, then update to the newest and roll that back")
     parser.add_argument("--software-from", metavar="VERSION",
@@ -607,7 +651,7 @@ def main() -> int:
     if args.loader_version and len(loaders) != 1:
         print("--loader-version needs exactly one --loader.", file=sys.stderr)
         return 2
-    software = list(SOFTWARE) if args.software == "all" else ([args.software] if args.software else [])
+    software = list(EVERYDAY_SOFTWARE) if args.software == "all" else ([args.software] if args.software else [])
     return asyncio.run(run(
         loaders, packs, args.minecraft, args.memory, args.pack_memory, args.keep, args.pack_update, not args.no_server_files, args.start_anyway,
         args.loader_version, software, args.software_update, args.software_from, args.gtnh_build,

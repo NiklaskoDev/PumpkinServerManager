@@ -26,12 +26,13 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from ..jobs import JobContext
-from ..models import SOFTWARE_NAMES, ServerPolicy, ServerRecord, software_label
+from ..models import PROXY_KINDS, SOFTWARE_NAMES, ServerPolicy, ServerRecord, software_label
 from ..pumpkin_config import ConfigError
 from ..servers import ServerError
 from ..util import atomic_write_text, human_bytes, iso
 from . import gtnh, missingmods
 from . import properties as props
+from . import proxy as proxy_config
 from .archive import ServerPack
 from .curseforge import (
     RELEASE_TYPES,
@@ -51,7 +52,7 @@ from .mojang import MojangMeta, available_java
 from .mrpack import LOCK_DIR, LOCK_NAME, PackError, PackIndex, PackInstaller, override_mods, read_pack
 from .net import DownloadError, ProgressCallback
 from .runtime import JavaRuntimes
-from .software import SoftwareCatalog, SoftwareInstaller
+from .software import PROXY_JAVA, Build, Options, SoftwareCatalog, SoftwareInstaller
 
 if TYPE_CHECKING:
     from ..servers import ServerService
@@ -62,6 +63,12 @@ READY_RE = re.compile(r"\bDone \([0-9.,]+s\)!")  # "Done (12.345s)! For help, ty
 # What vanilla, Forge and NeoForge log when a server cannot start (a mod that fails to load, for instance). Forge and NeoForge can
 # stay alive afterwards on threads of their own, so the manager acts on this line instead of waiting for the startup timeout.
 FAIL_RE = re.compile(r"Failed to start the minecraft server")
+# BungeeCord says it listens, not "Done". When its configuration cannot be used it logs the exception of its main thread, and then its
+# Java process stays alive doing nothing (so the manager must act on the line, as it does for Forge).
+PROXY_READY_RE = re.compile(r"\bListening on /")
+PROXY_FAIL_RE = re.compile(r'Exception in thread "main"|Invalid configuration encountered')
+PROXY_STOP_COMMAND = "end"  # BungeeCord has no "stop"
+PROXY_MEMORY_MB = 512  # a proxy only passes packets on: this is enough for hundreds of players
 # Forge up to Minecraft 1.12 stops at startup when the world has blocks or items that the mods no longer have, and waits until somebody
 # types "/fml confirm" (they are removed, after a backup of the world that Forge makes) or "/fml cancel" into its console. Forge compares
 # what is typed with exactly those words, slash included: "fml confirm" is not an answer, and the server keeps waiting.
@@ -87,9 +94,16 @@ REGENERATED = ["cache", "libraries/*", "versions/*"]
 
 
 def software_policy_defaults(kind: str) -> dict[str, Any]:
-    """Vanilla, Paper and Fabric start and save faster than a modpack. Paper builds are small steps (plugins are made for them), so
-    they are installed by themselves unless the person says otherwise; a new Minecraft version never is."""
-    excluded = ["logs", "crash-reports", *REGENERATED, *([".fabric/*"] if kind == "fabric" else [])]
+    """Vanilla, Paper, Fabric and Spigot start and save faster than a modpack. Paper builds are small steps (plugins are made for them),
+    so they are installed by themselves unless the person says otherwise; a new Minecraft version never is. A Spigot build takes a
+    quarter of an hour to make, so there it is the person's call. A proxy starts in seconds and has no world."""
+    if kind in PROXY_KINDS:  # BungeeCord downloads its libraries and modules when it starts and has a log of its own besides logs/
+        return {
+            **JAVA_POLICY_DEFAULTS, "start_timeout": 300, "stop_timeout": 60, "update_mode": "notify",
+            "backup_exclude": ["logs", "proxy.log*", "libraries/*"],
+        }
+    # Spigot unpacks its libraries into bundler/ instead of libraries/
+    excluded = ["logs", "crash-reports", *REGENERATED, *([".fabric/*"] if kind == "fabric" else []), *(["bundler/*"] if kind == "spigot" else [])]
     return {
         **JAVA_POLICY_DEFAULTS, "start_timeout": 600, "stop_timeout": 120, "update_mode": "auto" if kind == "paper" else "notify",
         "backup_exclude": excluded,
@@ -158,6 +172,7 @@ class JavaLaunch:
     label: str
     prompt_re: re.Pattern[str] | None = None  # the console line that says the server waits for an answer
     on_prompt: Callable[[list[str]], Awaitable[str | None]] | None = None  # what to type then (None: nothing)
+    stop_command: str = "stop"  # what ends it gracefully when typed into its console
 
 
 class JavaServerService:
@@ -191,8 +206,10 @@ class JavaServerService:
         return ServerError(message)
 
     def properties_path(self, rec_or_id: ServerRecord | str) -> Path:
+        """The file a server's settings live in: server.properties, or config.yml for a proxy."""
         server_id = rec_or_id if isinstance(rec_or_id, str) else rec_or_id.id
-        return self.svc.server_dir(server_id) / props.FILE_NAME
+        name = proxy_config.FILE_NAME if isinstance(rec_or_id, ServerRecord) and rec_or_id.is_proxy else props.FILE_NAME
+        return self.svc.server_dir(server_id) / name
 
     def _read(self, rec: ServerRecord) -> str:
         path = self.properties_path(rec)
@@ -252,14 +269,15 @@ class JavaServerService:
         return modpack, java
 
     def describe_software(self, rec: ServerRecord) -> dict[str, Any] | None:
-        """What a Vanilla, Paper or Fabric server runs, for the server view (None for the other kinds of server)."""
+        """What a Vanilla, Paper, Fabric, Spigot or BungeeCord server runs, for the server view (None for the other kinds of server)."""
         software = rec.spec.get("software")
         if not software:
             return None
         kind = str(software.get("kind") or "")
         api = software.get("fabric_api")
         return {
-            "kind": kind, "name": SOFTWARE_NAMES.get(kind, kind), "minecraft": software.get("minecraft"), "build": software.get("build") or None,
+            "kind": kind, "name": SOFTWARE_NAMES.get(kind, kind), "proxy": kind in PROXY_KINDS, "minecraft": software.get("minecraft") or None,
+            "build": software.get("build") or None,
             "channel": software.get("channel"), "label": software_label(software), "installed_at": software.get("installed_at"),
             "support": software.get("support"), "pending": software.get("pending"), "upgrade": software.get("upgrade"),
             "can_roll_back": bool(rec.spec.get("previous")), "fabric_api": {"number": api.get("number")} if api else None,
@@ -274,20 +292,24 @@ class JavaServerService:
         return [m for m in wanted if not (directory / str(m.get("path", "-"))).is_file()]
 
     # ------------------------------------------------------------------ create
-    def _check_new(self, spec: dict[str, Any], *, memory: int, defaults: dict[str, Any]) -> NewServer:
-        """Check what every new Java server needs (name, EULA, memory, options, settings, policy) before anything is downloaded."""
+    def _check_new(self, spec: dict[str, Any], *, memory: int, defaults: dict[str, Any], proxy: bool = False) -> NewServer:
+        """Check what every new Java server needs (name, EULA, memory, options, settings, policy) before anything is downloaded. A proxy
+        needs no EULA (it runs no Minecraft server) and its settings are those of its config.yml."""
         svc = self.svc
         name = " ".join(str(spec["name"]).split())
         if not 1 <= len(name) <= 40:
             raise self._error("The server name must be 1-40 characters long.")
         if any(r.name.lower() == name.lower() for r in svc.repo.list_servers()):
             raise self._error("A server with that name already exists.")
-        if spec.get("eula") is not True:
+        if not proxy and spec.get("eula") is not True:
             raise self._error(f"Running a Minecraft server means accepting the Minecraft EULA ({EULA_URL}). Tick the box to confirm.")
         try:
             wanted = self.parse_memory(memory if spec.get("memory_mb") is None else spec["memory_mb"])  # the API sends None when it was left out
             jvm_args = self.parse_jvm_args(spec.get("jvm_args"))
-            values = props.validate_values({"op-permission-level": props.DEFAULT_OP_LEVEL, **(spec.get("settings") or {})})
+            if proxy:
+                values = proxy_config.validate_values(spec.get("settings") or {})
+            else:
+                values = props.validate_values({"op-permission-level": props.DEFAULT_OP_LEVEL, **(spec.get("settings") or {})})
             policy = ServerPolicy.model_validate({**defaults, **(spec.get("policy") or {})})
         except ConfigError as exc:
             raise self._error(f"Invalid settings: {exc}") from exc
@@ -301,7 +323,10 @@ class JavaServerService:
             if not isinstance(software, dict):
                 raise self._error("The software to install is not valid.")
             kind = SoftwareCatalog.check_kind(software.get("kind"))
-            new = self._check_new(spec, memory=SOFTWARE_MEMORY_MB, defaults=software_policy_defaults(kind))
+            proxy = kind in PROXY_KINDS
+            new = self._check_new(
+                spec, memory=PROXY_MEMORY_MB if proxy else SOFTWARE_MEMORY_MB, defaults=software_policy_defaults(kind), proxy=proxy,
+            )
             return await self._create_software(new, kind, software, spec, ctx)
         if (spec.get("modpack") or {}).get("source") == gtnh.PROJECT:
             return await self._create_modpack(self._check_new(spec, memory=gtnh.MEMORY_MB, defaults=gtnh_policy_defaults()), spec, ctx)
@@ -310,9 +335,12 @@ class JavaServerService:
     async def _register(self, new: NewServer, staging: Path, record_spec: dict[str, Any], port: Any) -> tuple[ServerRecord, int]:
         """Give a new server the files every server gets, move its folder into place and record it. Returns it and its game port."""
         svc = self.svc
-        self._write_eula(staging)
-        existing = staging / props.FILE_NAME
-        text = props.apply(existing.read_text(encoding="utf-8") if existing.is_file() else "", new.values)
+        proxy = (record_spec.get("software") or {}).get("kind") in PROXY_KINDS  # no EULA and no server.properties: config.yml instead
+        text = ""
+        if not proxy:
+            self._write_eula(staging)
+            existing = staging / props.FILE_NAME
+            text = props.apply(existing.read_text(encoding="utf-8") if existing.is_file() else "", new.values)
         async with svc._create_lock:
             if any(r.name.lower() == new.name.lower() for r in svc.repo.list_servers()):  # another creation may have finished meanwhile
                 raise self._error("A server with that name already exists.")
@@ -328,12 +356,23 @@ class JavaServerService:
             )
             try:
                 os.replace(staging, directory)
-                atomic_write_text(directory / props.FILE_NAME, props.apply_managed(text, java_port)[0])
+                if proxy:
+                    atomic_write_text(directory / proxy_config.FILE_NAME, self.initial_proxy_config(java_port, new.values))
+                else:
+                    atomic_write_text(directory / props.FILE_NAME, props.apply_managed(text, java_port)[0])
                 svc.repo.insert_server(rec)
             except BaseException:
                 shutil.rmtree(directory, ignore_errors=True)
                 raise
         return rec, java_port
+
+    def initial_proxy_config(self, port: int, values: dict[str, Any]) -> str:
+        """The config.yml of a proxy: the servers the manager runs are the ones it sends players to (they are all on this machine)."""
+        backends = sorted((r for r in self.svc.repo.list_servers() if not r.is_proxy), key=lambda r: (r.created_at, r.name.lower()))
+        servers = [{"name": proxy_config.server_name(r.id), "address": f"127.0.0.1:{r.java_port}", "motd": r.name} for r in backends]  # the oldest first
+        return proxy_config.build_initial(
+            port, values.get("motd", proxy_config.DEFAULT_MOTD), values.get("max_players", proxy_config.DEFAULT_MAX_PLAYERS), servers,
+        )
 
     def _announce_created(self, rec: ServerRecord, java_port: int, what: str, ctx: JobContext) -> None:
         ctx.claim(rec.id)
@@ -399,8 +438,10 @@ class JavaServerService:
         return rec
 
     async def _create_software(self, new: NewServer, kind: str, request: dict[str, Any], spec: dict[str, Any], ctx: JobContext) -> ServerRecord:
-        """Vanilla, Paper or Fabric: nothing to unpack, so this is mostly one download and a check of it."""
+        """Vanilla, Paper, Fabric, Spigot or BungeeCord: nothing to unpack, so this is mostly one download (Spigot: one build) and a check
+        of it."""
         svc = self.svc
+        proxy = kind in PROXY_KINDS
         staging = svc.settings.servers_dir / f".create-{uuid.uuid4().hex}"
         try:
             ctx.step(f"Looking up {SOFTWARE_NAMES[kind]}")
@@ -414,14 +455,14 @@ class JavaServerService:
             if (options.support or {}).get("status") == "UNSUPPORTED":
                 end = (options.support or {}).get("end")
                 ctx.warn(f"PaperMC no longer maintains Minecraft {build.minecraft}{f' (since {end})' if end else ''}: it still runs, but gets no more fixes.")
-            major = available_java(max(await self.mojang.java_major(build.minecraft), options.java_minimum or 0))
-            ctx.step(f"Minecraft {build.minecraft} needs Java {major}")
+            major = await self.java_for_software(build, options)
+            ctx.step(f"{software_label({'kind': kind})} runs on Java {major}" if proxy else f"Minecraft {build.minecraft} needs Java {major}")
             java = await self.runtimes.ensure(major, self._java_progress(ctx, major))
 
             staging.mkdir(parents=True)
             launch = await self.installer.fetch(
-                build, staging, java.java, lambda message: ctx.progress(None, message),
-                lambda done, total: ctx.progress(0.25 + 0.5 * (done / total if total else 0), f"Downloading {build.label} ({done // 1048576} of {total // 1048576} MiB)"),
+                build, staging, java.java, lambda message: ctx.progress(None, message), self.fetch_progress(ctx, build, 0.25, 0.5),
+                java_major=major, jdk_progress=self._java_progress(ctx, major, kit=True),
             )
             fabric_api = None
             if kind == "fabric" and request.get("fabric_api") is not False:
@@ -445,15 +486,21 @@ class JavaServerService:
             }
             if fabric_api:
                 software["fabric_api"] = fabric_api
-            rec, java_port = await self._register(new, staging, {
+            record_spec = {
                 "kind": "software", "minecraft": build.minecraft, "software": software, "java": major, "memory_mb": new.memory,
-                "jvm_args": jvm_args, "launch": launch, "eula_accepted_at": iso(),
-            }, spec.get("java_port"))
+                "jvm_args": jvm_args, "launch": launch,
+            }
+            if not proxy:
+                record_spec["eula_accepted_at"] = iso()
+            rec, java_port = await self._register(new, staging, record_spec, spec.get("java_port"))
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         self._announce_created(rec, java_port, build.label, ctx)
         if spec.get("start", True):
-            ctx.step("Starting the server for the first time (the world is generated now, which takes a while)")
+            ctx.step(
+                "Starting the proxy for the first time (it downloads its libraries and modules now)" if proxy
+                else "Starting the server for the first time (the world is generated now, which takes a while)"
+            )
             await svc._do_start(rec, ctx)
         return rec
 
@@ -519,11 +566,29 @@ class JavaServerService:
         if kept:
             ctx.step(f"Keeping {mods_text(len(kept))} that only work{'s' if len(kept) == 1 else ''} on a client, because other mods in the pack need {'it' if len(kept) == 1 else 'them'}")
 
-    def _java_progress(self, ctx: JobContext, major: int) -> Callable[[int, int], None]:
+    def _java_progress(self, ctx: JobContext, major: int, kit: bool = False) -> Callable[[int, int], None]:
+        """What to tell a job while Java is downloaded (``kit``: the development kit that Spigot is built with)."""
+        name = f"Java {major}{' development kit' if kit else ''}"
+
         def callback(done: int, total: int) -> None:
-            ctx.progress(0.05 + 0.15 * (done / total if total else 0), f"Downloading Java {major} ({done // 1048576} of {total // 1048576} MiB)")
+            ctx.progress(0.05 + 0.15 * (done / total if total else 0), f"Downloading {name} ({done // 1048576} of {total // 1048576} MiB)")
 
         return callback
+
+    async def java_for_software(self, build: Build, options: Options) -> int:
+        """The Java a build of server software runs on: what its Minecraft version needs and what its maker says (a proxy has no
+        Minecraft version: it runs on the Java the manager uses for such things, if its maker allows)."""
+        if build.kind in PROXY_KINDS:
+            return available_java(max(PROXY_JAVA, options.java_minimum or 0))
+        return available_java(max(await self.mojang.java_major(build.minecraft), options.java_minimum or 0))
+
+    def fetch_progress(self, ctx: JobContext, build: Build, base: float, span: float) -> Callable[[int, int], None]:
+        """What to tell a job while a build is fetched: how much of a download is in, or (Spigot, which is built) how far the build is."""
+        if build.kind == "spigot":
+            return lambda done, total: ctx.progress(base + span * (done / total if total else 0))  # the builder words what it is doing
+        return lambda done, total: ctx.progress(
+            base + span * (done / total if total else 0), f"Downloading {build.label} ({done // 1048576} of {total // 1048576} MiB)"
+        )
 
     # ------------------------------------------------------------------ opening a pack
     async def open_pack(self, modpack: dict[str, Any], ctx: JobContext, *, leave_out: bool = True) -> OpenedPack:
@@ -882,6 +947,11 @@ class JavaServerService:
     # ------------------------------------------------------------------- config
     def read_config(self, rec: ServerRecord) -> dict[str, Any]:
         path = self.properties_path(rec)
+        if rec.is_proxy:
+            return {
+                "values": proxy_config.read_values(self._read(rec)), "schema": proxy_config.schema(), "exists": path.is_file(), "error": None,
+                "restart_required_hint": self.svc.pm.runtime(rec.id).is_active, "title": "Proxy settings", "file": proxy_config.FILE_NAME,
+            }
         return {
             "values": props.read_values(self._read(rec)), "schema": props.schema(), "exists": path.is_file(), "error": None,
             "restart_required_hint": self.svc.pm.runtime(rec.id).is_active,
@@ -889,16 +959,22 @@ class JavaServerService:
 
     def update_config(self, rec: ServerRecord, values: dict[str, Any]) -> dict[str, Any]:
         text = self._read(rec)
-        self._write(rec, text, props.apply_managed(props.apply_values(text, values), rec.java_port)[0])
+        if rec.is_proxy:
+            self._write(rec, text, proxy_config.apply_managed(proxy_config.apply_values(text, values), rec.java_port)[0])
+        else:
+            self._write(rec, text, props.apply_managed(props.apply_values(text, values), rec.java_port)[0])
         return {"saved": True, "restart_required": self.svc.pm.runtime(rec.id).is_active}
 
     def read_raw_config(self, rec: ServerRecord) -> dict[str, Any]:
+        if rec.is_proxy:
+            return {"content": self._read(rec), "managed_keys": ["the port in host (under listeners)"], "file": proxy_config.FILE_NAME}
         return {"content": self._read(rec), "managed_keys": list(props.MANAGED_KEYS), "file": props.FILE_NAME}
 
     def write_raw_config(self, rec: ServerRecord, content: str) -> dict[str, Any]:
+        file = proxy_config.FILE_NAME if rec.is_proxy else props.FILE_NAME
         if len(content.encode("utf-8")) > 512 * 1024:
-            raise self._error("server.properties is limited to 512 KiB.")
-        new_text, changed = props.apply_managed(content, rec.java_port)
+            raise self._error(f"{file} is limited to 512 KiB.")
+        new_text, changed = (proxy_config if rec.is_proxy else props).apply_managed(content, rec.java_port)
         self._write(rec, self._read(rec), new_text)
         return {"saved": True, "reset_managed_keys": changed, "restart_required": self.svc.pm.runtime(rec.id).is_active}
 
@@ -906,17 +982,23 @@ class JavaServerService:
         path = self.properties_path(rec)
         if old_text and old_text != new_text:
             with contextlib.suppress(OSError):
-                atomic_write_text(path.with_name("server.properties.manager-bak"), old_text)
+                atomic_write_text(path.with_name(f"{path.name}.manager-bak"), old_text)
         atomic_write_text(path, new_text)
 
     def ensure_config(self, rec: ServerRecord, ctx: JobContext | None = None) -> None:
         """Re-assert what the manager owns (the port) before every start."""
+        path = self.properties_path(rec)
+        if rec.is_proxy and not path.is_file():  # BungeeCord would write its own, on a port that is not this server's
+            atomic_write_text(path, self.initial_proxy_config(rec.java_port, {}))
+            if ctx:
+                ctx.step("config.yml was missing; wrote a new one")
+            return
         text = self._read(rec)
-        new_text, changed = props.apply_managed(text, rec.java_port)
-        if changed or not self.properties_path(rec).is_file():
-            atomic_write_text(self.properties_path(rec), new_text)
+        new_text, changed = (proxy_config if rec.is_proxy else props).apply_managed(text, rec.java_port)
+        if changed or not path.is_file():
+            atomic_write_text(path, new_text)
             if ctx and changed:
-                ctx.step(f"Updated manager-controlled settings in server.properties ({', '.join(changed)})")
+                ctx.step(f"Updated manager-controlled settings in {path.name} ({', '.join(changed)})")
 
     def op_default_level(self, rec: ServerRecord) -> int:
         return int(props.read_values(self._read(rec))["op-permission-level"])
@@ -958,7 +1040,8 @@ class JavaServerService:
         argv += [f"-Xms{memory}M", f"-Xmx{memory}M", *default_jvm_flags(int(spec.get("java") or 21))]
         argv += shlex.split(spec.get("jvm_args", ""))
         argv += launch_arguments(launch)
-        argv.append("nogui")
+        if not rec.is_proxy:
+            argv.append("nogui")  # (BungeeCord has no window to leave out)
         return argv
 
     async def prepare_start(self, rec: ServerRecord, ctx: JobContext) -> JavaLaunch:
@@ -972,7 +1055,8 @@ class JavaServerService:
             ctx.step(f"Downloading Java {major}")
         java = await self.runtimes.ensure(major, self._java_progress(ctx, major))
 
-        if not self._eula_accepted(directory):
+        proxy = rec.is_proxy
+        if not proxy and not self._eula_accepted(directory):  # a proxy runs no Minecraft server: there is no EULA to accept
             if not spec.get("eula_accepted_at"):
                 raise self._error(f"The Minecraft EULA ({EULA_URL}) has not been accepted for this server.")
             self._write_eula(directory)
@@ -1008,6 +1092,11 @@ class JavaServerService:
             modpack, _ = self.describe(rec)
             label = f"{modpack['title'] or 'the modpack'} ({modpack['loader']['label']}, Java {major})"
         argv = self.build_argv(rec, java.java, directory)
+        if proxy:
+            return JavaLaunch(
+                argv=self.argv_wrapper(argv) if self.argv_wrapper else argv, env=env, ready_re=PROXY_READY_RE, fail_re=PROXY_FAIL_RE, label=label,
+                stop_command=PROXY_STOP_COMMAND,
+            )
         return JavaLaunch(
             argv=self.argv_wrapper(argv) if self.argv_wrapper else argv, env=env, ready_re=READY_RE, fail_re=FAIL_RE, label=label,
             prompt_re=FML_PROMPT_RE, on_prompt=lambda lines: self._answer_prompt(rec, lines),
@@ -1045,16 +1134,23 @@ class JavaServerService:
         return None
 
     async def _reinstall_software(self, rec: ServerRecord, java: Any, ctx: JobContext) -> ServerRecord:
-        """The jar of a Vanilla, Paper or Fabric server is gone (deleted, or lost with a restore): fetch exactly the build it runs again."""
+        """The jar of a Vanilla, Paper, Fabric, Spigot or BungeeCord server is gone (deleted, or lost with a restore): fetch exactly the build it
+        runs again. For Spigot that is a new build (SpigotMC keeps no old ones to choose), which takes as long as the first one did."""
         svc = self.svc
         software = rec.spec["software"]
-        build, _ = await self.software.resolve(software["kind"], software["minecraft"], software.get("build") or None)
-        ctx.step(f"The files of {build.label} are missing from the server folder; downloading them again")
-        launch = await self.installer.fetch(
-            build, svc.server_dir(rec.id), java.java, lambda message: ctx.progress(None, message),
-            lambda done, total: ctx.progress(0.2 + 0.3 * (done / total if total else 0), f"Downloading {build.label}"),
+        if software["kind"] == "spigot":
+            self.software.invalidate()  # what is built is what SpigotMC offers now, so that is what is written down, not what was known minutes ago
+        build, _ = await self.software.resolve(
+            software["kind"], software["minecraft"] or None, None if software["kind"] == "spigot" else software.get("build") or None,
         )
-        svc.repo.update_server(rec.id, spec={**rec.spec, "launch": launch})
+        what = "building it again" if build.kind == "spigot" else "downloading them again"
+        ctx.step(f"The files of {build.label} are missing from the server folder; {what}")
+        launch = await self.installer.fetch(
+            build, svc.server_dir(rec.id), java.java, lambda message: ctx.progress(None, message), self.fetch_progress(ctx, build, 0.2, 0.3),
+            java_major=int(rec.spec.get("java") or 0) or None, jdk_progress=self._java_progress(ctx, int(rec.spec.get("java") or 0), kit=True),
+        )
+        new_software = {**software, "build": build.build} if build.build != software.get("build") else software
+        svc.repo.update_server(rec.id, spec={**rec.spec, "launch": launch, "software": new_software})
         return svc.get(rec.id)
 
     # ------------------------------------------------------------ player lists

@@ -39,6 +39,7 @@ from .jvm.runtime import JavaDownloads, JavaRuntimes, JavaSource, run_java_versi
 from .jvm.service import JavaServerService
 from .jvm.software import SoftwareCatalog, SoftwareInstaller
 from .jvm.softwareupdates import SoftwareUpdater
+from .jvm.spigot import BuildRunner, SpigotBuilder, run_build
 from .models import AppSettings
 from .notify import Notifier
 from .process import ProcessManager
@@ -72,6 +73,7 @@ class AppContext:
         java_source: JavaSource | None = None,
         java_runner: Runner | None = None,
         verify_java: bool = True,
+        build_runner: BuildRunner | None = None,
     ):
         self.settings = settings
         self.background = background
@@ -111,7 +113,7 @@ class AppContext:
         )
         self.servers.backups = self.backups
         self.servers.access = self.access
-        self._setup_java(http_client, java_source, java_runner, verify_java)
+        self._setup_java(http_client, java_source, java_runner, verify_java, build_runner)
         extra = {} if stability_seconds is None else {"stability_seconds": stability_seconds}
         self.updater = UpdateService(
             self.repo, self.builds, self.pm, self.servers, self.backups, self.jobs, self.reporter,
@@ -124,17 +126,24 @@ class AppContext:
         self.generated_admin_password: str | None = None
 
     def _setup_java(
-        self, http_client: httpx.AsyncClient | None, java_source: JavaSource | None, java_runner: Runner | None, verify_java: bool
+        self, http_client: httpx.AsyncClient | None, java_source: JavaSource | None, java_runner: Runner | None, verify_java: bool,
+        build_runner: BuildRunner | None = None,
     ) -> None:
-        """The Java engine: one HTTP client for Mojang, Modrinth, Adoptium, Azul and the loaders' download sites."""
+        """The Java engine: one HTTP client for Mojang, Modrinth, Adoptium, Azul, SpigotMC and the loaders' download sites."""
         self.java_http = http_client or new_client()
         self._own_java_http = http_client is None
         self._java_source: JavaSource | None = java_source
+        self._jdk_source: JavaSource | None = None
 
         def source() -> JavaSource:
             if self._java_source is None:  # looked at only when Java is first needed, so an unusual CPU only matters then
                 self._java_source = JavaDownloads(self.java_http)
             return self._java_source
+
+        def jdk_source() -> JavaSource:
+            if self._jdk_source is None:
+                self._jdk_source = JavaDownloads(self.java_http, image_type="jdk")
+            return self._jdk_source
 
         def java_in_use(major: int) -> bool:
             running = set(self.pm.running_ids())
@@ -149,8 +158,11 @@ class AppContext:
         self.loader_installer = LoaderInstaller(self.java_http, java_runner or run_process)
         self.mod_cache = ModCache(self.settings.cache_dir / "mods")
         self.packs = PackInstaller(self.java_http, self.mod_cache, headers_for=self.curseforge.download_headers)
+        # Development kits: Spigot is compiled, which a runtime that only runs servers cannot do. Only the builder uses them.
+        self.jdks = JavaRuntimes(self.settings.jdk_dir, jdk_source, verifier=run_java_version if verify_java else None, tools=("javac",))
+        self.spigot_builder = SpigotBuilder(self.java_http, self.jdks, self.settings.cache_dir / "spigot-build", build_runner or run_build)
         self.software = SoftwareCatalog(self.java_http, self.mojang)
-        self.software_installer = SoftwareInstaller(self.java_http, self.loader_installer, self.modrinth)
+        self.software_installer = SoftwareInstaller(self.java_http, self.loader_installer, self.modrinth, builder=self.spigot_builder)
         self.gtnh = GtnhCatalog(self.java_http)
         self.servers.jvm = JavaServerService(
             self.servers, self.runtimes, self.mojang, self.modrinth, self.loader_installer, self.packs, self.settings.cache_dir / "uploads",
@@ -199,6 +211,7 @@ class AppContext:
             )
         self.servers.reconcile()
         self.servers.jvm.purge_old_uploads()
+        await asyncio.to_thread(self.spigot_builder.purge)  # what a build that the last shutdown interrupted left behind
         self.updater.restore_state()
         result = await asyncio.to_thread(self.backups.reconcile)
         if result["added"] or result["removed"]:
@@ -288,12 +301,13 @@ def create_app(
     java_source: JavaSource | None = None,
     java_runner: Runner | None = None,
     verify_java: bool = True,
+    build_runner: BuildRunner | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     ctx = AppContext(
         settings, release_source=release_source, command_builder=command_builder, verify_elf=verify_elf,
         background=background, stability_seconds=stability_seconds, http_client=http_client, java_source=java_source,
-        java_runner=java_runner, verify_java=verify_java,
+        java_runner=java_runner, verify_java=verify_java, build_runner=build_runner,
     )
 
     @asynccontextmanager

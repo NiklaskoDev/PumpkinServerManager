@@ -5,6 +5,9 @@ small for people who only run Pumpkin, and lets a server get exactly the Java it
 
 Java 8 is the exception to "the newest build": it stays on 8u312 (see ``PINS``). Temurin never built that for Alpine, so the
 container gets the same version from Azul.
+
+Building Spigot needs a compiler, which a JRE does not have: for that the same classes fetch the JDK builds (``image_type="jdk"``) into
+``<data>/jdk/<major>/``, a second set of runtimes that only the builder uses.
 """
 
 from __future__ import annotations
@@ -105,11 +108,13 @@ def adoptium_platform(machine: str | None = None, *, system: str | None = None, 
 
 class AdoptiumSource:
     def __init__(
-        self, client: httpx.AsyncClient | None = None, os_name: str | None = None, arch: str | None = None, retry_delay: float = 1.5
+        self, client: httpx.AsyncClient | None = None, os_name: str | None = None, arch: str | None = None, retry_delay: float = 1.5,
+        image_type: str = "jre",
     ):
         self._client = client or new_client()
         self._own_client = client is None
         self._delay = retry_delay
+        self.image_type = image_type  # "jre" runs servers, "jdk" also compiles (Spigot is built with it)
         detected = adoptium_platform() if os_name is None or arch is None else (os_name, arch)
         self.os_name, self.arch = os_name or detected[0], arch or detected[1]
 
@@ -120,7 +125,7 @@ class AdoptiumSource:
     async def latest(self, major: int) -> RemoteJava:
         data = await get_json(
             self._client, f"{API_URL}/assets/latest/{major}/hotspot",
-            params={"architecture": self.arch, "image_type": "jre", "os": self.os_name}, what="the Java download service",
+            params={"architecture": self.arch, "image_type": self.image_type, "os": self.os_name}, what="the Java download service",
             delay=self._delay,
         )
         if not data:
@@ -136,7 +141,7 @@ class AdoptiumSource:
         try:
             data = await get_json(
                 self._client, f"{API_URL}/assets/release_name/eclipse/{release_name}",
-                params={"architecture": self.arch, "image_type": "jre", "os": self.os_name, "jvm_impl": "hotspot"},
+                params={"architecture": self.arch, "image_type": self.image_type, "os": self.os_name, "jvm_impl": "hotspot"},
                 what="the Java download service", delay=self._delay,
             )
         except DownloadError as exc:
@@ -163,16 +168,17 @@ class AdoptiumSource:
 class AzulSource:
     """Zulu JRE builds from Azul: the only place that still has Java 8u312 for Alpine (musl) Linux."""
 
-    def __init__(self, client: httpx.AsyncClient, os_name: str, arch: str, retry_delay: float = 1.5):
+    def __init__(self, client: httpx.AsyncClient, os_name: str, arch: str, retry_delay: float = 1.5, package_type: str = "jre"):
         self._client = client
         self._delay = retry_delay
+        self.package_type = package_type  # "jre" or "jdk"
         self.os_name, self.arch = os_name, arch
 
     async def release(self, major: int, version: str) -> RemoteJava | None:
         """One exact Java version (``8.0.312``); None when Azul has no such build for this platform."""
         params = {
             "java_version": version, "os": {"alpine-linux": "linux-musl", "linux": "linux-glibc"}.get(self.os_name, self.os_name),
-            "arch": self.arch, "java_package_type": "jre", "archive_type": "zip" if self.os_name == "windows" else "tar.gz",
+            "arch": self.arch, "java_package_type": self.package_type, "archive_type": "zip" if self.os_name == "windows" else "tar.gz",
             "release_status": "ga", "availability_types": "CA", "javafx_bundled": "false", "include_fields": "sha256_hash,size",
             "page_size": 20,
         }
@@ -186,7 +192,7 @@ class AzulSource:
         if not packages:
             return None
         best = max(packages, key=lambda p: p.get("distro_version") or [])
-        release = "zulu" + ".".join(map(str, best.get("distro_version") or [])) + "-ca-jre" + ".".join(map(str, best.get("java_version") or []))
+        release = "zulu" + ".".join(map(str, best.get("distro_version") or [])) + f"-ca-{self.package_type}" + ".".join(map(str, best.get("java_version") or []))
         return RemoteJava(
             major=major, release=release, name=best["name"], url=best["download_url"], sha256=str(best["sha256_hash"]).lower(),
             size=int(best.get("size") or 0), size_is_exact=False,
@@ -198,12 +204,13 @@ class JavaDownloads:
     (from Adoptium, and from Azul where Adoptium has none, which is the case for Alpine)."""
 
     def __init__(
-        self, client: httpx.AsyncClient | None = None, os_name: str | None = None, arch: str | None = None, retry_delay: float = 1.5
+        self, client: httpx.AsyncClient | None = None, os_name: str | None = None, arch: str | None = None, retry_delay: float = 1.5,
+        image_type: str = "jre",
     ):
         self._client = client or new_client()
         self._own_client = client is None
-        self.adoptium = AdoptiumSource(self._client, os_name, arch, retry_delay)
-        self.azul = AzulSource(self._client, self.adoptium.os_name, self.adoptium.arch, retry_delay)
+        self.adoptium = AdoptiumSource(self._client, os_name, arch, retry_delay, image_type)
+        self.azul = AzulSource(self._client, self.adoptium.os_name, self.adoptium.arch, retry_delay, image_type)
 
     async def aclose(self) -> None:
         if self._own_client:
@@ -265,13 +272,14 @@ def _safe_extract(archive: Path, target: Path) -> None:
 class JavaRuntimes:
     def __init__(
         self, base: Path, source_getter: Callable[[], JavaSource], verifier: Verifier | None = run_java_version,
-        free_space: Callable[[Path], int] = free_bytes, in_use: Callable[[int], bool] | None = None,
+        free_space: Callable[[Path], int] = free_bytes, in_use: Callable[[int], bool] | None = None, tools: tuple[str, ...] = (),
     ):
         self.base = base
         self._source_getter = source_getter
         self._verify = verifier
         self._free_space = free_space
         self._in_use = in_use  # whether a server runs on this Java: a runtime is never swapped out from under a running server
+        self._tools = tools  # programs besides java that the archive must have in bin/ (a JDK has javac)
         self._locks: dict[int, asyncio.Lock] = {}
         self._retry_at: dict[int, float] = {}
         base.mkdir(parents=True, exist_ok=True)
@@ -354,6 +362,9 @@ class JavaRuntimes:
             java = staged / "bin" / ("java.exe" if os.name == "nt" else "java")
             if not java.is_file():
                 raise BadDownloadError("The Java archive does not contain bin/java.")
+            for tool in self._tools:
+                if not (staged / "bin" / (f"{tool}.exe" if os.name == "nt" else tool)).is_file():
+                    raise BadDownloadError(f"The Java archive does not contain bin/{tool}.")
             if self._verify:
                 banner = await self._verify(java)
                 log.info("Java %d installed: %s", major, banner)

@@ -81,6 +81,7 @@ class Runtime:
     prompt_re: re.Pattern[str] | None = None
     on_prompt: Callable[[list[str]], Awaitable[str | None]] | None = None
     prompt_seen: bool = False
+    stop_command: str = "stop"  # what ends the server gracefully when typed into its console ("end" for BungeeCord)
     log: deque = field(default_factory=lambda: deque(maxlen=BACKLOG_LINES))
     seq: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -160,6 +161,7 @@ class ProcessManager:
         fail_re: re.Pattern[str] | None = None,
         prompt_re: re.Pattern[str] | None = None,
         on_prompt: Callable[[list[str]], Awaitable[str | None]] | None = None,
+        stop_command: str = "stop",
     ) -> None:
         rt = self.runtime(server_id)
         if rt.is_active:
@@ -172,6 +174,7 @@ class ProcessManager:
         rt.clean_exit_hint = clean_exit_hint
         rt.fail_re = fail_re
         rt.prompt_re, rt.on_prompt, rt.prompt_seen = prompt_re, on_prompt, False
+        rt.stop_command = stop_command
         self._open_logfile(rt)
         self._sys(rt, f"Starting: {' '.join(argv)}")
         creation: dict[str, Any] = {}
@@ -212,7 +215,7 @@ class ProcessManager:
             self._set_state(rt, "stopping")
         self._sys(rt, "Stopping the server...")
         with contextlib.suppress(ProcessError):
-            await self._write_stdin(rt, "stop")
+            await self._write_stdin(rt, rt.stop_command)
         if not await self._wait_exit(rt, timeout):
             self._sys(rt, f"The server did not stop within {int(timeout)}s; asking the process to terminate.")
             await self._terminate_hard(rt, grace=15)

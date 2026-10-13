@@ -19,7 +19,9 @@ LABEL org.opencontainers.image.title="Pumpkin Server Manager" \
 # Modpack servers run on a Java that the manager downloads when it is needed (Temurin builds for Alpine, and Azul's Zulu 8u312 for
 # Java 8, which Temurin never built for Alpine), so Java itself is not in the image. What it needs around it is: zlib and libstdc++ for the JVM, fontconfig and a font for the few mods that use
 # AWT, and gcompat so that mods with native libraries built for glibc (zstd, opus, ...) can still load.
-RUN apk add --no-cache tini su-exec tzdata ca-certificates zlib libstdc++ gcompat fontconfig ttf-dejavu
+# git is for Spigot: SpigotMC does not publish the server, its BuildTools makes it on the machine that runs it (with a Java development
+# kit that the manager downloads like the other Java runtimes), and applies SpigotMC's patches to the sources with git.
+RUN apk add --no-cache tini su-exec tzdata ca-certificates zlib libstdc++ gcompat fontconfig ttf-dejavu git
 
 WORKDIR /app
 

@@ -198,14 +198,16 @@ export function pendingText(server) {
 export const fmtMemoryMb = (mb) => (mb % 1024 === 0 ? `${mb / 1024} GiB` : `${mb} MiB`);
 
 // The chips under a server's name: a Pumpkin server shows its build and channel, a modpack server the pack and its loader, and a
-// Vanilla, Paper or Fabric server the software and its version.
+// Vanilla, Paper, Fabric, Spigot or BungeeCord server the software and its version.
 export function serverChips(server) {
   if (server.engine === "java" && server.software) {
     const sw = server.software;
+    const loader = sw.kind === "fabric";
     return [
       h("span", { class: "chip", title: "Server software" }, icon("layers", "sm"), sw.name),
+      sw.proxy ? h("span", { class: "chip", title: "A proxy: players connect to it and it passes them on to other servers" }, "proxy") : null,
       sw.minecraft ? h("span", { class: "chip" }, `Minecraft ${sw.minecraft}`) : null,
-      sw.build ? h("span", { class: "chip", title: sw.kind === "paper" ? "Paper build" : "Fabric loader version" }, `${sw.kind === "paper" ? "build" : "loader"} ${sw.build}`) : null,
+      sw.build ? h("span", { class: "chip", title: loader ? "Fabric loader version" : `${sw.name} build` }, `${loader ? "loader" : "build"} ${sw.build}`) : null,
       server.java ? h("span", { class: "chip", title: `Java ${server.java.major}, ${fmtMemoryMb(server.java.memory_mb)} of memory` }, icon("cpu", "sm"), `Java ${server.java.major}`) : null,
     ].filter(Boolean); // Element.append() would write a missing chip as the text "null"
   }

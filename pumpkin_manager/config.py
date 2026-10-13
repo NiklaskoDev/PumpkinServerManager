@@ -84,6 +84,10 @@ class Settings:
         return self.data_dir / "java"  # Java runtimes, one folder per major version
 
     @property
+    def jdk_dir(self) -> Path:
+        return self.data_dir / "jdk"  # Java development kits (they compile Spigot), one folder per major version
+
+    @property
     def cache_dir(self) -> Path:
         return self.data_dir / "cache"  # downloaded mods and uploaded modpacks
 

@@ -66,7 +66,7 @@ export function render({ id, getServer }) {
       const sw = s.software;
       versionHost.appendChild(h("dl", { class: "kv" },
         h("dt", {}, "Software"), h("dd", {}, h("strong", {}, sw.label)),
-        h("dt", {}, "Minecraft"), h("dd", {}, sw.minecraft || "–"),
+        ...(sw.proxy ? [] : [h("dt", {}, "Minecraft"), h("dd", {}, sw.minecraft || "–")]),
         ...(manage && s.java ? [
           h("dt", {}, "Java"), h("dd", {}, `Java ${s.java.major} · ${fmtMemoryMb(s.java.memory_mb)} of memory`),
           h("dt", {}, "Updates"), h("dd", {}, { auto: "automatic, backup first", notify: "notify only", off: "off" }[s.update.mode] || "–"),

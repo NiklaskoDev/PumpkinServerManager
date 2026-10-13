@@ -52,7 +52,7 @@ ROLE_LABELS = {PLAYER: "Player", MODERATOR: "Moderator", ADMIN: "Admin"}
 # What a player or moderator gets to see of a server; everything else (update policy, backup times, ...) is for admins.
 _LIMITED_FIELDS = (
     "id", "name", "created_at", "state", "busy", "desired_running", "uptime", "exit_code", "channel", "build", "ports",
-    "public_address", "players", "mc_version", "motd", "ping_ok", "stats", "disk_bytes", "engine", "modpack", "software",
+    "public_address", "players", "mc_version", "motd", "ping_ok", "stats", "disk_bytes", "engine", "proxy", "modpack", "software",
 )
 _MODPACK_MANAGEMENT = ("pending", "can_roll_back", "client_only", "client_only_count", "leave_out_client_only", "manual", "notice")
 _SOFTWARE_MANAGEMENT = ("pending", "upgrade", "can_roll_back", "support", "fabric_api", "installed_at")

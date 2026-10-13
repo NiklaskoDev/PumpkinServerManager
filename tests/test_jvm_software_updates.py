@@ -111,7 +111,7 @@ async def test_modpack_servers_are_not_the_business_of_the_software_updater(jvm)
     world, ctx = jvm
     modded = await create_java_server(ctx, "Packed", start=False)
     assert (await ctx.software_updates.check()) == {"servers_with_updates": 0, "errors": {}}
-    with pytest.raises(ServerError, match="does not run Vanilla, Paper or Fabric"):
+    with pytest.raises(ServerError, match="does not run server software"):
         await ctx.software_updates.prepare(modded, None, None)
 
 

@@ -1,5 +1,5 @@
-// The parts of the "new Java server" dialogs that are the same whatever the server runs (a modpack, Vanilla, Paper or Fabric):
-// memory, game settings, network and automation, the Minecraft EULA, and the request they add up to.
+// The parts of the "new Java server" dialogs that are the same whatever the server runs (a modpack, Vanilla, Paper, Fabric, Spigot or
+// BungeeCord): memory, game settings, network and automation, the Minecraft EULA, and the request they add up to.
 
 import { clear, h, icon } from "../dom.js";
 import { OP_LEVELS } from "../oplevels.js";
@@ -22,7 +22,7 @@ export function javaServerForm({ gib: startGib, memoryHint, gameHint, motd = "A 
 
   // ---- memory -----------------------------------------------------------------------------------------------------
   const memNotice = h("div", {});
-  const memInput = h("input", { class: "input", type: "number", min: "1", max: "1024", step: "0.5", value: String(f.gib), "aria-label": "Memory in GiB", oninput: (e) => { f.gib = Number(e.target.value) || 0; memCheck(); } });
+  const memInput = h("input", { class: "input", type: "number", min: "0.5", max: "1024", step: "0.5", value: String(f.gib), "aria-label": "Memory in GiB", oninput: (e) => { f.gib = Number(e.target.value) || 0; memCheck(); } });
   function memCheck() {
     clear(memNotice);
     if (!machine) return;
@@ -81,8 +81,11 @@ export function javaServerForm({ gib: startGib, memoryHint, gameHint, motd = "A 
   });
   const startSwitch = switchControl({ label: "Start the server right away", checked: true, onChange: (v) => { f.start = v; } });
 
+  // for a dialog that changes what it makes (a proxy needs far less memory than a server): the person's own number is not touched
+  const setMemory = (value) => { f.gib = value; memInput.value = String(value); memCheck(); };
+
   return {
-    f, memorySection, gameSection, networkSection, eulaSwitch, startSwitch,
+    f, memorySection, gameSection, networkSection, eulaSwitch, startSwitch, setMemory,
     // what the server is created with (the caller adds its name, what it runs, and `eula: true`)
     payload: () => ({
       memory_mb: Math.round(f.gib * 1024), start: f.start, java_port: f.manualPort && f.port ? Number(f.port) : null,

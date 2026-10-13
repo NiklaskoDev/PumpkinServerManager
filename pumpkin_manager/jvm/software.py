@@ -1,9 +1,9 @@
-"""Server software the manager downloads, installs and updates by itself: Vanilla, Paper and Fabric.
+"""Server software the manager downloads, installs and updates by itself: Vanilla, Paper, Fabric, Spigot and BungeeCord.
 
 A modpack brings its own mod loader and mods. Here there is nothing to unpack: the person picks the software and a Minecraft
-version, the manager fetches the file from where its maker publishes it (Mojang, PaperMC, Fabric), checks it against the checksum
-that was published with it, and later offers newer builds. ``SoftwareCatalog`` knows what exists, ``SoftwareInstaller`` puts it
-on disk.
+version, the manager fetches the file from where its maker publishes it (Mojang, PaperMC, Fabric, SpigotMC), checks it against the
+checksum that was published with it, and later offers newer builds. ``SoftwareCatalog`` knows what exists, ``SoftwareInstaller`` puts it
+on disk. Spigot is the odd one out: it is not downloaded but built (see ``spigot.py``). BungeeCord is a proxy and has no Minecraft version.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import zipfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,12 +21,14 @@ from urllib.parse import quote
 import httpx
 
 from ..errors import UserError
-from ..models import SOFTWARE_NAMES, software_label
+from ..models import PROXY_KINDS, SOFTWARE_NAMES, software_label
 from ..util import parse_iso
 from .loaders import FABRIC_META, LoaderInstaller, LoaderSpec
 from .modrinth import ModrinthClient
 from .mojang import MojangMeta
 from .net import BadDownloadError, DownloadError, ProgressCallback, download, get_json
+from .spigot import BUNGEE_JAR_NAME, MAX_BUNGEE_BYTES, SPIGOT_JAR, SpigotBuilder, SpigotHub, java_floor
+from .spigot import HOSTS as SPIGOT_HOSTS
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +36,14 @@ KINDS = tuple(SOFTWARE_NAMES)
 PAPER_API = "https://fill.papermc.io/v3/projects/paper"
 MOJANG_HOSTS = frozenset({"piston-data.mojang.com", "launcher.mojang.com"})
 PAPER_HOSTS = frozenset({"fill-data.papermc.io", "fill.papermc.io"})
-JAR_NAMES = {"vanilla": "server.jar", "paper": "paper.jar", "fabric": "fabric-server-launch.jar"}
+DOWNLOAD_HOSTS = {"vanilla": MOJANG_HOSTS, "paper": PAPER_HOSTS, "bungeecord": SPIGOT_HOSTS}  # where a kind's jar may be fetched from
+JAR_NAMES = {
+    "vanilla": "server.jar", "paper": "paper.jar", "fabric": "fabric-server-launch.jar", "spigot": SPIGOT_JAR, "bungeecord": BUNGEE_JAR_NAME,
+}
+# BungeeCord's classes are made for Java 17 (its small launcher class for 11, so that it can say so). It runs on the current long-term
+# release like everything else the manager starts, which keeps the number of runtimes down.
+PROXY_JAVA = 21
+PROXY_JAVA_MINIMUM = 17
 FABRIC_API_PROJECT = "fabric-api"  # nearly every Fabric mod needs it
 # Mojang published no server for the first Minecraft releases; from 1.2.5 on there is one for every release.
 NO_SERVER = frozenset({"1.0", "1.1", "1.2.1", "1.2.2", "1.2.3", "1.2.4"})
@@ -76,14 +86,16 @@ def _upstream(exc: DownloadError, missing: str | None = None) -> SoftwareError:
 # ----------------------------------------------------------------------------------------------------------- what exists
 @dataclass(frozen=True)
 class Build:
-    """One installable thing: a Minecraft server jar, a Paper build, or a Fabric loader for a Minecraft version."""
+    """One installable thing: a Minecraft server jar, a Paper or Spigot build, a Fabric loader for a Minecraft version, or a BungeeCord build."""
 
-    kind: str  # vanilla | paper | fabric
-    minecraft: str
-    build: str = ""  # Paper: the build number; Fabric: the loader version; Vanilla: empty (the Minecraft version is all there is)
+    kind: str  # vanilla | paper | fabric | spigot | bungeecord
+    minecraft: str  # empty for a proxy (BungeeCord has no Minecraft version of its own)
+    # Paper and BungeeCord: the build number; Spigot: SpigotMC's name for the build (a number, sometimes with a letter); Fabric: the loader
+    # version; Vanilla: empty (the Minecraft version is all there is)
+    build: str = ""
     channel: str = "stable"  # stable | beta | alpha for Paper builds, stable | unstable for Fabric loaders, release | snapshot for Vanilla
     published: str | None = None
-    url: str | None = None  # Vanilla and Paper: where the jar is; Fabric downloads through its own installer
+    url: str | None = None  # Vanilla, Paper and BungeeCord: where the jar is; Fabric downloads through its own installer, Spigot is built
     size: int | None = None
     sha1: str | None = None
     sha256: str | None = None
@@ -98,7 +110,9 @@ class Build:
 
     @property
     def build_label(self) -> str:
-        return {"paper": f"build {self.build}", "fabric": f"loader {self.build}"}.get(self.kind, "") if self.build else ""
+        if not self.build:
+            return ""
+        return f"loader {self.build}" if self.kind == "fabric" else f"build {self.build}" if self.kind != "vanilla" else ""
 
     @property
     def identity(self) -> str:
@@ -142,17 +156,18 @@ class Options:
 
 
 class SoftwareCatalog:
-    """What Mojang, PaperMC and Fabric offer. Answers are remembered for a few minutes; a check for updates starts afresh."""
+    """What Mojang, PaperMC, Fabric and SpigotMC offer. Answers are remembered for a few minutes; a check for updates starts afresh."""
 
     def __init__(self, client: httpx.AsyncClient, mojang: MojangMeta, retry_delay: float = 1.5, cache_seconds: float = 300.0):
         self._client = client
         self.mojang = mojang
+        self.hub = SpigotHub(client, retry_delay)
         self._delay = retry_delay
         self._ttl = cache_seconds
         self._cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
 
     def invalidate(self) -> None:
-        """Forget what was learned: the next questions are asked of Mojang, PaperMC and Fabric again."""
+        """Forget what was learned: the next questions are asked of Mojang, PaperMC, Fabric and SpigotMC again."""
         self._cache.clear()
         self.mojang.refresh()
 
@@ -181,7 +196,13 @@ class SoftwareCatalog:
         self.check_kind(kind)
         return await self._cached(("versions", kind, snapshots), lambda: self._load_versions(kind, snapshots))  # type: ignore[no-any-return]
 
+    async def _hub_index(self) -> list[tuple[str, str | None]]:
+        """Every version SpigotMC has a file for, with when that file last changed (one question per few minutes)."""
+        return await self._cached(("hub-index",), self.hub.versions)  # type: ignore[no-any-return]
+
     async def _load_versions(self, kind: str, snapshots: bool) -> list[dict[str, Any]]:
+        if kind in PROXY_KINDS:
+            return []  # a proxy has no Minecraft version of its own: it takes players of every version it knows
         try:
             manifest = await self.mojang.manifest()
             published = {entry["id"]: entry["published"] for entry in manifest}
@@ -201,6 +222,9 @@ class SoftwareCatalog:
                 data = await self._json(PAPER_API, "PaperMC's download service")
                 names = {v for group in (data.get("versions") or {}).values() for v in group if isinstance(v, str) and is_release(v)}
                 return [{"id": v, "type": "release", "published": published.get(v)} for v in sorted(names, key=version_key, reverse=True)]
+            if kind == "spigot":
+                changed = {v: when for v, when in await self._hub_index() if is_release(v)}  # no snapshots: SpigotMC lists a few pre-releases
+                return [{"id": v, "type": "release", "published": published.get(v) or changed[v]} for v in sorted(changed, key=version_key, reverse=True)]
             games = await self._json(f"{FABRIC_META}/versions/game", "Fabric's download service")
             found = []
             for game in games:
@@ -231,9 +255,13 @@ class SoftwareCatalog:
 
     # ---------------------------------------------------------------------------------------------------- builds
     async def options(self, kind: str, minecraft: str) -> Options:
-        """The builds of one kind of software for one Minecraft version (the Minecraft version must exist for that software)."""
+        """The builds of one kind of software for one Minecraft version (the Minecraft version must exist for that software). A proxy has
+        no Minecraft version: what is passed is ignored and its builds are all there is."""
         self.check_kind(kind)
-        check_version_name(minecraft, "Minecraft version")
+        if kind in PROXY_KINDS:
+            minecraft = ""
+        else:
+            check_version_name(minecraft, "Minecraft version")
         return await self._cached(("options", kind, minecraft), lambda: self._load_options(kind, minecraft))  # type: ignore[no-any-return]
 
     async def _load_options(self, kind: str, mc: str) -> Options:
@@ -241,7 +269,37 @@ class SoftwareCatalog:
             return await self._vanilla_options(mc)
         if kind == "paper":
             return await self._paper_options(mc)
+        if kind == "spigot":
+            return await self._spigot_options(mc)
+        if kind == "bungeecord":
+            return await self._bungeecord_options()
         return await self._fabric_options(mc)
+
+    async def _spigot_options(self, mc: str) -> Options:
+        """Spigot has one build for a Minecraft version at a time: SpigotMC's file for it names the newest (there are no older ones to
+        choose; BuildTools builds that one)."""
+        missing = f"Spigot has no build for Minecraft {mc}."
+        try:
+            index = dict(await self._hub_index())
+            if not is_release(mc) or mc not in index:  # not "latest" (a file of its own that BuildTools takes for the newest version), no pre-release
+                raise SoftwareError(missing, 404)
+            info = await self.hub.version_info(mc)
+        except DownloadError as exc:
+            raise _upstream(exc, missing) from exc
+        name = str(info["name"]).strip()
+        if not _NAME_RE.match(name) or ".." in name:
+            raise SoftwareError(f"SpigotMC names its build for Minecraft {mc} '{name}', which cannot be used.", 502)
+        return Options("spigot", mc, (Build("spigot", mc, name, "stable", index.get(mc)),), java_minimum=java_floor(info))
+
+    async def _bungeecord_options(self) -> Options:
+        try:
+            listed = await self.hub.bungee_builds()
+        except DownloadError as exc:
+            raise _upstream(exc) from exc
+        builds = tuple(
+            Build("bungeecord", "", str(b["number"]), "stable", b["published"], url=SpigotHub.bungee_url(b["number"])) for b in listed
+        )
+        return Options("bungeecord", "", builds, java_minimum=PROXY_JAVA_MINIMUM)
 
     async def _vanilla_options(self, mc: str) -> Options:
         try:
@@ -304,7 +362,9 @@ class SoftwareCatalog:
 
     # ---------------------------------------------------------------------------------------------------- choosing
     async def recommended_minecraft(self, kind: str) -> str:
-        """The Minecraft version to start with: the newest release that has a stable build of this software."""
+        """The Minecraft version to start with: the newest release that has a stable build of this software (none for a proxy)."""
+        if kind in PROXY_KINDS:
+            return ""
         listed = await self.versions(kind)
         if not listed:
             raise SoftwareError(f"No Minecraft version is available for {SOFTWARE_NAMES[kind]} right now.", 502)
@@ -319,13 +379,18 @@ class SoftwareCatalog:
     async def resolve(self, kind: str, minecraft: str | None = None, build: str | None = None) -> tuple[Build, Options]:
         """The build to install: the one asked for, or the newest stable one of the Minecraft version (the newest recommended one)."""
         self.check_kind(kind)
-        mc = check_version_name(minecraft, "Minecraft version") if minecraft else await self.recommended_minecraft(kind)
+        mc = "" if kind in PROXY_KINDS else check_version_name(minecraft, "Minecraft version") if minecraft else await self.recommended_minecraft(kind)
         options = await self.options(kind, mc)
         if build and kind != "vanilla":  # Vanilla has exactly one build per Minecraft version
             found = next((b for b in options.builds if b.build == str(build)), None)
+            if found is None and kind == "bungeecord" and str(build).isdigit() and int(build) > 0:
+                # only the newest builds are listed; the address of any other one is the same kind of address (it is a 404 when gone)
+                found = Build("bungeecord", "", str(int(build)), "stable", None, url=SpigotHub.bungee_url(build))
             if found is None:
                 word = "loader version" if kind == "fabric" else "build"
-                raise SoftwareError(f"{SOFTWARE_NAMES[kind]} has no {word} {build} for Minecraft {mc}.", 404)
+                where = "" if kind in PROXY_KINDS else f" for Minecraft {mc}"
+                newest = f" The one SpigotMC offers is {options.builds[0].build}." if kind == "spigot" else ""
+                raise SoftwareError(f"{SOFTWARE_NAMES[kind]} has no {word} {build}{where}.{newest}", 404)
             return found, options
         chosen = options.default()
         if chosen is None:  # cannot happen: every Options has a build
@@ -340,6 +405,8 @@ class SoftwareCatalog:
 
     async def newer_minecraft(self, kind: str, current: str, *, snapshots: bool = False) -> dict[str, Any] | None:
         """The newest Minecraft version newer than ``current`` that this software has a stable build for, if any."""
+        if kind in PROXY_KINDS:
+            return None
         for entry in (await self.versions(kind, snapshots=snapshots))[:8]:
             if not await self.is_newer(entry["id"], current):
                 return None  # newest first: nothing further down is newer either
@@ -376,35 +443,56 @@ class FabricApi:
 
 
 class SoftwareInstaller:
-    """Puts server software into a folder: a jar from Mojang or PaperMC, a Fabric launcher, and Fabric API for Fabric."""
+    """Puts server software into a folder: a jar from Mojang, PaperMC or SpigotMC, a Fabric launcher, Fabric API for Fabric, and Spigot,
+    which it has built."""
 
-    def __init__(self, client: httpx.AsyncClient, loaders: LoaderInstaller, modrinth: ModrinthClient, retry_delay: float = 2.0):
+    def __init__(
+        self, client: httpx.AsyncClient, loaders: LoaderInstaller, modrinth: ModrinthClient, retry_delay: float = 2.0,
+        builder: SpigotBuilder | None = None,
+    ):
         self._client = client
         self._loaders = loaders
         self._modrinth = modrinth
         self._delay = retry_delay
+        self.builder = builder
 
     async def fetch(
-        self, build: Build, directory: Path, java: Path, say: Callable[[str], None], progress: ProgressCallback | None = None
+        self, build: Build, directory: Path, java: Path, say: Callable[[str], None], progress: ProgressCallback | None = None, *,
+        java_major: int | None = None, jdk_progress: ProgressCallback | None = None,
     ) -> dict[str, str]:
-        """Install ``build`` into ``directory`` (a staging folder, or a server's own) and return how to start it."""
+        """Install ``build`` into ``directory`` (a staging folder, or a server's own) and return how to start it. ``java_major`` is the Java
+        the software runs on; Spigot is built with a development kit of that version (``jdk_progress`` hears it being downloaded), and
+        ``progress`` hears how far the build is as ``(done, 1000)``."""
         if build.kind == "fabric":
             say(f"Installing Fabric loader {build.build} for Minecraft {build.minecraft}")
             return await self._loaders.install(LoaderSpec("fabric", build.build, build.minecraft), directory, java, say)
+        if build.kind == "spigot":
+            if self.builder is None or java_major is None:
+                raise SoftwareError("Spigot cannot be built here.")
+            target = await self.builder.build(build.minecraft, directory, java_major, say, progress, jdk_progress)
+            return {"jar": target.name}
         if not build.url:
             raise SoftwareError(f"{build.label} has nothing to download.")
-        hosts = MOJANG_HOSTS if build.kind == "vanilla" else PAPER_HOSTS
+        hosts = DOWNLOAD_HOSTS[build.kind]
         target = directory / JAR_NAMES[build.kind]
         say(f"Downloading {build.label}")
         try:
-            # The published size is only a ceiling: the checksum that came with the file is what proves it is the right one.
+            # The published size is only a ceiling: the checksum that came with the file is what proves it is the right one. (SpigotMC's
+            # build server publishes none for BungeeCord: the address is its own, over https, and a cut-off file is told by its directory.)
             await download(
-                self._client, build.url, target, max_size=build.size, sha1=build.sha1, sha256=build.sha256, progress=progress,
-                allowed_hosts=hosts, what=build.label, delay=self._delay,
+                self._client, build.url, target, max_size=build.size or (MAX_BUNGEE_BYTES if build.kind == "bungeecord" else None),
+                sha1=build.sha1, sha256=build.sha256, progress=progress, allowed_hosts=hosts, what=build.label, delay=self._delay,
             )
             with open(target, "rb") as fh:
                 if fh.read(4) != _ZIP_MAGIC:
                     raise BadDownloadError(f"What was downloaded for {build.label} is not a jar file.")
+            if build.kind == "bungeecord":
+                try:
+                    with zipfile.ZipFile(target) as jar:
+                        if "META-INF/MANIFEST.MF" not in jar.namelist():
+                            raise BadDownloadError(f"What was downloaded for {build.label} is not a runnable jar file.")
+                except zipfile.BadZipFile as exc:
+                    raise BadDownloadError(f"What was downloaded for {build.label} is damaged ({exc}).") from exc
         except DownloadError:
             target.unlink(missing_ok=True)
             raise
