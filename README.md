@@ -11,8 +11,8 @@ It also runs **Java servers**. [Vanilla, Paper and Fabric servers](#vanilla-pape
 PaperMC and Fabric publish and kept up to date by the manager (the Minecraft version you pick, the newest stable build, the Java it
 needs). For modded play, pick a modpack from [Modrinth](https://modrinth.com) or
 [CurseForge](https://www.curseforge.com/minecraft/modpacks) and the manager downloads Java, the mods and the mod loader and
-starts it. See [Modpack servers](#modpack-servers-java). The big GregTech pack [GT New Horizons](#gt-new-horizons) has its own
-installer, because its CurseForge page cannot be installed.
+starts it. See [Modpack servers](#modpack-servers-java). The big GregTech pack [GT New Horizons](#gt-new-horizons), listed under
+*Large expert modpacks* in the New server dialog, has its own installer, because its CurseForge page cannot be installed.
 
 ![The dashboard with three servers](docs/dashboard.jpg)
 
@@ -22,7 +22,7 @@ installer, because its CurseForge page cannot be installed.
 |---|---|
 | **One-click servers** | Pick a name, a Pumpkin channel and a few settings; the manager downloads the binary, writes `pumpkin.toml`, assigns ports and starts it. |
 | **Vanilla, Paper and Fabric servers** | Java servers without a modpack: Mojang's own server, Paper for plugins, or Fabric for mods (with Fabric API). The manager downloads the software (checksum-verified) and the Java it needs, offers newer builds, and switches to another Minecraft version with a backup first and an automatic rollback. |
-| **GT New Horizons** | The big GregTech expert pack for Minecraft 1.7.10, installed from its official server files (the Java 17+ or the Java 8 build), updated one version at a time with a backup first and an automatic rollback. |
+| **Large expert modpacks** | GT New Horizons, the big GregTech expert pack for Minecraft 1.7.10, installed from its official server files (the Java 17+ or the Java 8 build), updated one version at a time with a backup first and an automatic rollback. Packs like it have a heading of their own in the New server dialog. |
 | **Modpack servers** | Java servers from Modrinth and CurseForge modpacks (Fabric, Quilt, Forge, NeoForge): the right Java, every mod (checksum-verified), the loader and the pack's configuration are set up for you. Search from the dashboard, paste a link or upload a `.mrpack` or a CurseForge pack zip. CurseForge needs your own API key. |
 | **Dashboard** | Live status, players, uptime, CPU and memory per server; live console with colours, command history and filter; start/stop/restart; file browser and editor with upload/download; player lists (whitelist, operators with individual levels, bans). |
 | **Automatic updates** | Checks GitHub for new Pumpkin builds (stable releases, plus the rolling *nightly* and *canary* builds), per server: install automatically, notify only, or off. Waits until nobody is online. |
@@ -307,7 +307,8 @@ work as for every other server.
 
 ## GT New Horizons
 
-*New server → GT New Horizons* installs **GT New Horizons** (GTNH), the large expert-mode modpack for Minecraft 1.7.10 built around
+*New server → GT New Horizons* (under the heading *Large expert modpacks*, which is where packs that come with server files of
+their own are listed) installs **GT New Horizons** (GTNH), the large expert-mode modpack for Minecraft 1.7.10 built around
 GregTech, from the pack's **official server files** on [gtnewhorizons.com](https://www.gtnewhorizons.com/downloads/). Why not from
 CurseForge: the pack's page there is only a list of 44 of the 200-odd mods its server runs, kept "for reference" (GregTech itself is not among
 them, and the pack's own README says to install from its website). A server made from that list dies in the first mixin that needs
