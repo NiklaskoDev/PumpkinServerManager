@@ -30,6 +30,11 @@ def _bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def trusts_every_proxy(forwarded_allow_ips: str) -> bool:
+    """Whether FORWARDED_ALLOW_IPS names ``*``: every sender may then say which address it really comes from."""
+    return "*" in [part.strip() for part in forwarded_allow_ips.split(",")]
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path
@@ -52,6 +57,8 @@ class Settings:
     update_check_minutes: int = 360
     session_hours: int = 24 * 7
     cookie_secure: str = "auto"  # auto | always | never
+    forwarded_allow_ips: str = "127.0.0.1"  # reverse proxies whose X-Forwarded-For / -Proto headers are believed
+    hsts_max_age: int = 31536000  # seconds a browser must insist on https for this host name after an https visit; 0: no header
     public_address: str | None = None
     log_level: str = "INFO"
     api_docs: bool = False
@@ -122,6 +129,8 @@ class Settings:
             update_check_minutes=max(5, int(env.get("UPDATE_CHECK_MINUTES", "360"))),
             session_hours=max(1, int(env.get("SESSION_HOURS", str(24 * 7)))),
             cookie_secure=env.get("COOKIE_SECURE", "auto").lower(),
+            forwarded_allow_ips=env.get("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+            hsts_max_age=max(0, int(env.get("HSTS_MAX_AGE", "31536000"))),
             public_address=env.get("PUBLIC_ADDRESS") or None,
             log_level=env.get("LOG_LEVEL", "INFO").upper(),
             api_docs=_bool(env.get("ENABLE_API_DOCS"), False),

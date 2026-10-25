@@ -11,7 +11,7 @@ import secrets
 import sys
 
 from . import __version__
-from .config import Settings
+from .config import Settings, trusts_every_proxy
 
 
 def _configure_logging(level: str) -> None:
@@ -29,6 +29,12 @@ def serve() -> int:
     _configure_logging(settings.log_level)
     log = logging.getLogger("pumpkin_manager")
     log.info("Pumpkin Server Manager %s - data in %s, backups in %s", __version__, settings.data_dir, settings.backup_dir)
+    if trusts_every_proxy(settings.forwarded_allow_ips):
+        log.warning(
+            "FORWARDED_ALLOW_IPS=* : every sender is believed when it says which address it comes from. Unless the dashboard port can "
+            "only be reached through your reverse proxy, anyone can fake their address and get around the limit on failed sign-ins. "
+            "Set FORWARDED_ALLOW_IPS to the proxy's own address instead."
+        )
     app = create_app(settings)
     uvicorn.run(
         app,
@@ -37,7 +43,7 @@ def serve() -> int:
         log_level="warning",
         access_log=False,
         proxy_headers=True,
-        forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+        forwarded_allow_ips=settings.forwarded_allow_ips,
         timeout_graceful_shutdown=8,
     )
     return 0

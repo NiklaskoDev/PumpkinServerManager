@@ -169,9 +169,9 @@ Everything has a sensible default; the template sets the ones you usually want.
 | Variable | Default | Purpose |
 |---|---|---|
 | `PUID` / `PGID` | `99` / `100` | User and group the manager and all servers run as (Unraid's *nobody:users*). Files stay accessible through your shares. |
-| `UMASK` | `022` | File creation mask (`002` lets your group edit server files). |
+| `UMASK` | `022` | File creation mask (`002` lets your group edit server files). The manager's own database (`manager.db`) is always private to the manager's account, whatever the mask. |
 | `TZ` | `UTC` | Time zone for schedules and timestamps. |
-| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / generated | Account created on the very first start. Change the password in *Settings* afterwards. |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / generated | Account created on the very first start. Change the password in *Settings* afterwards. A well-known password (such as `change-me-please`, which earlier versions of `docker-compose.yml` shipped) is not accepted: a random one is generated and printed in the log instead. An administrator who still uses that old example password is signed out at the next start and has to choose another. |
 | `DATA_DIR` | `/data` | Servers, binaries, logs and the database. |
 | `BACKUP_DIR` | `$DATA_DIR/backups` | Backup folder (map it to a separate disk). |
 | `PORT_RANGE` | `25565-25575` | Java ports available to servers. |
@@ -186,7 +186,8 @@ Everything has a sensible default; the template sets the ones you usually want.
 | `MAX_UPLOAD_MB` | `4096` | Largest file the file manager accepts. |
 | `SHUTDOWN_TIMEOUT` | `240` | Seconds to wait for servers when the container stops. Keep it below Docker's own stop timeout (the template sets 300). A modded server with a big world needs minutes to save. |
 | `COOKIE_SECURE` | `auto` | `auto`, `always` or `never` for the session cookie's *Secure* flag. |
-| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy addresses (see [Security](#security)). |
+| `HSTS_MAX_AGE` | `31536000` | Seconds a browser must keep using https for this host name after it has opened the dashboard over https (the `Strict-Transport-Security` header; only sent on https). `0` turns it off. Set it to `0` if you also open the dashboard over plain http under the *same host name* (for example `http://tower:8420` next to `https://tower`): browsers would otherwise turn that into https. A plain IP address is not affected. |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Address of your reverse proxy, only if you use one (see [Security](#security)). Not `*`, unless the dashboard port can only be reached through the proxy. |
 | `PUMPKIN_REPO` | `Pumpkin-MC/Pumpkin` | GitHub repository releases are taken from. |
 | `LOG_LEVEL` | `INFO` | Manager log verbosity. |
 
@@ -610,7 +611,8 @@ no role on answers exactly like one that does not exist. Role changes take effec
 ## Security
 
 * Sign-in with a password (scrypt-hashed), server-side sessions in `HttpOnly`, `SameSite=Strict` cookies,
-  a CSRF token on every state-changing request, rate-limited login attempts and a strict Content-Security-Policy.
+  a CSRF token on every state-changing request, rate-limited login attempts and a strict Content-Security-Policy (the page may only open its
+  live-update socket to its own host, and the dashboard sends `Strict-Transport-Security` over https).
   The limits count a sign-in attempt from the moment it starts (a burst of parallel requests gets no extra guesses), only a few
   password checks run at once so that a flood cannot starve the game servers of memory, the current password is limited the same
   way when it is changed, and someone who only knows the user name cannot lock the owner out of the address they always sign in from.
@@ -621,9 +623,17 @@ no role on answers exactly like one that does not exist. Role changes take effec
   (your `ADMIN_PASSWORD`, `GITHUB_TOKEN` and `CURSEFORGE_API_KEY` are not passed on to Minecraft processes, mod loader
   installers or the Java checks).
 * The management API of each server listens on loopback only and uses a per-server random secret.
+* `manager.db` (password hashes, API keys, the webhook address, the management secrets) is readable by the manager's account only (mode `600`).
+* Downloads follow redirects one by one: every step must be https, and where a source has a list of permitted hosts a redirect may only lead to one of them
+  (or to the storage GitHub hands its release files over to). The same goes for pack icons.
 * **Do not expose the dashboard directly to the internet.** The dashboard can run console commands and edit files.
   If you need remote access, put it behind a reverse proxy with HTTPS (and set `FORWARDED_ALLOW_IPS` to the proxy's
   address) or use a VPN such as WireGuard.
+* **`FORWARDED_ALLOW_IPS` decides whose word about the client's address is believed.** The limit on failed sign-ins is counted per
+  address. Behind a proxy that is *not* listed there, every visitor looks like the proxy: eight wrong passwords from anyone then lock
+  everybody out for ten minutes (the log says so once: *"... is not in FORWARDED_ALLOW_IPS"*). With `*` every sender is believed, so
+  whoever can reach the dashboard port directly can fake a new address for each guess and the per-address limit is gone (the limit per
+  account stays; the log warns at start). Use the proxy's own address, and do not publish the dashboard port next to the proxy's.
 * Forgot the password? In the container console (Unraid: container icon → *Console*):
   `python -m pumpkin_manager reset-password`. It signs every session out.
 

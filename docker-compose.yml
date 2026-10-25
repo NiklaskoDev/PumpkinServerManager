@@ -29,13 +29,14 @@ services:
       PUID: "1000"                           # Unraid uses 99, plain Linux usually 1000
       PGID: "1000"                           # Unraid uses 100
       TZ: "Europe/Berlin"                    # the daily backup time is interpreted in this zone
-      ADMIN_PASSWORD: "change-me-please"     # initial password (min. 8 characters); leave empty to generate one
+      # ADMIN_PASSWORD: ""                   # initial password (min. 8 characters). Leave it unset to get a random one, printed in the log
       BACKUP_DIR: "/backups"                 # matches the second volume below
       # PORT_RANGE: "25565-25575"
       # BEDROCK_PORT_RANGE: "19132-19142"
       # GITHUB_TOKEN: ""                     # only if you hit GitHub API rate limits
       # CURSEFORGE_API_KEY: ""               # only for CurseForge modpacks: your own key (or enter it under Settings)
       # PUBLIC_ADDRESS: "play.example.com"   # shown to players instead of the address you browse with
+      # FORWARDED_ALLOW_IPS: ""              # only behind a reverse proxy: the proxy's own IP address, never "*" (see README, Security)
 
     volumes:
       - ./data:/data                         # servers, downloaded Pumpkin binaries, settings database

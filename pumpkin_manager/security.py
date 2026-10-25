@@ -39,6 +39,18 @@ MAX_QUEUED_HASHES = 64
 KNOWN_ADDRESS_DAYS = 30
 MAX_KNOWN_ADDRESSES = 1000
 
+# Passwords that anybody who tries a few guesses (or reads this project's documentation) will think of. They are never taken as the
+# initial password and cannot be chosen later on. The first is the example that earlier versions of docker-compose.yml shipped.
+EXAMPLE_PASSWORDS = ("change-me-please",)
+WELL_KNOWN_PASSWORDS = frozenset({
+    *EXAMPLE_PASSWORDS, "change-me", "changeme", "changeme123", "choose-a-password", "password", "password1", "password123", "passw0rd",
+    "12345678", "123456789", "1234567890", "qwertyui", "qwerty123", "admin123", "administrator", "letmein123", "pumpkin123", "pumpkinmanager",
+})
+
+
+def is_well_known_password(password: str) -> bool:
+    return password.strip().casefold() in WELL_KNOWN_PASSWORDS
+
 
 def _b64(raw: bytes) -> str:
     return base64.b64encode(raw).decode("ascii")
@@ -193,9 +205,30 @@ class AuthService:
         elif len(password) < MIN_PASSWORD_LENGTH:
             log.warning("ADMIN_PASSWORD is shorter than %d characters; generating a random one instead", MIN_PASSWORD_LENGTH)
             generated = password = secrets.token_urlsafe(12)
+        elif is_well_known_password(password):
+            log.warning("ADMIN_PASSWORD is a well-known example password that everyone tries first; generating a random one instead")
+            generated = password = secrets.token_urlsafe(12)
         hashed = await asyncio.to_thread(hash_password, password)
         self.repo.create_user(username, hashed)
         return generated
+
+    async def flag_example_passwords(self) -> list[str]:
+        """Make the administrator accounts that still use a password from this project's own examples choose another at their next
+        sign-in (and sign them out): the password is public, so whoever reaches the dashboard can take over. Returns their names."""
+        flagged: list[str] = []
+        for row in self.repo.list_users():
+            if row["kind"] != "admin" or row["must_change_password"]:
+                continue
+            user = self.repo.get_user(row["id"])
+            if user is None:
+                continue
+            for example in EXAMPLE_PASSWORDS:
+                if await asyncio.to_thread(verify_password, example, user["password_hash"]):
+                    self.repo.set_password(user["id"], user["password_hash"], must_change=True)
+                    self.repo.delete_user_sessions(user["id"])
+                    flagged.append(user["username"])
+                    break
+        return flagged
 
     async def reset_password(self, username: str, password: str, *, temporary: bool = False) -> bool:
         """Set a new password and sign the account out everywhere. ``temporary`` makes the user choose their own at the next login."""
@@ -297,6 +330,8 @@ class AuthService:
     async def change_password(self, session: Session, current: str, new: str) -> None:
         if len(new) < MIN_PASSWORD_LENGTH:
             raise AuthError(f"The new password must be at least {MIN_PASSWORD_LENGTH} characters long.")
+        if is_well_known_password(new):
+            raise AuthError("That password is one of the first ones anybody tries. Choose another one.")
         user = self.repo.get_user(session.user_id)
         key = f"password:{session.user_id}"
         with self.password_throttle.attempt(key):

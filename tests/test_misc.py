@@ -203,3 +203,46 @@ async def test_bedrock_servers_get_two_ports_each(ctx):
     assert row["status"] == "failed" and "two UDP ports" in row["message"]
     with pytest.raises(ServerError, match="already assigned"):
         ctx.servers.allocate_port("bedrock", low + 1)  # would collide with the IPv6 status port of the first server
+
+
+# ------------------------------------------------------------------------------------ reverse proxy trust
+def test_the_proxy_setting_is_read_and_a_wildcard_is_recognised():
+    from pumpkin_manager.config import trusts_every_proxy
+
+    assert Settings.from_env({}).forwarded_allow_ips == "127.0.0.1"
+    assert Settings.from_env({"FORWARDED_ALLOW_IPS": "10.0.0.2,10.0.0.3"}).forwarded_allow_ips == "10.0.0.2,10.0.0.3"
+    assert trusts_every_proxy("*") and trusts_every_proxy("10.0.0.2, *") and trusts_every_proxy(" * ")
+    assert not trusts_every_proxy("127.0.0.1") and not trusts_every_proxy("10.0.0.2,10.0.0.3") and not trusts_every_proxy("")
+
+
+def test_forwarded_addresses_that_are_ignored_are_recognised():
+    from pumpkin_manager.app import forwarded_headers_ignored
+
+    assert forwarded_headers_ignored("10.0.0.5", "203.0.113.7"), "a proxy that is not trusted: the header names somebody else"
+    assert forwarded_headers_ignored("10.0.0.5", "203.0.113.7, 198.51.100.2")
+    assert not forwarded_headers_ignored("203.0.113.7", "203.0.113.7, 10.0.0.5"), "a trusted proxy: the client address was taken from it"
+    assert not forwarded_headers_ignored("10.0.0.5", None) and not forwarded_headers_ignored("10.0.0.5", "")
+    assert not forwarded_headers_ignored(None, "203.0.113.7")
+
+
+async def test_a_proxy_that_is_not_trusted_is_pointed_out_once(tmp_path, caplog):
+    import httpx
+
+    from pumpkin_manager.app import create_app
+
+    app = create_app(make_settings(tmp_path), verify_elf=False, background=False, release_source=None)
+    async with app.router.lifespan_context(app):
+        async def get(peer: str, forwarded: str | None) -> None:
+            headers = {"X-Forwarded-For": forwarded} if forwarded else {}
+            transport = httpx.ASGITransport(app=app, client=(peer, 4000))
+            async with httpx.AsyncClient(transport=transport, base_url="http://dashboard") as client:
+                assert (await client.get("/api/health", headers=headers)).status_code == 200
+
+        with caplog.at_level("WARNING", logger="pumpkin_manager.app"):
+            await get("203.0.113.7", "203.0.113.7")  # as a trusted proxy leaves it: nothing to say
+            await get("10.0.0.5", None)
+            assert "FORWARDED_ALLOW_IPS" not in caplog.text
+            await get("10.0.0.5", "203.0.113.7")
+            await get("10.0.0.5", "198.51.100.2")
+    hints = [r for r in caplog.records if "FORWARDED_ALLOW_IPS" in r.getMessage()]
+    assert len(hints) == 1 and "FORWARDED_ALLOW_IPS=10.0.0.5" in hints[0].getMessage()

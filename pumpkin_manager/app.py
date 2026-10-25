@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+import re
 import shutil
 import time
 from collections.abc import AsyncIterator
@@ -202,6 +203,13 @@ class AppContext:
             log.warning("%d job(s) were interrupted by the previous shutdown", interrupted_jobs)
 
         self.generated_admin_password = await self.auth.ensure_admin(self.settings.admin_user, self.settings.admin_password)
+        for name in await self.auth.flag_example_passwords():
+            warning = (
+                f"The account '{name}' still used the example password that earlier versions of docker-compose.yml shipped, which "
+                "everyone can read. It has been signed out and has to choose its own password at the next sign-in."
+            )
+            log.warning(warning)
+            self.repo.add_activity("warning", "login", warning)
         if self.generated_admin_password:
             bar = "=" * 64
             log.warning(
@@ -277,16 +285,36 @@ class AppContext:
         }
 
 
+# The live updates run over a WebSocket to the host the page came from. Browsers differ in whether 'self' covers ws:// and wss://, so
+# the host is named as well, but never "ws: wss:" for every host: a page must not be able to send data to a socket somewhere else.
+_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src {connect}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+)
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::[0-9]{1,5})?$")  # a name or IPv4 address, with a port maybe
+
 _SECURITY_HEADERS = {
-    "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-        "connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-    ),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
     "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
 }
+
+
+def content_security_policy(host: str | None) -> str:
+    """The Content-Security-Policy for a page requested from ``host`` (the Host header: only text that looks like a host is used)."""
+    connect = "'self'"
+    if host and _HOST_RE.match(host):
+        connect += f" ws://{host} wss://{host}"
+    return _CSP.format(connect=connect)
+
+
+def forwarded_headers_ignored(peer: str | None, forwarded_for: str | None) -> bool:
+    """Whether a request names the addresses it was passed through (``X-Forwarded-For``) while the address the manager acts on is
+    still the sender's own, which is what happens when the sender is not listed in FORWARDED_ALLOW_IPS."""
+    if not peer or not forwarded_for:
+        return False
+    return peer not in [part.strip() for part in forwarded_for.split(",")]
 
 
 def create_app(
@@ -324,12 +352,25 @@ def create_app(
         redoc_url=None, openapi_url="/api/openapi.json" if settings.api_docs else None,
     )
     app.state.ctx = ctx
+    app.state.proxy_hint_given = False
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Any) -> Response:
+        peer = request.client.host if request.client else None
+        if not app.state.proxy_hint_given and forwarded_headers_ignored(peer, request.headers.get("x-forwarded-for")):
+            app.state.proxy_hint_given = True  # said once: it would be the same line on every request
+            log.warning(
+                "Requests from %s carry an X-Forwarded-For header, but %s is not in FORWARDED_ALLOW_IPS, so the header is ignored and "
+                "every visitor looks like %s (the limit on failed sign-ins then counts them all together). If %s is your reverse proxy, "
+                "set FORWARDED_ALLOW_IPS=%s. If you have no proxy, somebody is sending forged headers; they have no effect.",
+                peer, peer, peer, peer, peer,
+            )
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)
+        response.headers.setdefault("Content-Security-Policy", content_security_policy(request.headers.get("host")))
+        if settings.hsts_max_age and request.url.scheme == "https":  # browsers ignore it over http; behind a trusted proxy the scheme is its
+            response.headers.setdefault("Strict-Transport-Security", f"max-age={settings.hsts_max_age}")
         path = request.url.path
         if path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
