@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -23,6 +23,11 @@ USER_AGENT = f"NiklaskoDev/PumpkinServerManager/{__version__} (+https://github.c
 ProgressCallback = Callable[[int, int], None]
 HeadersFor = Callable[[str], dict[str, str]]  # the headers to send to one address (a key for the sites that want it, nothing for the rest)
 MAX_REDIRECTS = 5
+# Where GitHub hands a release file over to: a download from github.com is answered with a redirect to its storage. These hosts may be
+# the target of a redirect wherever github.com is a permitted source, but never the place a download starts from.
+GITHUB_STORAGE_HOSTS = frozenset({
+    "objects.githubusercontent.com", "release-assets.githubusercontent.com", "github-releases.githubusercontent.com", "codeload.github.com",
+})
 
 
 class DownloadError(UserError):
@@ -47,6 +52,13 @@ def require_https(url: str, allowed_hosts: frozenset[str] | None = None) -> None
         raise BadDownloadError(f"Refusing to download from {url!r}: only https:// addresses are allowed.")
     if allowed_hosts is not None and parts.hostname.lower() not in allowed_hosts:
         raise BadDownloadError(f"Refusing to download from {parts.hostname}: it is not one of the allowed hosts.")
+
+
+def redirect_hosts(allowed_hosts: frozenset[str] | None) -> frozenset[str] | None:
+    """The hosts a redirect may lead to when a download may start at ``allowed_hosts`` (None: any host, still only over https)."""
+    if allowed_hosts is None:
+        return None
+    return allowed_hosts | GITHUB_STORAGE_HOSTS if "github.com" in allowed_hosts else allowed_hosts
 
 
 def _http_error(message: str, status: int) -> DownloadError:
@@ -96,7 +108,7 @@ async def get_text(
     last = ""
     for attempt in range(attempts):
         try:
-            async with client.stream("GET", url) as resp:
+            async with open_checked(client, url, allowed_hosts) as resp:
                 if resp.status_code == 200:
                     data = bytearray()
                     async for chunk in resp.aiter_bytes(1 << 16):
@@ -117,21 +129,36 @@ async def get_text(
 
 
 async def _open_stream(
-    client: httpx.AsyncClient, url: str, headers_for: HeadersFor, allowed_hosts: frozenset[str] | None, timeout: httpx.Timeout
+    client: httpx.AsyncClient, url: str, headers_for: HeadersFor | None, allowed_hosts: frozenset[str] | None, timeout: httpx.Timeout
 ) -> httpx.Response:
-    """Start a download whose redirects are followed one by one: every address is checked against the allowed hosts and gets only
-    the headers ``headers_for`` names for it, so a key meant for one site is never sent to another. The caller closes the answer."""
+    """Start a download whose redirects are followed one by one: every address must be https and, when ``allowed_hosts`` is given, one
+    of those hosts (or the storage GitHub redirects to), so a redirect cannot lead a request anywhere else. Each address gets only the
+    headers ``headers_for`` names for it, so a key meant for one site is never sent to another. The caller closes the answer."""
     current = url
     for _ in range(MAX_REDIRECTS + 1):
-        request = client.build_request("GET", current, headers=headers_for(current) or None, timeout=timeout)
+        headers = headers_for(current) if headers_for else None
+        request = client.build_request("GET", current, headers=headers or None, timeout=timeout)
         resp = await client.send(request, stream=True, follow_redirects=False)
         location = resp.headers.get("location")
         if resp.status_code not in (301, 302, 303, 307, 308) or not location:
             return resp
         await resp.aclose()
         current = urljoin(current, location)
-        require_https(current, allowed_hosts)
+        require_https(current, redirect_hosts(allowed_hosts))
     raise BadDownloadError("Downloading failed: the address redirects too many times.")
+
+
+@contextlib.asynccontextmanager
+async def open_checked(
+    client: httpx.AsyncClient, url: str, allowed_hosts: frozenset[str] | None = None, timeout: httpx.Timeout | None = None
+) -> AsyncIterator[httpx.Response]:
+    """``client.stream("GET", url)`` that checks the address it starts at and every redirect on the way (see ``_open_stream``)."""
+    require_https(url, allowed_hosts)
+    resp = await _open_stream(client, url, None, allowed_hosts, timeout or client.timeout)
+    try:
+        yield resp
+    finally:
+        await resp.aclose()
 
 
 async def download(
@@ -140,7 +167,8 @@ async def download(
     allowed_hosts: frozenset[str] | None = None, attempts: int = 3, delay: float = 2.0, what: str = "the file",
     max_size: int | None = None, headers_for: HeadersFor | None = None,
 ) -> None:
-    """Stream ``url`` to ``dest`` and check size and checksums; ``dest`` only stays behind when everything matched.
+    """Stream ``url`` to ``dest`` and check size and checksums; ``dest`` only stays behind when everything matched. Redirects are
+    followed by hand: each one must be https and, with ``allowed_hosts``, lead to one of those hosts (see ``_open_stream``).
 
     ``size`` must match exactly. ``max_size`` is only a ceiling for sources whose declared size is not reliable: the download
     stops as soon as more arrives, so a wrong or hostile address cannot fill the disk. ``headers_for`` names the headers to send to
@@ -154,11 +182,8 @@ async def download(
         try:
             timeout = httpx.Timeout(60.0, connect=15.0)
             async with contextlib.AsyncExitStack() as stack:
-                if headers_for is None:
-                    resp = await stack.enter_async_context(client.stream("GET", url, timeout=timeout))
-                else:
-                    resp = await _open_stream(client, url, headers_for, allowed_hosts, timeout)
-                    stack.push_async_callback(resp.aclose)
+                resp = await _open_stream(client, url, headers_for, allowed_hosts, timeout)
+                stack.push_async_callback(resp.aclose)
                 if resp.status_code == 404:
                     raise DownloadError(f"Downloading {what} failed: it is not there any more (HTTP 404).")
                 if resp.status_code in (401, 403):  # asking again with the same credentials cannot help

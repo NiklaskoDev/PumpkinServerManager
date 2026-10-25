@@ -10,7 +10,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .net import DownloadError, ProgressCallback, download, get_json, new_client, require_https
+from .net import DownloadError, ProgressCallback, download, get_json, new_client, open_checked, require_https
 
 API = "https://api.modrinth.com/v2"
 # The only hosts a modpack may download from (Modrinth's own rule for .mrpack files).
@@ -140,7 +140,7 @@ class ModrinthClient:
         """A modpack's icon (from Modrinth's image host only), so the dashboard never has to contact another site itself."""
         require_https(url, IMAGE_HOSTS)
         try:
-            async with self._client.stream("GET", url) as resp:
+            async with open_checked(self._client, url, IMAGE_HOSTS) as resp:  # a redirect cannot lead anywhere else either
                 if resp.status_code != 200:
                     raise DownloadError(f"The icon is not available (HTTP {resp.status_code}).")
                 kind = resp.headers.get("content-type", "").split(";")[0].strip().lower()

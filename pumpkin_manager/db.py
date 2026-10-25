@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
@@ -157,8 +159,19 @@ ALTER TABLE servers ADD COLUMN spec TEXT NOT NULL DEFAULT '{}';
 MIGRATIONS: list[str] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3]
 
 
+def restrict_to_owner(path: Path | str) -> None:
+    """Make the database (and the files SQLite keeps next to it) readable by the account the manager runs as and nobody else. It
+    holds the password hashes, the API keys, the webhook address and every server's management secret, and the umask of a
+    container that shares its folders over the network is usually a permissive one."""
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        with contextlib.suppress(OSError):
+            if os.path.exists(f"{path}{suffix}"):
+                os.chmod(f"{path}{suffix}", 0o600)
+
+
 class Database:
     def __init__(self, path: Path | str):
+        self._path = path
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None, timeout=30)
         self._conn.row_factory = sqlite3.Row
@@ -166,6 +179,7 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._tx_depth = 0
+        restrict_to_owner(path)
 
     def migrate(self) -> None:
         with self._lock:
@@ -182,6 +196,7 @@ class Database:
                 except BaseException:
                     self._conn.execute("ROLLBACK")
                     raise
+        restrict_to_owner(self._path)  # the first write is what creates the WAL files of a new database
 
     def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> sqlite3.Cursor:
         with self._lock:

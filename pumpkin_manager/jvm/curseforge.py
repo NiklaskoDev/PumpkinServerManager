@@ -363,11 +363,11 @@ class CurseForgeClient:
     async def fetch_image(self, url: str) -> tuple[bytes, str]:
         """A modpack's logo (from CurseForge's image host only), so the dashboard never has to contact another site itself."""
         from .modrinth import IMAGE_TYPES, MAX_IMAGE_BYTES
-        from .net import require_https
+        from .net import open_checked, require_https
 
         require_https(url, IMAGE_HOSTS)
         try:
-            async with self._client.stream("GET", url) as resp:  # no key goes along
+            async with open_checked(self._client, url, IMAGE_HOSTS) as resp:  # no key goes along, and no redirect leads away
                 if resp.status_code != 200:
                     raise CurseForgeError(f"The logo is not available (HTTP {resp.status_code}).")
                 kind = resp.headers.get("content-type", "").split(";")[0].strip().lower()

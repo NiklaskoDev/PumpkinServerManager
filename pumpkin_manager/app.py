@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+import re
 import shutil
 import time
 from collections.abc import AsyncIterator
@@ -284,16 +285,28 @@ class AppContext:
         }
 
 
+# The live updates run over a WebSocket to the host the page came from. Browsers differ in whether 'self' covers ws:// and wss://, so
+# the host is named as well, but never "ws: wss:" for every host: a page must not be able to send data to a socket somewhere else.
+_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src {connect}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+)
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::[0-9]{1,5})?$")  # a name or IPv4 address, with a port maybe
+
 _SECURITY_HEADERS = {
-    "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-        "connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-    ),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
     "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
 }
+
+
+def content_security_policy(host: str | None) -> str:
+    """The Content-Security-Policy for a page requested from ``host`` (the Host header: only text that looks like a host is used)."""
+    connect = "'self'"
+    if host and _HOST_RE.match(host):
+        connect += f" ws://{host} wss://{host}"
+    return _CSP.format(connect=connect)
 
 
 def forwarded_headers_ignored(peer: str | None, forwarded_for: str | None) -> bool:
@@ -355,6 +368,9 @@ def create_app(
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)
+        response.headers.setdefault("Content-Security-Policy", content_security_policy(request.headers.get("host")))
+        if settings.hsts_max_age and request.url.scheme == "https":  # browsers ignore it over http; behind a trusted proxy the scheme is its
+            response.headers.setdefault("Strict-Transport-Security", f"max-age={settings.hsts_max_age}")
         path = request.url.path
         if path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
