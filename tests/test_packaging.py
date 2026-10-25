@@ -112,6 +112,8 @@ def test_unraid_template_is_consistent():
     assert f":{target['WebUI port']}" in root.findtext("WebUI", ""), "the WebUI link must use the WebUI port"
     assert "--stop-timeout" in root.findtext("ExtraParams", ""), "servers need time to save when the container stops"
     assert target["CurseForge API key"] == "CURSEFORGE_API_KEY" and not value["CurseForge API key"], "a key is never shipped in the template"
+    assert "*" not in value["Reverse proxy IPs"] and not value["Admin password"], "no wildcard and no password ships in the template"
+    assert "Do not use *" in config["Reverse proxy IPs"].get("Description", ""), "the template warns against trusting every proxy"
     for secret in ("Admin password", "GitHub token", "CurseForge API key"):
         assert config[secret].get("Mask") == "true", f"{secret} must be masked in the Unraid UI"
 
@@ -132,6 +134,9 @@ def test_compose_example_matches_the_container():
     assert 'BACKUP_DIR: "/backups"' in compose and "./backups:/backups" in compose
     assert "8420:8420" in compose and "25565-25575:25565-25575/tcp" in compose and "stop_grace_period" in compose
     assert "environment_extra" not in compose
+    assert "change-me-please" not in compose, "the example must not ship a password that everybody knows"
+    assert not re.search(r"(?m)^\s*ADMIN_PASSWORD:", compose), "...nor set one at all: an unset one is generated"
+    assert not re.search(r'(?m)^\s*FORWARDED_ALLOW_IPS:\s*"?\*', compose), "and never trust every proxy"
 
 
 def test_ci_workflow_publishes_after_the_smoke_test_only():

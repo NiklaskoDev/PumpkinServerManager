@@ -202,6 +202,13 @@ class AppContext:
             log.warning("%d job(s) were interrupted by the previous shutdown", interrupted_jobs)
 
         self.generated_admin_password = await self.auth.ensure_admin(self.settings.admin_user, self.settings.admin_password)
+        for name in await self.auth.flag_example_passwords():
+            warning = (
+                f"The account '{name}' still used the example password that earlier versions of docker-compose.yml shipped, which "
+                "everyone can read. It has been signed out and has to choose its own password at the next sign-in."
+            )
+            log.warning(warning)
+            self.repo.add_activity("warning", "login", warning)
         if self.generated_admin_password:
             bar = "=" * 64
             log.warning(
@@ -289,6 +296,14 @@ _SECURITY_HEADERS = {
 }
 
 
+def forwarded_headers_ignored(peer: str | None, forwarded_for: str | None) -> bool:
+    """Whether a request names the addresses it was passed through (``X-Forwarded-For``) while the address the manager acts on is
+    still the sender's own, which is what happens when the sender is not listed in FORWARDED_ALLOW_IPS."""
+    if not peer or not forwarded_for:
+        return False
+    return peer not in [part.strip() for part in forwarded_for.split(",")]
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -324,9 +339,19 @@ def create_app(
         redoc_url=None, openapi_url="/api/openapi.json" if settings.api_docs else None,
     )
     app.state.ctx = ctx
+    app.state.proxy_hint_given = False
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Any) -> Response:
+        peer = request.client.host if request.client else None
+        if not app.state.proxy_hint_given and forwarded_headers_ignored(peer, request.headers.get("x-forwarded-for")):
+            app.state.proxy_hint_given = True  # said once: it would be the same line on every request
+            log.warning(
+                "Requests from %s carry an X-Forwarded-For header, but %s is not in FORWARDED_ALLOW_IPS, so the header is ignored and "
+                "every visitor looks like %s (the limit on failed sign-ins then counts them all together). If %s is your reverse proxy, "
+                "set FORWARDED_ALLOW_IPS=%s. If you have no proxy, somebody is sending forged headers; they have no effect.",
+                peer, peer, peer, peer, peer,
+            )
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)

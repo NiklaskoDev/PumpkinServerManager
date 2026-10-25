@@ -188,6 +188,44 @@ async def test_the_current_password_cannot_be_guessed_without_limit_when_changin
         await auth.change_password(session, "hunter2hunter2", "another-password")  # even the right one is refused for a while
 
 
+async def test_a_well_known_initial_password_is_replaced_by_a_random_one(auth, caplog):
+    generated = await auth.ensure_admin("admin", "Change-Me-Please")  # the example of earlier docker-compose.yml files, in other letters
+    assert generated and generated.casefold() != "change-me-please" and len(generated) >= 12
+    assert "well-known" in caplog.text
+    with pytest.raises(AuthError):
+        await auth.login("admin", "change-me-please", "1.2.3.4", None)
+    token, _ = await auth.login("admin", generated, "1.2.3.4", None)
+    assert token
+
+
+async def test_a_well_known_password_cannot_be_chosen_later_either(auth):
+    await auth.ensure_admin("admin", "hunter2hunter2")
+    _, session = await auth.login("admin", "hunter2hunter2", "1.2.3.4", None)
+    for bad in ("change-me-please", "PASSWORD123", " 12345678 "):
+        with pytest.raises(AuthError, match="first ones anybody tries"):
+            await auth.change_password(session, "hunter2hunter2", bad)
+    await auth.change_password(session, "hunter2hunter2", "a-new-password")  # nothing was changed by the refusals
+
+
+async def test_an_administrator_who_still_has_the_published_example_password_must_choose_another(auth):
+    old_install = auth.repo.create_user("admin", hash_password("change-me-please"))
+    other = auth.repo.create_user("second", hash_password("a-private-password"), kind="admin")
+    friend = auth.repo.create_user("kim", hash_password("change-me-please"), kind="friend")  # friends get random temporary passwords
+    token, session = await auth.login("admin", "change-me-please", "1.2.3.4", None)
+    assert not session.must_change
+
+    assert await auth.flag_example_passwords() == ["admin"]
+    assert auth.resolve(token) is None, "whoever is signed in with it is signed out"
+    _, again = await auth.login("admin", "change-me-please", "1.2.3.4", None)
+    assert again.must_change, "the next sign-in leads to the 'choose your own password' screen"
+    flags = {row["username"]: row["must_change_password"] for row in auth.repo.list_users()}
+    assert flags == {"admin": 1, "second": 0, "kim": 0} and old_install and other and friend
+    assert await auth.flag_example_passwords() == [], "said once: an account that has to change already is left alone"
+
+    await auth.change_password(again, "change-me-please", "my-own-password")
+    assert await auth.flag_example_passwords() == []
+
+
 async def test_expired_sessions_are_rejected(auth):
     await auth.ensure_admin("admin", "hunter2hunter2")
     token, session = await auth.login("admin", "hunter2hunter2", "x", None)

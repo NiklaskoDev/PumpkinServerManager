@@ -171,7 +171,7 @@ Everything has a sensible default; the template sets the ones you usually want.
 | `PUID` / `PGID` | `99` / `100` | User and group the manager and all servers run as (Unraid's *nobody:users*). Files stay accessible through your shares. |
 | `UMASK` | `022` | File creation mask (`002` lets your group edit server files). |
 | `TZ` | `UTC` | Time zone for schedules and timestamps. |
-| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / generated | Account created on the very first start. Change the password in *Settings* afterwards. |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / generated | Account created on the very first start. Change the password in *Settings* afterwards. A well-known password (such as `change-me-please`, which earlier versions of `docker-compose.yml` shipped) is not accepted: a random one is generated and printed in the log instead. An administrator who still uses that old example password is signed out at the next start and has to choose another. |
 | `DATA_DIR` | `/data` | Servers, binaries, logs and the database. |
 | `BACKUP_DIR` | `$DATA_DIR/backups` | Backup folder (map it to a separate disk). |
 | `PORT_RANGE` | `25565-25575` | Java ports available to servers. |
@@ -186,7 +186,7 @@ Everything has a sensible default; the template sets the ones you usually want.
 | `MAX_UPLOAD_MB` | `4096` | Largest file the file manager accepts. |
 | `SHUTDOWN_TIMEOUT` | `240` | Seconds to wait for servers when the container stops. Keep it below Docker's own stop timeout (the template sets 300). A modded server with a big world needs minutes to save. |
 | `COOKIE_SECURE` | `auto` | `auto`, `always` or `never` for the session cookie's *Secure* flag. |
-| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy addresses (see [Security](#security)). |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Address of your reverse proxy, only if you use one (see [Security](#security)). Not `*`, unless the dashboard port can only be reached through the proxy. |
 | `PUMPKIN_REPO` | `Pumpkin-MC/Pumpkin` | GitHub repository releases are taken from. |
 | `LOG_LEVEL` | `INFO` | Manager log verbosity. |
 
@@ -624,6 +624,11 @@ no role on answers exactly like one that does not exist. Role changes take effec
 * **Do not expose the dashboard directly to the internet.** The dashboard can run console commands and edit files.
   If you need remote access, put it behind a reverse proxy with HTTPS (and set `FORWARDED_ALLOW_IPS` to the proxy's
   address) or use a VPN such as WireGuard.
+* **`FORWARDED_ALLOW_IPS` decides whose word about the client's address is believed.** The limit on failed sign-ins is counted per
+  address. Behind a proxy that is *not* listed there, every visitor looks like the proxy: eight wrong passwords from anyone then lock
+  everybody out for ten minutes (the log says so once: *"... is not in FORWARDED_ALLOW_IPS"*). With `*` every sender is believed, so
+  whoever can reach the dashboard port directly can fake a new address for each guess and the per-address limit is gone (the limit per
+  account stays; the log warns at start). Use the proxy's own address, and do not publish the dashboard port next to the proxy's.
 * Forgot the password? In the container console (Unraid: container icon → *Console*):
   `python -m pumpkin_manager reset-password`. It signs every session out.
 

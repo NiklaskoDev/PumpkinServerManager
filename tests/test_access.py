@@ -799,6 +799,34 @@ async def test_the_administrator_is_never_asked_to_change_a_password(live):
     assert (await admin.call("GET", "/api/servers")).status_code == 200
 
 
+def test_the_next_start_makes_an_administrator_with_the_old_example_password_choose_another(tmp_path):
+    settings = make_settings(tmp_path)
+
+    async def first_start() -> str:
+        app_ctx = AppContext(settings, verify_elf=False, background=False, release_source=None)
+        await app_ctx.startup()
+        try:  # as if the account had been created from the docker-compose.yml of earlier versions
+            app_ctx.repo.set_password(app_ctx.repo.get_user_by_name("admin")["id"], security.hash_password("change-me-please"))
+            token, _ = await app_ctx.auth.login("admin", "change-me-please", "1.2.3.4", None)
+            return token
+        finally:
+            await app_ctx.shutdown()
+
+    async def second_start(token: str) -> None:
+        app_ctx = AppContext(settings, verify_elf=False, background=False, release_source=None)
+        await app_ctx.startup()
+        try:
+            assert app_ctx.auth.resolve(token) is None
+            _, session = await app_ctx.auth.login("admin", "change-me-please", "1.2.3.4", None)
+            assert session.must_change and session.kind == "admin"
+            messages = [row["message"] for row in app_ctx.db.all("SELECT message FROM activity WHERE level='warning'")]
+            assert any("example password" in m and "'admin'" in m for m in messages), "the owner can read why in the activity feed"
+        finally:
+            await app_ctx.shutdown()
+
+    asyncio.run(second_start(asyncio.run(first_start())))
+
+
 def test_the_command_line_reset_makes_a_friends_password_temporary(tmp_path, monkeypatch):
     from pumpkin_manager.__main__ import main
 
