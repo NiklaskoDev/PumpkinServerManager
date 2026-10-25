@@ -333,6 +333,17 @@ async def test_password_change_signs_out_other_sessions(live):
     assert bad.status_code == 400
 
 
+async def test_guessing_the_current_password_is_limited(live):
+    api, _ = live
+    await api.login()
+    for _ in range(5):
+        bad = await api.call("POST", "/api/auth/password", json={"current": "nope", "new": "yet another password"})
+        assert bad.status_code == 400
+    locked = await api.call("POST", "/api/auth/password", json={"current": "correct horse battery", "new": "a different password"})
+    assert locked.status_code == 429 and int(locked.headers["retry-after"]) > 0
+    assert (await api.call("GET", "/api/auth/me")).status_code == 200, "the session itself is untouched"
+
+
 async def test_uploads_respect_the_size_limit(live):
     api, ctx = live
     object.__setattr__(ctx.settings, "max_upload_bytes", 4096)  # frozen dataclass: tiny limit for the test
