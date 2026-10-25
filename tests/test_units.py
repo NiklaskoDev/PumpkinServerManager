@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
+import time
 import tomllib
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -18,7 +20,15 @@ from pumpkin_manager.mcnet import PingError, _encode_varint, server_list_ping
 from pumpkin_manager.models import ServerPolicy, ServerRecord
 from pumpkin_manager.repo import Repo
 from pumpkin_manager.scheduler import backup_due
-from pumpkin_manager.security import AuthError, AuthService, LoginThrottle, Throttled, hash_password, verify_password
+from pumpkin_manager.security import (
+    MAX_PARALLEL_HASHES,
+    AuthError,
+    AuthService,
+    LoginThrottle,
+    Throttled,
+    hash_password,
+    verify_password,
+)
 
 # ----------------------------------------------------------------------------- auth
 
@@ -98,6 +108,84 @@ async def test_failed_logins_lock_the_ip(auth):
         await auth.login("admin", "hunter2hunter2", "6.6.6.6", None)  # even the right password is refused now
     token, _ = await auth.login("admin", "hunter2hunter2", "7.7.7.7", None)  # other addresses are unaffected
     assert token
+
+
+async def test_attempts_that_are_still_running_count_against_the_limit(auth):
+    await auth.ensure_admin("admin", "hunter2hunter2")
+    results = await asyncio.gather(*(auth.login("admin", "bad", "9.9.9.9", None) for _ in range(20)), return_exceptions=True)
+    answered = [r for r in results if type(r) is AuthError]
+    refused = [r for r in results if isinstance(r, Throttled)]
+    assert len(answered) == 8 and len(refused) == 12, "a burst gets no more password checks than the limit leaves room for"
+    with pytest.raises(Throttled, match="failed attempts"):
+        await auth.login("admin", "hunter2hunter2", "9.9.9.9", None)  # and the address is locked now
+
+
+def slow_verify(peak: list[int]):
+    running = 0
+    lock = threading.Lock()
+
+    def verify(password: str, stored: str) -> bool:
+        nonlocal running
+        with lock:
+            running += 1
+            peak[0] = max(peak[0], running)
+        time.sleep(0.05)
+        with lock:
+            running -= 1
+        return password == "ok"
+
+    return verify
+
+
+async def test_only_a_few_password_checks_run_at_the_same_time(auth, monkeypatch):
+    await auth.ensure_admin("admin", "hunter2hunter2")
+    peak = [0]
+    monkeypatch.setattr("pumpkin_manager.security.verify_password", slow_verify(peak))
+    results = await asyncio.gather(*(auth.login("admin", "x", f"10.0.0.{i}", None) for i in range(12)), return_exceptions=True)
+    assert all(type(r) is AuthError for r in results), "all twelve were answered"
+    assert 1 < peak[0] <= MAX_PARALLEL_HASHES, f"{peak[0]} checks ran at once"
+
+
+async def test_when_too_many_checks_wait_the_others_are_turned_away_without_counting_as_failures(auth, monkeypatch):
+    await auth.ensure_admin("admin", "hunter2hunter2")
+    monkeypatch.setattr("pumpkin_manager.security.verify_password", slow_verify([0]))
+    monkeypatch.setattr("pumpkin_manager.security.MAX_QUEUED_HASHES", 2)
+    results = await asyncio.gather(*(auth.login("admin", "x", f"10.0.1.{i}", None) for i in range(6)), return_exceptions=True)
+    assert sum(type(r) is AuthError for r in results) == 2
+    turned_away = [r for r in results if isinstance(r, Throttled)]
+    assert len(turned_away) == 4 and all("at the same time" in str(r) and r.retry_after > 0 for r in turned_away)
+    for i in range(6):  # none of them was locked or counted: the right password works from every address
+        token, _ = await auth.login("admin", "ok", f"10.0.1.{i}", None)
+        assert token
+
+
+async def test_the_owner_is_not_locked_out_by_someone_who_only_knows_the_name(auth):
+    await auth.ensure_admin("admin", "hunter2hunter2")
+    auth.user_throttle = LoginThrottle(max_failures=3, window=600, lockout=300)
+    auth.ip_throttle = LoginThrottle(max_failures=2, window=600, lockout=600)
+    await auth.login("admin", "hunter2hunter2", "192.168.1.5", None)  # the owner signs in from home
+    for i in range(3):
+        with pytest.raises(AuthError):
+            await auth.login("admin", "guess", f"203.0.113.{i}", None)  # strangers guessing
+    with pytest.raises(Throttled):
+        await auth.login("admin", "hunter2hunter2", "198.51.100.9", None)  # the account is locked for them, even with the right password
+    token, _ = await auth.login("ADMIN", "hunter2hunter2", "192.168.1.5", None)
+    assert token, "...but not for the address it is always used from"
+    for _ in range(2):
+        with pytest.raises(AuthError):
+            await auth.login("admin", "guess", "192.168.1.5", None)
+    with pytest.raises(Throttled):
+        await auth.login("admin", "hunter2hunter2", "192.168.1.5", None)  # the lockout of an address still applies to it
+
+
+async def test_the_current_password_cannot_be_guessed_without_limit_when_changing_it(auth):
+    await auth.ensure_admin("admin", "hunter2hunter2")
+    _, session = await auth.login("admin", "hunter2hunter2", "1.2.3.4", None)
+    for _ in range(5):
+        with pytest.raises(AuthError, match="not correct"):
+            await auth.change_password(session, "guess", "another-password")
+    with pytest.raises(Throttled):
+        await auth.change_password(session, "hunter2hunter2", "another-password")  # even the right one is refused for a while
 
 
 async def test_expired_sessions_are_rejected(auth):

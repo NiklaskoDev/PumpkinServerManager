@@ -353,7 +353,7 @@ class FakeInternet:
         ])
         self.blob(f"https://meta.fabricmc.net/v2/versions/loader/{minecraft}/{loader}/{installer}/server/jar", _zip_bytes({"fabric": b"launcher"}))
 
-    def quilt(self, installer: str = "0.15.1", *, wrong_checksum: bool = False) -> None:
+    def quilt(self, installer: str = "0.15.1", *, wrong_checksum: bool = False, publish_checksum: bool = True) -> None:
         """Quilt's installer. Like the real service, the metadata lists a hash that does not match the file (a real run caught
         that); the checksum Maven publishes next to the file is the one that can be trusted."""
         jar = _zip_bytes({"quilt": b"installer"})
@@ -362,12 +362,14 @@ class FakeInternet:
             {"version": installer, "url": url, "file_size": len(jar), "hashes": {"sha256": "f" * 64}},
         ])
         self.blob(url, jar)
-        digest = "0" * 64 if wrong_checksum else hashlib.sha256(jar).hexdigest()
-        self.route(url + ".sha256", lambda request: httpx.Response(200, text=digest))
+        if publish_checksum:
+            digest = "0" * 64 if wrong_checksum else hashlib.sha256(jar).hexdigest()
+            self.route(url + ".sha256", lambda request: httpx.Response(200, text=digest))
 
     def maven_installer(self, kind: str, minecraft: str, version: str, *, publish_checksum: bool = True, wrong_checksum: bool = False,
-                        suffixed: bool = False) -> bytes:
-        """Serve a Forge / NeoForge installer jar (and the .sha256 next to it) from where the real Maven repositories keep it."""
+                        suffixed: bool = False, sha1_only: bool = False) -> bytes:
+        """Serve a Forge / NeoForge installer jar (and the .sha256 next to it) from where the real Maven repositories keep it.
+        ``sha1_only``: an older file that has just a .sha1; ``publish_checksum=False``: one with no checksum at all."""
         jar = _zip_bytes({kind: b"installer"})
         if kind == "forge":
             name = f"{minecraft}-{version}-{minecraft}" if suffixed else f"{minecraft}-{version}"
@@ -378,8 +380,9 @@ class FakeInternet:
             url = f"https://maven.neoforged.net/releases/net/neoforged/neoforge/{version}/neoforge-{version}-installer.jar"
         self.blob(url, jar)
         if publish_checksum:
-            digest = "0" * 64 if wrong_checksum else hashlib.sha256(jar).hexdigest()
-            self.route(url + ".sha256", lambda request: httpx.Response(200, text=digest))
+            algorithm = hashlib.sha1 if sha1_only else hashlib.sha256
+            digest = "0" * (40 if sha1_only else 64) if wrong_checksum else algorithm(jar).hexdigest()
+            self.route(url + (".sha1" if sha1_only else ".sha256"), lambda request: httpx.Response(200, text=digest))
         return jar
 
     # ------------------------------------------------------------------- Mojang

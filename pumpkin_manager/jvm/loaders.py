@@ -177,7 +177,7 @@ class LoaderInstaller:
         # Quilt's metadata lists a size and hashes for the installer, but the real service's SHA-256 for 0.15.1 does not match the
         # file (nor its Maven repository), so the checksum is the one the repository publishes next to the file, like for Forge.
         await download(
-            self._client, newest["url"], jar, sha256=await self._checksum(newest["url"]), allowed_hosts=QUILT_DOWNLOAD_HOSTS,
+            self._client, newest["url"], jar, **await self._checksum(newest["url"]), allowed_hosts=QUILT_DOWNLOAD_HOSTS,
             what="the Quilt installer", delay=self._delay,
         )
         argv = [
@@ -198,14 +198,26 @@ class LoaderInstaller:
             return [f"{NEOFORGE_MAVEN}/forge/{mc}-{version}/forge-{mc}-{version}-installer.jar"]
         return [f"{NEOFORGE_MAVEN}/neoforge/{version}/neoforge-{version}-installer.jar"]
 
-    async def _checksum(self, url: str) -> str | None:
-        """The SHA-256 the Maven repository publishes next to a file, if it does."""
-        try:
-            resp = await self._client.get(f"{url}.sha256")
-        except httpx.HTTPError:
-            return None
-        text = resp.text.split()[0].lower() if resp.status_code == 200 and resp.text.split() else ""
-        return text if re.fullmatch(r"[0-9a-f]{64}", text) else None
+    async def _checksum(self, url: str) -> dict[str, str]:
+        """The checksum the Maven repository publishes next to a file, as an argument for ``download``: the SHA-256, or the SHA-1
+        for the older files that have only that. An installer is run as a program, so one with no published checksum at all is
+        not downloaded: this raises instead."""
+        name, failure = url.rsplit("/", 1)[-1], None
+        for algorithm, length in (("sha256", 64), ("sha1", 40)):
+            try:
+                resp = await self._client.get(f"{url}.{algorithm}")
+            except httpx.HTTPError as exc:
+                failure = exc
+                continue
+            words = resp.text.split() if resp.status_code == 200 else []
+            text = words[0].lower() if words else ""
+            if re.fullmatch(f"[0-9a-f]{{{length}}}", text):
+                return {algorithm: text}
+        if failure is not None:
+            raise DownloadError(f"The checksum of {name} could not be fetched ({failure}), so it is not downloaded.")
+        raise DownloadError(
+            f"{name} has no published checksum (or does not exist), so it is not downloaded: an installer is run as a program and has to be checked first."
+        )
 
     async def _forge_like(self, spec: LoaderSpec, server_dir: Path, java: Path, say: Callable[[str], None]) -> dict[str, str] | None:
         installer = server_dir / f"{spec.kind}-installer.jar"
@@ -213,7 +225,7 @@ class LoaderInstaller:
         for url in self._installer_addresses(spec):
             try:
                 await download(
-                    self._client, url, installer, sha256=await self._checksum(url), what=f"the {LOADERS[spec.kind]} installer",
+                    self._client, url, installer, **await self._checksum(url), what=f"the {LOADERS[spec.kind]} installer",
                     attempts=2, delay=self._delay,
                 )
                 break
@@ -223,7 +235,7 @@ class LoaderInstaller:
                 last = exc
         else:
             raise LoaderError(
-                f"{spec.label} for Minecraft {spec.minecraft} could not be downloaded: {last}. Is that version number right?"
+                f"{spec.label} for Minecraft {spec.minecraft} could not be downloaded: {str(last).rstrip('.')}. Is that version number right?"
             ) from last
         try:
             await self._run_installer([str(java), "-jar", installer.name, "--installServer"], server_dir, say, LOADERS[spec.kind])

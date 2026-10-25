@@ -223,7 +223,7 @@ after that players get an in-game warning first). Switching a server to another 
    old binary and start that. The failed build is remembered and not retried; a newer build is.
 
 Two failure modes happen before anything is stopped, and the server keeps running through both: a download that is
-**unusable** (not a Linux executable, or the wrong checksum) is refused and that exact build is skipped from then on,
+**unusable** (not a Linux executable, the wrong checksum, or no SHA-256 published for it at all) is refused and that exact build is skipped from then on,
 while a **temporary** problem (network, disk space) is retried automatically with a growing delay: 30 minutes, then
 60, 120, ... up to 12 hours between attempts, starting over after the next success.
 
@@ -321,7 +321,8 @@ code, so SpigotMC publishes a tool, **BuildTools**, that makes it on the machine
 1. It downloads a **Java development kit** (JDK: the compiler that the Java runtimes the servers run on do not have; about 200 MB,
    once per Java version, in `/data/jdk/`; *Versions → Java runtimes* lists them and removes them, and they are downloaded again when
    a build needs one).
-2. It downloads BuildTools from SpigotMC and runs it in a temporary folder of its own, with a home of its own (Maven's repository and
+2. It downloads BuildTools from SpigotMC (which publishes no checksum for it: it is only checked to be a complete jar, and the download is
+   limited to SpigotMC's hosts) and runs it in a temporary folder of its own, with a home of its own (Maven's repository and
    git's settings land there and go with it) and an identity for git. BuildTools fetches SpigotMC's sources from `hub.spigotmc.org`,
    Mojang's server from Mojang, and Maven and its libraries from the Maven repositories, so the container needs internet access to
    those, and it needs **git** (the container image has it; on Windows BuildTools brings its own).
@@ -446,7 +447,9 @@ of your own, see [CurseForge modpacks](#curseforge-modpacks).) The manager then
    *Which Java and why*);
 2. downloads every mod, checked against the checksums in the pack (the Modrinth format only allows Modrinth, GitHub and GitLab
    as sources; for CurseForge packs the checksums come from CurseForge's API), and puts the pack's configuration in place;
-3. installs the **mod loader** (Fabric, Quilt, Forge or NeoForge) with its official installer;
+3. installs the **mod loader** (Fabric, Quilt, Forge or NeoForge) with its official installer (the installer is run as a program, so it is only
+   downloaded when its Maven repository publishes a SHA-256, or for older files a SHA-1, next to it, and it must match; Fabric's launcher is the
+   exception, see [Vanilla, Paper and Fabric servers](#vanilla-paper-and-fabric-servers));
 4. writes `server.properties` and `eula.txt` and starts the server.
 
 Console, players (whitelist, operators with individual levels, bans), files, backups and accounts for friends work as for
@@ -608,6 +611,9 @@ no role on answers exactly like one that does not exist. Role changes take effec
 
 * Sign-in with a password (scrypt-hashed), server-side sessions in `HttpOnly`, `SameSite=Strict` cookies,
   a CSRF token on every state-changing request, rate-limited login attempts and a strict Content-Security-Policy.
+  The limits count a sign-in attempt from the moment it starts (a burst of parallel requests gets no extra guesses), only a few
+  password checks run at once so that a flood cannot starve the game servers of memory, the current password is limited the same
+  way when it is changed, and someone who only knows the user name cannot lock the owner out of the address they always sign in from.
   The WebSocket verifies the browser's `Origin`.
 * Browsers share cookies between ports of the same host name, so other web apps on your Unraid host *could*
   see (not forge) this one's cookie; the cookie is therefore named uniquely and requests need the CSRF header.

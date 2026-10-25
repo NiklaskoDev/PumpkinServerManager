@@ -10,7 +10,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from pumpkin_manager.releases import GitHubReleaseSource, ReleaseError, asset_name_for_machine, build_id_for, parse_stable_tag
+from pumpkin_manager.releases import (
+    BadBuildError,
+    GitHubReleaseSource,
+    ReleaseError,
+    asset_name_for_machine,
+    build_id_for,
+    parse_stable_tag,
+)
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "github_releases.json").read_text(encoding="utf-8"))
 
@@ -159,3 +166,19 @@ async def test_download_rejects_checksum_mismatch_and_truncation(tmp_path):
     short.size = 5000  # server sent fewer bytes than announced
     with pytest.raises(ReleaseError, match="incomplete"):
         await src.download(short, tmp_path / "bin2")
+
+
+async def test_a_build_without_a_published_sha256_is_listed_but_never_downloaded(tmp_path):
+    gh = FakeGitHub()
+    for rel in gh.releases:
+        if rel["tag_name"] == "nightly":
+            for asset in rel["assets"]:
+                asset.pop("digest", None)  # GitHub gave no digest, and the release has no checksums file either
+    src = source_for(gh)
+    build = await src.latest("nightly")
+    assert not build.has_verifiable_digest and build.digest.startswith("unverified-"), "it can still be told apart from other builds"
+
+    gh.requests.clear()
+    with pytest.raises(BadBuildError, match="no SHA-256.*not downloaded"):
+        await src.download(build, tmp_path / "bin")
+    assert gh.requests == [] and not (tmp_path / "bin").exists(), "nothing that cannot be checked is fetched, let alone run"

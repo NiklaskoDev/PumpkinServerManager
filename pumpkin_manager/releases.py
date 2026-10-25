@@ -59,6 +59,11 @@ def asset_name_for_machine(machine: str | None = None) -> str:
     raise ReleaseError(f"Unsupported CPU architecture '{machine}': Pumpkin ships x86_64 and arm64 Linux builds only.")
 
 
+def has_sha256(digest: str) -> bool:
+    """Whether ``digest`` (with or without a ``sha256:`` prefix) is a real SHA-256, not the stand-in for "GitHub gave none"."""
+    return bool(_SHA256_RE.match(digest.split(":")[-1]))
+
+
 def build_id_for(tag: str, digest: str) -> str:
     safe_tag = re.sub(r"[^A-Za-z0-9._-]", "_", tag)
     return f"{safe_tag}-{digest.split(':')[-1][:12]}"
@@ -97,7 +102,7 @@ class RemoteBuild:
 
     @property
     def has_verifiable_digest(self) -> bool:
-        return bool(_SHA256_RE.match(self.digest))
+        return has_sha256(self.digest)
 
 
 class ReleaseSource(Protocol):
@@ -161,8 +166,13 @@ class GitHubReleaseSource:
         return build
 
     async def download(self, build: Any, dest: Path, progress: ProgressCallback | None = None) -> None:
-        """Stream ``build.download_url`` to ``dest``, verifying size and SHA-256 when known."""
-        digest_expected = build.digest.split(":")[-1] if _SHA256_RE.match(build.digest.split(":")[-1]) else None
+        """Stream ``build.download_url`` to ``dest``, verifying size and SHA-256. A build without a published SHA-256 is not
+        downloaded at all: the file is run as a program, so there must be something to check it against."""
+        if not has_sha256(build.digest):
+            raise BadBuildError(
+                f"GitHub published no SHA-256 for {build.tag} ({build.asset_name}), so the file cannot be checked and was not downloaded."
+            )
+        digest_expected = build.digest.split(":")[-1]
         hasher = hashlib.sha256()
         received = 0
         last_error: Exception | None = None
@@ -193,7 +203,7 @@ class GitHubReleaseSource:
             raise ReleaseError(f"Download failed: {last_error}") from last_error
         if build.size and received != build.size:
             raise ReleaseError(f"Download was incomplete ({received} of {build.size} bytes).")
-        if digest_expected and hasher.hexdigest() != digest_expected:
+        if hasher.hexdigest() != digest_expected:
             raise BadBuildError("Checksum mismatch: the downloaded file does not match the SHA-256 published by GitHub.")
 
     # ----------------------------------------------------------------- internals
@@ -220,7 +230,7 @@ class GitHubReleaseSource:
             digest = await self._digest_from_checksums(release, self.asset_name) or ""
         if not digest:
             seed = f"{asset['id']}:{asset.get('updated_at')}:{asset.get('size')}"
-            digest = "unverified-" + hashlib.sha1(seed.encode()).hexdigest()  # identity only, nothing to verify
+            digest = "unverified-" + hashlib.sha1(seed.encode()).hexdigest()  # identity only: download() refuses such a build
 
         version, mc_version = parse_stable_tag(tag) if channel == "stable" else (None, None)
         return RemoteBuild(

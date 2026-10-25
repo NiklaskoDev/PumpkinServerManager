@@ -77,6 +77,8 @@ async def change_password(
 ) -> dict:
     try:
         await get_ctx(request).auth.change_password(session, body.current, body.new)
+    except Throttled as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.retry_after)}) from exc
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     note = "chose a new password after signing in with a temporary one" if session.must_change else "changed their password"

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from jvmfakes import FakeInternet, FakeJava
 
 from pumpkin_manager.jvm.loaders import LoaderError, LoaderInstaller, LoaderSpec, find_launch, launch_arguments
-from pumpkin_manager.jvm.net import BadDownloadError
+from pumpkin_manager.jvm.net import BadDownloadError, DownloadError
 
 JAVA = "C:/java/bin/java"
 
@@ -105,6 +106,50 @@ async def test_an_installer_with_a_wrong_checksum_is_never_run(tmp_path):
     assert fake.calls == [] and not (tmp_path / "forge-installer.jar").exists()
 
 
+async def test_an_installer_without_any_published_checksum_is_not_even_downloaded(tmp_path):
+    net = FakeInternet()
+    net.maven_installer("forge", "1.20.1", "47.2.0", publish_checksum=False)
+    installer, fake, said = installer_for(net)
+    with pytest.raises(LoaderError, match="no published checksum"):
+        await installer.install(LoaderSpec("forge", "47.2.0", "1.20.1"), tmp_path, JAVA, said.append)
+    assert fake.calls == [] and not (tmp_path / "forge-installer.jar").exists()
+    assert not any(url.endswith("-installer.jar") for url in net.requests), "a program that cannot be checked is not fetched"
+
+
+async def test_an_older_installer_that_has_only_a_sha1_is_still_checked_and_installed(tmp_path):
+    net = FakeInternet()
+    net.maven_installer("forge", "1.12.2", "14.23.5.2860", sha1_only=True)
+    (tmp_path / ".legacy").write_text("")
+    installer, fake, said = installer_for(net)
+    assert await installer.install(LoaderSpec("forge", "14.23.5.2860", "1.12.2"), tmp_path, JAVA, said.append) == {"jar": "forge-1.12.2-14.23.5.2860.jar"}
+    assert fake.calls
+
+    wrong = FakeInternet()
+    wrong.maven_installer("forge", "1.12.2", "14.23.5.2860", sha1_only=True, wrong_checksum=True)
+    installer, fake, said = installer_for(wrong)
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(BadDownloadError, match="SHA1"):
+        await installer.install(LoaderSpec("forge", "14.23.5.2860", "1.12.2"), other, JAVA, said.append)
+    assert fake.calls == []
+
+
+async def test_an_installer_whose_checksum_cannot_be_fetched_is_not_downloaded(tmp_path):
+    net = FakeInternet()
+    net.maven_installer("neoforge", "1.21.1", "21.1.77")
+    url = "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.1.77/neoforge-21.1.77-installer.jar"
+
+    def broken(request):
+        raise httpx.ReadTimeout("simulated", request=request)
+
+    net.route(url + ".sha256", broken)
+    net.route(url + ".sha1", broken)
+    installer, fake, said = installer_for(net)
+    with pytest.raises(LoaderError, match="could not be fetched"):
+        await installer.install(LoaderSpec("neoforge", "21.1.77", "1.21.1"), tmp_path, JAVA, said.append)
+    assert fake.calls == [] and url not in net.requests
+
+
 async def test_a_loader_version_that_does_not_exist_is_explained(tmp_path):
     installer, fake, said = installer_for(FakeInternet())
     with pytest.raises(LoaderError, match="could not be downloaded"):
@@ -139,6 +184,16 @@ async def test_a_quilt_installer_that_does_not_match_the_repositorys_checksum_is
     with pytest.raises(BadDownloadError, match="SHA256"):
         await installer.install(LoaderSpec("quilt", "0.26.0", "1.21.1"), tmp_path, JAVA, said.append)
     assert fake.calls == [] and not list(tmp_path.glob("quilt-installer-*.jar"))
+
+
+async def test_a_quilt_installer_without_a_published_checksum_is_never_downloaded_or_run(tmp_path):
+    net = FakeInternet()
+    net.quilt("0.15.1", publish_checksum=False)
+    installer, fake, said = installer_for(net)
+    with pytest.raises(DownloadError, match="no published checksum"):
+        await installer.install(LoaderSpec("quilt", "0.26.0", "1.21.1"), tmp_path, JAVA, said.append)
+    assert fake.calls == [] and not list(tmp_path.glob("quilt-installer-*.jar"))
+    assert not any(url.endswith("quilt-installer-0.15.1.jar") for url in net.requests)
 
 
 def test_the_launch_command_is_found_from_what_is_on_disk(tmp_path):
